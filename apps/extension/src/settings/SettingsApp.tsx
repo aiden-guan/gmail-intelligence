@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { DEFAULT_SETTINGS, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
+import { AiConnect } from '../setup/AiConnect';
 
 const CATEGORIES: ThreadCategory[] = [
   'RESPOND',
@@ -18,6 +19,7 @@ export function SettingsApp() {
   const [coverage, setCoverage] = useState('');
 
   useEffect(() => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res) => {
       if (res?.settings) setSettings({ ...DEFAULT_SETTINGS, ...res.settings });
     });
@@ -33,6 +35,23 @@ export function SettingsApp() {
     setSettings((s) => ({ ...s, [key]: value }));
     setSaved(false);
   }
+
+  const patchSettings = useCallback((partial: Partial<ExtensionSettings>) => {
+    setSettings((current) => ({ ...current, ...partial }));
+    chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings: partial }, () => {
+      setSaved(true);
+    });
+  }, []);
+
+  const applySignedIn = useCallback((partial: Partial<ExtensionSettings>) => {
+    setSettings((current) => ({ ...current, ...partial }));
+    setSaved(true);
+  }, []);
+
+  useEffect(() => {
+    if (location.hash !== '#ai-setup') return;
+    document.getElementById('ai-setup')?.scrollIntoView({ block: 'start' });
+  }, []);
 
   function save() {
     chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings }, (res) => {
@@ -55,9 +74,13 @@ export function SettingsApp() {
         </div>
         <h1 className="mt-1 text-2xl font-semibold">Settings</h1>
         <p className="mt-2 text-sm text-[#5b6b7c]">
-          Tracking and AI inbox intelligence are separated. Mailbox contents never go to the tracker.
+          Sign in with ChatGPT or download a model. Mailbox contents never go to the tracker.
         </p>
       </header>
+
+      <Section title="AI">
+        <AiConnect settings={settings} onPatch={patchSettings} onSignedIn={applySignedIn} />
+      </Section>
 
       <Section title="Tracking">
         <Toggle
@@ -93,56 +116,6 @@ export function SettingsApp() {
             onChange={(e) => update('personalApiToken', e.target.value)}
           />
         </Field>
-      </Section>
-
-      <Section title="AI">
-        <Field label="Processing">
-          <select
-            className="field"
-            value={settings.aiMode}
-            onChange={(e) => update('aiMode', e.target.value as ExtensionSettings['aiMode'])}
-          >
-            <option value="disabled">Disabled</option>
-            <option value="remote">Remote provider</option>
-            <option value="local">Local provider</option>
-          </select>
-        </Field>
-        <Field label="Provider">
-          <select
-            className="field"
-            value={settings.aiProvider}
-            onChange={(e) =>
-              update('aiProvider', e.target.value as ExtensionSettings['aiProvider'])
-            }
-          >
-            <option value="openai">OpenAI</option>
-            <option value="openai-compatible">OpenAI-compatible</option>
-            <option value="ollama">Ollama / localhost</option>
-            <option value="anthropic">Anthropic (interface)</option>
-            <option value="gemini">Gemini (interface)</option>
-          </select>
-        </Field>
-        <Field label="Model">
-          <input className="field" value={settings.aiModel} onChange={(e) => update('aiModel', e.target.value)} />
-        </Field>
-        <Field label="Endpoint">
-          <input
-            className="field"
-            value={settings.aiEndpoint}
-            onChange={(e) => update('aiEndpoint', e.target.value)}
-          />
-        </Field>
-        <Field label="API key (stored in extension only)">
-          <input
-            className="field"
-            type="password"
-            value={settings.aiApiKey}
-            onChange={(e) => update('aiApiKey', e.target.value)}
-          />
-        </Field>
-        <p className="text-xs text-[#5b6b7c]">
-          Keys stay in chrome.storage.local / service worker. Never injected into MAIN world.
-        </p>
       </Section>
 
       <Section title="Inbox Agent">

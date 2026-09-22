@@ -91,27 +91,26 @@ Routes: `POST /api/emails`, `GET /api/emails/:id`, `GET /api/emails/:id/events`,
 2. Chrome → `chrome://extensions` → Developer mode → **Load unpacked**
 3. Select `apps/extension/dist`
 4. Open Gmail (`https://mail.google.com`)
-5. Open extension **Settings** → set tracker URL/token and (optional) AI provider
-6. Request optional host permissions when prompted for your AI/tracker domains
+5. Extension **Settings** opens on a fresh install. Sign in with ChatGPT, or download a model
+6. Optional: set the tracker URL and token, and grant host permission for a custom tracker domain
 
 ## AI configuration
 
 Settings → AI:
 
-- **Disabled** — tracking and local heuristics still work
-- **Remote** — OpenAI or OpenAI-compatible endpoint + API key + model
-- **Local** — Ollama (`http://127.0.0.1:11434/v1`) or similar
+- **ChatGPT account** — sign in on chatgpt.com with your own account. Requests use that plan’s message allowance. Inbox text is sent as a temporary chat, and the session stays in extension storage. It never goes to the tracker.
+- **On this computer** — Qwen2.5 0.5B (about 750 MB) and Qwen3 0.6B (about 880 MB) are listed for download. Nothing is stored until you download one, and Remove deletes those files. Chrome’s built-in Gemini Nano is a larger optional download for desktop Chrome 138+ with about 16 GB of memory and 22 GB of free disk.
+- **Off** — tracking and local heuristics still work
+- **API key or Ollama** — optional. Ollama uses `http://127.0.0.1:11434/v1`
 
-Anthropic/Gemini are typed interfaces; use OpenAI-compatible for production today.
-
-Grant optional host permission for your provider domain.
+Anthropic and Gemini API adapters are typed interfaces; use an OpenAI-compatible endpoint for those.
 
 ## Privacy
 
 | Data | Where |
 |------|--------|
 | Mailbox text, embeddings, drafts, rules | Local IndexedDB only |
-| AI prompts (when enabled) | Your chosen provider |
+| AI prompts (when ChatGPT or an API key is on) | That provider. A downloaded model keeps them on this computer |
 | Tracking metadata (subject, recipients, open/click events) | Your Worker + Supabase |
 | Raw IP | Never stored (hashed only) |
 | Service role / AI keys in content scripts | Never |

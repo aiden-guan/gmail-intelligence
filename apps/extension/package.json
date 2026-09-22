@@ -16,6 +16,7 @@
     "@gi/search": "*",
     "@gi/shared": "*",
     "@gi/tracking": "*",
+    "@huggingface/transformers": "^4.3.0",
     "@inboxsdk/core": "^2.2.18",
     "dexie": "^4.0.11",
     "react": "^19.0.0",

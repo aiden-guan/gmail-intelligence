@@ -1,4 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
+import { getLocalModel } from '@gi/ai';
+import { AiConnect } from '../setup/AiConnect';
 
 type AskResult = {
   answer?: string;
@@ -13,8 +16,22 @@ export function SidePanelApp() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AskResult | null>(null);
   const [coverage, setCoverage] = useState('');
+  const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_SETTINGS);
+
+  const patchSettings = useCallback((partial: Partial<ExtensionSettings>) => {
+    setSettings((current) => ({ ...current, ...partial }));
+    chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings: partial });
+  }, []);
+
+  const applySignedIn = useCallback((partial: Partial<ExtensionSettings>) => {
+    setSettings((current) => ({ ...current, ...partial }));
+  }, []);
 
   useEffect(() => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res?: { settings?: ExtensionSettings }) => {
+      if (res?.settings) setSettings({ ...DEFAULT_SETTINGS, ...res.settings });
+    });
     chrome.runtime.sendMessage({ type: 'RUN_DIAGNOSTICS' }, (d) => {
       if (d?.coverage) setCoverage(d.coverage);
     });
@@ -46,6 +63,32 @@ export function SidePanelApp() {
           </p>
         ) : null}
       </header>
+
+      {settings.aiMode === 'disabled' ? (
+        <div className="border-b border-[#d3dae2] bg-white p-3">
+          <AiConnect
+            compact
+            settings={settings}
+            onPatch={patchSettings}
+            onSignedIn={applySignedIn}
+          />
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3 border-b border-[#d3dae2] bg-white px-4 py-2 text-xs text-[#5b6b7c]">
+          <span>
+            {settings.aiProvider === 'chatgpt'
+              ? 'Using your ChatGPT plan'
+              : settings.aiProvider === 'local'
+                ? `Using ${getLocalModel(settings.aiModel)?.label ?? 'a downloaded model'} on this computer`
+                : settings.aiProvider === 'chrome'
+                  ? 'Using Chrome’s built-in model'
+                  : 'AI is on'}
+          </span>
+          <button className="text-[#1a73e8]" onClick={() => chrome.runtime.openOptionsPage()}>
+            Change
+          </button>
+        </div>
+      )}
 
       <div className="flex gap-2 border-b border-[#d3dae2] bg-white p-3">
         <input

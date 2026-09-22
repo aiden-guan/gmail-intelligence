@@ -10,12 +10,14 @@
     "scripting",
     "sidePanel",
     "tabs",
-    "activeTab"
+    "activeTab",
+    "offscreen"
   ],
   "host_permissions": [
     "https://mail.google.com/*",
     "http://127.0.0.1:8787/*",
-    "http://localhost:8787/*"
+    "http://localhost:8787/*",
+    "https://chatgpt.com/*"
   ],
   "optional_host_permissions": [
     "https://api.openai.com/*",
@@ -24,7 +26,11 @@
     "http://localhost:11434/*",
     "https://*.workers.dev/*",
     "https://generativelanguage.googleapis.com/*",
-    "https://api.anthropic.com/*"
+    "https://api.anthropic.com/*",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://cas-bridge.xethub.hf.co/*",
+    "https://*.hf.co/*"
   ],
   "background": {
     "service_worker": "background.js",

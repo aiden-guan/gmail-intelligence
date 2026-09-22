@@ -488,3 +488,32 @@ function sleep(ms: number): Promise<void> {
 
 export { NeedsReplyResultSchema };
 export type { NeedsReplyResult };
+export {
+  CHATGPT_CONVERSATION_URL,
+  CHATGPT_DEFAULT_MODEL,
+  CHATGPT_MODELS,
+  CHATGPT_SESSION_URL,
+  ChatGptAuthError,
+  ChatGptHttpError,
+  buildChatGptConversationBody,
+  decodeChatGptIdentity,
+  fetchChatGptWebSession,
+  isChatGptModel,
+  isChatGptSessionStale,
+  parseChatGptConversationSse,
+  requestChatGptText,
+  sessionFromChatGptAuth,
+} from './chatgpt.js';
+export type { ChatGptIdentity, ChatGptSession } from './chatgpt.js';
+export {
+  LOCAL_MODEL_ORIGINS,
+  LOCAL_MODELS,
+  formatDownloadSize,
+  getLocalModel,
+  localModelCacheName,
+  localModelIsDownloaded,
+  localModelWeightMarker,
+} from './local-models.js';
+export type { LocalModel } from './local-models.js';
+export { createPromptBackedProvider, extractJsonObject } from './prompt-provider.js';
+export type { PromptComplete } from './prompt-provider.js';

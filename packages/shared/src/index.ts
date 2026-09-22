@@ -211,6 +211,13 @@ export const RuntimeMessageSchema = z.discriminatedUnion('type', [
     text: z.string(),
     context: z.string().optional(),
   }),
+  z.object({ type: z.literal('CHATGPT_LOGIN') }),
+  z.object({ type: z.literal('CHATGPT_LOGOUT') }),
+  z.object({ type: z.literal('CHATGPT_STATUS') }),
+  z.object({
+    type: z.literal('LOCAL_MODEL_DOWNLOAD'),
+    modelId: z.string().min(1).max(64),
+  }),
 ]);
 export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
 
@@ -225,7 +232,7 @@ export type ExtensionSettings = {
   trackerBaseUrl: string;
   personalApiToken: string;
   aiMode: AiProcessingMode;
-  aiProvider: 'openai' | 'anthropic' | 'gemini' | 'openai-compatible' | 'ollama';
+  aiProvider: 'openai' | 'anthropic' | 'gemini' | 'openai-compatible' | 'ollama' | 'chatgpt' | 'chrome' | 'local';
   aiModel: string;
   aiEndpoint: string;
   aiApiKey: string;

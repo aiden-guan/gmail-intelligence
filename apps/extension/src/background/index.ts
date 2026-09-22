@@ -1,5 +1,13 @@
 import { AgentLoop } from '@gi/agent';
-import { AIJobQueue, createAIProvider } from '@gi/ai';
+import {
+  AIJobQueue,
+  CHATGPT_DEFAULT_MODEL,
+  ChatGptHttpError,
+  createAIProvider,
+  createPromptBackedProvider,
+  isChatGptModel,
+  requestChatGptText,
+} from '@gi/ai';
 import { WorkerTabController } from '@gi/gmail';
 import { getMailboxDb, MailboxIngestor, IndexJobRunner } from '@gi/mailbox';
 import {
@@ -15,6 +23,17 @@ import {
   type ExtensionSettings,
 } from '@gi/shared';
 import { TrackingClient, formatSentTrackingBadge } from '@gi/tracking';
+import {
+  forceRefreshChatGpt,
+  getChatGptAccess,
+  getChatGptPublicStatus,
+  installChatGptLoginListeners,
+  logoutChatGpt,
+  rememberChatGptError,
+  setChatGptSignedInHandler,
+  startChatGptLogin,
+} from './chatgpt-login';
+import { completeOnDevice, downloadOnDevice } from './on-device';
 
 const db = getMailboxDb();
 const queue = new AIJobQueue();
@@ -46,17 +65,69 @@ async function saveSettings(partial: Partial<ExtensionSettings>): Promise<Extens
 }
 
 function getAI() {
-  if (
-    settings.aiMode === 'disabled' ||
-    (!settings.aiApiKey && settings.aiProvider !== 'ollama')
-  ) {
-    return null;
+  if (settings.aiMode === 'disabled') return null;
+  if (settings.aiProvider === 'chatgpt') {
+    const model = isChatGptModel(settings.aiModel) ? settings.aiModel : CHATGPT_DEFAULT_MODEL;
+    return createPromptBackedProvider(
+      'chatgpt',
+      (system, user) => completeChatGpt(model, system, user),
+      { maxUserChars: 48_000 },
+    );
   }
+  if (settings.aiProvider === 'local') {
+    return createPromptBackedProvider(
+      'local',
+      (system, user) => completeOnDevice(settings.aiModel, system, user),
+      { maxUserChars: 4_000 },
+    );
+  }
+  if (settings.aiProvider === 'chrome') {
+    return createPromptBackedProvider(
+      'chrome',
+      (system, user) => completeOnDevice('gemini-nano', system, user),
+      { maxUserChars: 7_000 },
+    );
+  }
+  if (!settings.aiApiKey && settings.aiProvider !== 'ollama') return null;
   return createAIProvider(settings.aiProvider, {
     apiKey: settings.aiApiKey,
     model: settings.aiModel,
     endpoint: settings.aiEndpoint,
   });
+}
+
+async function completeChatGpt(model: string, system: string, user: string) {
+  const attempt = async () => {
+    const access = await getChatGptAccess();
+    return requestChatGptText({
+      accessToken: access.accessToken,
+      accountId: access.accountId,
+      model,
+      instructions: system,
+      input: user,
+    });
+  };
+  try {
+    const result = await attempt();
+    await rememberChatGptError(null);
+    return result;
+  } catch (error) {
+    if (error instanceof ChatGptHttpError && (error.status === 401 || error.status === 403)) {
+      try {
+        await forceRefreshChatGpt();
+        const result = await attempt();
+        await rememberChatGptError(null);
+        return result;
+      } catch (retryError) {
+        const message = retryError instanceof Error ? retryError.message : 'ChatGPT request failed';
+        await rememberChatGptError(message);
+        throw retryError;
+      }
+    }
+    const message = error instanceof Error ? error.message : 'ChatGPT request failed';
+    await rememberChatGptError(message);
+    throw error;
+  }
 }
 
 function rebuildAgent(): void {
@@ -212,6 +283,7 @@ async function runDiagnostics() {
     workerTab: workerTabs.getTabId() != null,
     indexedDb: true,
     aiProvider: settings.aiMode === 'disabled' ? 'disabled' : settings.aiProvider,
+    chatgpt: await getChatGptPublicStatus(),
     trackingBackend: Boolean(settings.trackerBaseUrl && settings.personalApiToken),
     lastGmailEvent: null as string | null,
     lastClassifierRun: agent?.getLastClassifierRun() ?? null,
@@ -246,9 +318,12 @@ async function pollTracking(): Promise<void> {
   }
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   await loadSettings();
   rebuildAgent();
+  if (details.reason === 'install') {
+    await chrome.runtime.openOptionsPage();
+  }
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
   chrome.alarms.create('tracking_poll', { periodInMinutes: 0.5 });
   chrome.alarms.create('reminder_tick', { periodInMinutes: 15 });
@@ -275,6 +350,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'LOCAL_MODEL_PROGRESS' || message?.type === 'LOCAL_MODEL_RELEASE') return false;
   void (async () => {
     await loadSettings();
     if (!agent) rebuildAgent();
@@ -547,6 +623,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await pollTracking();
         sendResponse({ ok: true });
         break;
+      case 'CHATGPT_LOGIN':
+        sendResponse(await startChatGptLogin());
+        break;
+      case 'CHATGPT_LOGOUT':
+        await logoutChatGpt();
+        if (settings.aiProvider === 'chatgpt') await saveSettings({ aiMode: 'disabled' });
+        sendResponse({ ok: true });
+        break;
+      case 'CHATGPT_STATUS':
+        sendResponse(await getChatGptPublicStatus());
+        break;
+      case 'LOCAL_MODEL_DOWNLOAD':
+        try {
+          await downloadOnDevice(msg.modelId);
+          sendResponse({ ok: true });
+        } catch (error) {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'Could not download the model.',
+          });
+        }
+        break;
       case 'WRITE_WITH_AI': {
         const ai = getAI();
         if (!ai) {
@@ -584,6 +682,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   })();
   return true;
 });
+
+setChatGptSignedInHandler(async () => {
+  const model = isChatGptModel(settings.aiModel) ? settings.aiModel : CHATGPT_DEFAULT_MODEL;
+  await saveSettings({
+    aiMode: 'remote',
+    aiProvider: 'chatgpt',
+    aiModel: model,
+  });
+});
+
+installChatGptLoginListeners();
 
 void loadSettings().then(() => rebuildAgent());
 

@@ -1,11 +1,23 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'node:path';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 
+function keepSingleOnnxWasm(): Plugin {
+  return {
+    name: 'keep-single-onnx-wasm',
+    generateBundle(_options, bundle) {
+      for (const name of Object.keys(bundle)) {
+        if (name.startsWith('assets/') && name.includes('ort-wasm')) delete bundle[name];
+      }
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
+    keepSingleOnnxWasm(),
     viteStaticCopy({
       targets: [
         { src: 'manifest.json', dest: '.' },
@@ -17,6 +29,14 @@ export default defineConfig({
         {
           src: '../../node_modules/@inboxsdk/core/background.js',
           dest: 'inboxsdk',
+        },
+        {
+          src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm',
+          dest: 'ort',
+        },
+        {
+          src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.mjs',
+          dest: 'ort',
         },
       ],
     }),
@@ -33,6 +53,7 @@ export default defineConfig({
         sidepanel: resolve(__dirname, 'src/sidepanel/index.html'),
         popup: resolve(__dirname, 'src/popup/index.html'),
         settings: resolve(__dirname, 'src/settings/index.html'),
+        offscreen: resolve(__dirname, 'offscreen.html'),
       },
       output: {
         entryFileNames: (chunk) => {
