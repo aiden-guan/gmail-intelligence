@@ -22,7 +22,13 @@ import {
   addBusinessDays,
   type ExtensionSettings,
 } from '@gi/shared';
-import { TrackingClient, formatSentTrackingBadge } from '@gi/tracking';
+import {
+  TrackingClient,
+  formatSentTrackingBadge,
+  summaryFromRemote,
+  type TrackedEmailSummary,
+} from '@gi/tracking';
+import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
 import {
   forceRefreshChatGpt,
   getChatGptAccess,
@@ -294,28 +300,73 @@ async function runDiagnostics() {
 
 async function pollTracking(): Promise<void> {
   if (!settings.trackingEnabled || !settings.trackerBaseUrl || !settings.personalApiToken) return;
+  const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
   try {
-    const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+    const remote = await client.listEmails(200);
+    const local = await readTrackedEmails();
+    const byId = new Map(local.map((email) => [email.trackingId, email]));
+    for (const row of remote) {
+      byId.set(row.tracking_id, summaryFromRemote(row, byId.get(row.tracking_id) || null));
+    }
+    await writeTrackedEmails([...byId.values()]);
+  } catch (e) {
+    console.warn('[gi] tracking list failed', e);
+  }
+  try {
+    await loadNotifiedEvents();
     const events = await client.getRecentEvents();
+    const local = await readTrackedEmails();
     for (const ev of events) {
       if (notifiedEventIds.has(ev.id)) continue;
       if (settings.hideSuspectedSelfOpens && ev.suspected_self_open) continue;
-      notifiedEventIds.add(ev.id);
+      if (!(await markEventNotified(ev.id))) continue;
       if (!settings.desktopNotifications) continue;
-      const title =
-        ev.type === 'OPEN'
-          ? 'Open detected on your email'
-          : 'Link click detected on your email';
+      const email = local.find((item) => item.trackingId === ev.tracking_id);
+      const who = email?.recipients.length === 1 ? email.recipients[0] : 'Someone';
+      const subject = email?.subject || 'your email';
       chrome.notifications.create(ev.id, {
         type: 'basic',
         iconUrl: 'icons/icon128.png',
-        title,
-        message: `${ev.type} · ${new Date(ev.timestamp).toLocaleString()}`,
+        title: ev.type === 'OPEN' ? 'Open detected' : 'Link click detected',
+        message:
+          ev.type === 'OPEN'
+            ? `${who} opened “${subject}”`
+            : `${who} clicked a link in “${subject}”`,
       });
     }
   } catch (e) {
     console.warn('[gi] tracking poll failed', e);
   }
+}
+
+async function loadNotifiedEvents(): Promise<void> {
+  const stored = await chrome.storage.session.get('notifiedEventIds');
+  const ids = stored.notifiedEventIds;
+  if (!Array.isArray(ids)) return;
+  for (const id of ids) {
+    if (typeof id === 'string') notifiedEventIds.add(id);
+  }
+}
+
+async function markEventNotified(id: string): Promise<boolean> {
+  if (notifiedEventIds.has(id)) return false;
+  notifiedEventIds.add(id);
+  const ids = [...notifiedEventIds].slice(-200);
+  await chrome.storage.session.set({ notifiedEventIds: ids });
+  return true;
+}
+
+async function ensureNoReplyReminder(email: TrackedEmailSummary): Promise<void> {
+  const due = addBusinessDays(new Date(), settings.reminderBusinessDays).getTime();
+  await db.reminders.put({
+    id: `trk_${email.trackingId}`,
+    threadId: email.gmailThreadId || `pending:${email.trackingId}`,
+    recipients: email.recipients,
+    lastOutgoingAt: Date.parse(email.sentAt) || Date.now(),
+    dueAt: due,
+    status: 'pending',
+    reason: `No reply yet from ${email.recipients[0] || 'recipient'}`,
+  });
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -405,10 +456,77 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         try {
           const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
           const created = await client.createEmail(message.input);
+          const input = message.input as {
+            subject?: string;
+            sender?: string;
+            recipients?: string[];
+            gmail_thread_id?: string;
+            gmail_message_id?: string;
+          };
+          await upsertTrackedEmail(
+            summaryFromRemote(
+              {
+                tracking_id: created.tracking_id,
+                subject: input.subject || '',
+                sender: input.sender || '',
+                recipients: input.recipients || [],
+                gmail_thread_id: input.gmail_thread_id ?? null,
+                gmail_message_id: input.gmail_message_id ?? null,
+                sent_at: new Date().toISOString(),
+                open_count: 0,
+                click_count: 0,
+              },
+              null,
+            ),
+          );
           sendResponse({ ok: true, ...created });
         } catch (e) {
           sendResponse({ error: String(e) });
         }
+        return;
+      }
+      if (message?.type === 'LINK_TRACKED_EMAIL') {
+        const trackingId = String(message.trackingId || '');
+        const gmailThreadId = message.gmailThreadId ? String(message.gmailThreadId) : null;
+        const gmailMessageId = message.gmailMessageId ? String(message.gmailMessageId) : null;
+        if (!trackingId) {
+          sendResponse({ error: 'missing_tracking_id' });
+          return;
+        }
+        const patch: Partial<TrackedEmailSummary> = {};
+        if (gmailThreadId) patch.gmailThreadId = gmailThreadId;
+        if (gmailMessageId) patch.gmailMessageId = gmailMessageId;
+        const updated = Object.keys(patch).length ? await patchTrackedEmail(trackingId, patch) : null;
+        if (updated?.notifyIfNoReply) await ensureNoReplyReminder(updated);
+        if (settings.trackerBaseUrl && settings.personalApiToken && (gmailThreadId || gmailMessageId)) {
+          try {
+            const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+            await client.linkEmail(trackingId, {
+              ...(gmailThreadId ? { gmail_thread_id: gmailThreadId } : {}),
+              ...(gmailMessageId ? { gmail_message_id: gmailMessageId } : {}),
+            });
+          } catch (e) {
+            console.warn('[gi] tracking link failed', e);
+          }
+        }
+        sendResponse({ ok: true, emails: await readTrackedEmails() });
+        return;
+      }
+      if (message?.type === 'GET_TRACKED_EMAILS') {
+        sendResponse({ emails: await readTrackedEmails() });
+        return;
+      }
+      if (message?.type === 'SET_NO_REPLY_NOTIFY') {
+        const trackingId = String(message.trackingId || '');
+        const enabled = Boolean(message.enabled);
+        const updated = await patchTrackedEmail(trackingId, { notifyIfNoReply: enabled });
+        if (!updated) {
+          sendResponse({ ok: false, emails: await readTrackedEmails() });
+          return;
+        }
+        if (enabled) await ensureNoReplyReminder(updated);
+        else await db.reminders.delete(`trk_${trackingId}`);
+        sendResponse({ ok: true, emails: await readTrackedEmails() });
         return;
       }
       if (message?.type === 'REMIND_THREAD') {
@@ -694,6 +812,10 @@ setChatGptSignedInHandler(async () => {
 
 installChatGptLoginListeners();
 
-void loadSettings().then(() => rebuildAgent());
+void loadSettings().then(async () => {
+  rebuildAgent();
+  chrome.alarms.create('tracking_poll', { periodInMinutes: 1 });
+  await pollTracking();
+});
 
 export { formatSentTrackingBadge };

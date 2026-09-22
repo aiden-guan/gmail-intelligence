@@ -9,11 +9,16 @@ import {
   type QueuedGmailAction,
 } from '@gi/gmail';
 import type { InboxSdkLike } from '@gi/gmail';
+import type { CreateTrackedEmailInput, CreateTrackedEmailResult, TrackedEmailSummary } from '@gi/tracking';
+import { attachSdkComposeTracking, installDomComposeTracking } from './compose-tracking';
+import { installSentStatus, type SentStatusController } from './sent-status';
 
 const BRIDGE_SOURCE = 'gi-main-world';
 const adapter = new CompositeGmailAdapter();
 let settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 let sdkReady = false;
+let sdkOwnsCompose = false;
+let sentStatus: SentStatusController | null = null;
 
 async function refreshSettings(): Promise<void> {
   try {
@@ -62,6 +67,13 @@ function setupSdkUi(sdk: InboxSdkLike): void {
         (typeof rowView.getThreadIDAsync === 'function'
           ? await rowView.getThreadIDAsync()
           : null);
+      const rowElement = typeof rowView.getElement === 'function' ? rowView.getElement() : null;
+      const threadRow =
+        rowElement?.closest?.('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]') || rowElement;
+      if (threadRow && typeof threadId === 'string') {
+        threadRow.setAttribute('data-gi-thread-id', threadId);
+        sentStatus?.paint();
+      }
       if (!threadId || typeof threadId !== 'string') return;
       chrome.runtime.sendMessage(
         { type: 'GET_THREAD_INTEL', threadId },
@@ -93,8 +105,23 @@ function setupSdkUi(sdk: InboxSdkLike): void {
   try {
     sdk.Compose.registerComposeViewHandler((composeView) => {
       addWriteWithAiButton(composeView);
-      addTrackingOnSend(composeView);
+      attachSdkComposeTracking(composeView, {
+        getSettings: () => settings,
+        refreshSettings,
+        createTracked,
+        linkTracked,
+        onSent: ({ subject, recipients, bodyText }) => {
+          chrome.runtime.sendMessage({
+            type: 'OUTGOING_COMPOSE',
+            subject,
+            recipients,
+            bodyText,
+            threadId: 'sent',
+          });
+        },
+      });
     });
+    sdkOwnsCompose = true;
   } catch {
     /* degrade */
   }
@@ -258,89 +285,38 @@ function addWriteWithAiButton(composeView: {
   });
 }
 
-function addTrackingOnSend(composeView: {
-  on?: (event: string, cb: (e?: { cancel?: () => void }) => void) => void;
-  send?: () => void;
-  getSubject?: () => string;
-  getToRecipients?: () => Array<{ emailAddress: string }>;
-  getBodyElement?: () => HTMLElement | null;
-  insertHTMLIntoBodyAtCursor?: (html: string) => void;
-}): void {
-  let trackingInjected = false;
-
-  // Inject pixel before send if tracking enabled — never block send permanently on failure
-  composeView.on?.('presending', (event) => {
-    if (trackingInjected) return;
-    void (async () => {
-      await refreshSettings();
-      if (!settings.trackingEnabled || !settings.trackerBaseUrl) return;
-      // Cancel this send, inject, then re-send once
-      event?.cancel?.();
-      try {
-        const { buildTrackingPixelHtml, shouldRewriteLink } = await import('@gi/tracking');
-        const subject = composeView.getSubject?.() || '';
-        const recipients = (composeView.getToRecipients?.() || []).map((r) => r.emailAddress);
-        const bodyEl = composeView.getBodyElement?.();
-        const links: Array<{ url: string }> = [];
-        if (settings.trackLinks && bodyEl) {
-          bodyEl.querySelectorAll('a[href]').forEach((a) => {
-            const href = a.getAttribute('href') || '';
-            if (shouldRewriteLink(href)) links.push({ url: href });
-          });
-        }
-        // API token stays in service worker
-        const created = (await chrome.runtime.sendMessage({
-          type: 'CREATE_TRACKED_EMAIL',
-          input: {
-            subject,
-            sender: 'me',
-            recipients,
-            links: settings.trackLinks ? links : [],
-          },
-        })) as {
-          ok?: boolean;
-          pixel_url?: string;
-          rewritten_links?: Array<{ original: string; tracked_url: string }>;
-          error?: string;
-        };
-        if (created?.ok && created.pixel_url) {
-          if (settings.trackOpens) {
-            composeView.insertHTMLIntoBodyAtCursor?.(buildTrackingPixelHtml(created.pixel_url));
-          }
-          if (settings.trackLinks && bodyEl && created.rewritten_links) {
-            for (const rl of created.rewritten_links) {
-              bodyEl.querySelectorAll(`a[href="${CSS.escape(rl.original)}"]`).forEach((a) => {
-                a.setAttribute('href', rl.tracked_url);
-              });
-            }
-          }
-        } else if (created?.error) {
-          console.warn('[gi] tracking create failed (send continues)', created.error);
-        }
-      } catch (e) {
-        console.warn('[gi] tracking injection failed (send continues)', e);
-      } finally {
-        trackingInjected = true;
-        try {
-          composeView.send?.();
-        } catch (e) {
-          console.warn('[gi] re-send after tracking failed', e);
-        }
+function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrackedEmailResult | null> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'CREATE_TRACKED_EMAIL', input }, (res) => {
+      if (chrome.runtime.lastError || !res?.ok || !res.tracking_id || !res.pixel_url) {
+        if (res?.error) console.warn('[gi] tracking create failed (send continues)', res.error);
+        resolve(null);
+        return;
       }
-    })();
-  });
-
-  composeView.on?.('sent', () => {
-    trackingInjected = false;
-    const body = composeView.getBodyElement?.()?.textContent || '';
-    chrome.runtime.sendMessage({
-      type: 'OUTGOING_COMPOSE',
-      subject: composeView.getSubject?.() || '',
-      recipients: (composeView.getToRecipients?.() || []).map((r) => r.emailAddress),
-      bodyText: body,
-      threadId: 'sent',
+      resolve({
+        tracking_id: res.tracking_id,
+        pixel_url: res.pixel_url,
+        rewritten_links: res.rewritten_links || [],
+      });
     });
   });
+}
+
+function linkTracked(link: {
+  trackingId: string;
+  gmailThreadId: string | null;
+  gmailMessageId: string | null;
+}): void {
+  chrome.runtime.sendMessage({
+    type: 'LINK_TRACKED_EMAIL',
+    trackingId: link.trackingId,
+    gmailThreadId: link.gmailThreadId,
+    gmailMessageId: link.gmailMessageId,
+  });
+}
+
+function rememberTrackedList(emails: TrackedEmailSummary[]): void {
+  sentStatus?.setEmails(emails);
 }
 
 function escapeHtml(s: string): string {
@@ -650,6 +626,34 @@ async function boot(): Promise<void> {
         });
       }
     }
+  });
+  sentStatus = installSentStatus({
+    trackerBaseUrl: settings.trackerBaseUrl,
+    onNotify: (trackingId, enabled) => {
+      chrome.runtime.sendMessage({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }, (res) => {
+        if (Array.isArray(res?.emails)) rememberTrackedList(res.emails);
+      });
+    },
+  });
+  installDomComposeTracking({
+    sdkOwnsCompose: () => sdkOwnsCompose,
+    getSettings: () => settings,
+    refreshSettings,
+    createTracked,
+    linkTracked,
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
+      settings = { ...settings, ...(changes.settings.newValue as ExtensionSettings) };
+      sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+    }
+    if (Array.isArray(changes.trackedEmails?.newValue)) {
+      rememberTrackedList(changes.trackedEmails.newValue as TrackedEmailSummary[]);
+    }
+  });
+  chrome.runtime.sendMessage({ type: 'GET_TRACKED_EMAILS' }, (res) => {
+    if (Array.isArray(res?.emails)) rememberTrackedList(res.emails);
   });
   await loadInboxSdk();
   setupCommandPalette();

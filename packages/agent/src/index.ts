@@ -195,16 +195,20 @@ export class AgentLoop {
   }
 
   async resolveReminderOnInbound(threadId: string): Promise<void> {
-    const rem = await this.deps.db.reminders.get(`rem_${threadId}`);
-    if (rem && rem.status === 'pending') {
+    const pending = await this.deps.db.reminders.where('threadId').equals(threadId).toArray();
+    let resolved = false;
+    for (const rem of pending) {
+      if (rem.status !== 'pending') continue;
       await this.deps.db.reminders.update(rem.id, { status: 'resolved' });
-      await this.deps.log({
-        type: 'reminder_resolved',
-        threadId,
-        detail: 'Inbound reply received',
-        tier: AgentSafetyTier.READ_ONLY,
-      });
+      resolved = true;
     }
+    if (!resolved) return;
+    await this.deps.log({
+      type: 'reminder_resolved',
+      threadId,
+      detail: 'Inbound reply received',
+      tier: AgentSafetyTier.READ_ONLY,
+    });
   }
 
   private async summarizeIfNeeded(input: {

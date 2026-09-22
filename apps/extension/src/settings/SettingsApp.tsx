@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { DEFAULT_SETTINGS, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
+import { trackerPermissionOrigin } from '@gi/tracking';
 import { AiConnect } from '../setup/AiConnect';
 
 const CATEGORIES: ThreadCategory[] = [
@@ -54,12 +55,20 @@ export function SettingsApp() {
   }, []);
 
   function save() {
-    chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings }, (res) => {
-      if (res?.settings) {
-        setSettings(res.settings);
-        setSaved(true);
-      }
-    });
+    const origin = trackerPermissionOrigin(settings.trackerBaseUrl);
+    const persist = () => {
+      chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings }, (res) => {
+        if (res?.settings) {
+          setSettings(res.settings);
+          setSaved(true);
+        }
+      });
+    };
+    if (origin && chrome.permissions?.request) {
+      chrome.permissions.request({ origins: [origin] }, () => persist());
+      return;
+    }
+    persist();
   }
 
   function runDiag() {
@@ -83,6 +92,15 @@ export function SettingsApp() {
       </Section>
 
       <Section title="Tracking">
+        <p className="text-xs text-[#5b6b7c]">
+          Sent mail gets a check beside each tracked message. Gray means it has not been opened.
+          Green means an open was detected. Click the check to see who opened it and when.
+        </p>
+        <p className="text-xs text-[#5b6b7c]">
+          The tracker URL has to be public. Gmail loads the tracking image from Google’s servers, so
+          a localhost URL cannot record recipient opens. For a local trial, run npm run tracker and
+          paste the URL and token from .local/tracker.txt, then Save settings.
+        </p>
         <Toggle
           label="Enable open/click tracking"
           checked={settings.trackingEnabled}

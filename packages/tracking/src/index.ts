@@ -99,11 +99,296 @@ export class TrackingClient {
     if (!res.ok) throw new Error(`tracking recent failed: ${res.status}`);
     return res.json() as Promise<TrackingEvent[]>;
   }
+
+  async listEmails(limit = 100): Promise<TrackedEmail[]> {
+    const res = await fetch(`${trim(this.baseUrl)}/api/emails?limit=${encodeURIComponent(String(limit))}`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`tracking list failed: ${res.status}`);
+    return res.json() as Promise<TrackedEmail[]>;
+  }
+
+  async linkEmail(
+    id: string,
+    patch: { gmail_thread_id?: string | null; gmail_message_id?: string | null },
+  ): Promise<TrackedEmail> {
+    const res = await fetch(`${trim(this.baseUrl)}/api/emails/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: this.headers(),
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error(`tracking link failed: ${res.status}`);
+    return res.json() as Promise<TrackedEmail>;
+  }
 }
 
-/** Build pixel HTML to inject into compose — does not send mail. */
+/**
+ * 1×1 image clients actually fetch.
+ * display:none and zero-size images are skipped by Gmail and several other clients.
+ */
 export function buildTrackingPixelHtml(pixelUrl: string): string {
-  return `<img src="${escapeAttr(pixelUrl)}" width="1" height="1" alt="" style="display:none!important;width:1px;height:1px;border:0;" />`;
+  const src = escapeAttr(pixelUrl);
+  return `<img src="${src}" width="1" height="1" alt="" border="0" referrerpolicy="no-referrer" style="width:1px;height:1px;border:0;outline:none;overflow:hidden;" />`;
+}
+
+export function appendTrackingPixel(html: string, pixelUrl: string): string {
+  if (!pixelUrl || html.includes(pixelUrl)) return html;
+  const tag = buildTrackingPixelHtml(pixelUrl);
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${tag}</body>`);
+  return `${html}${tag}`;
+}
+
+/** Href values that should be wrapped, as they appear in the HTML attribute. */
+export function extractHttpLinks(html: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const match of html.matchAll(/href=(["'])(.*?)\1/gi)) {
+    const raw = match[2] || '';
+    if (!shouldRewriteLink(decodeHtmlAttr(raw))) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    found.push(raw);
+  }
+  return found;
+}
+
+export function pairRewrittenLinks(
+  htmlHrefs: string[],
+  rewritten: Array<{ original: string; tracked_url: string }>,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const raw of htmlHrefs) {
+    const decoded = decodeHtmlAttr(raw);
+    const match = rewritten.find((link) => urlsEqual(link.original, decoded));
+    if (match?.tracked_url) map.set(raw, match.tracked_url);
+  }
+  return map;
+}
+
+export function applyTrackingToOutgoingHtml(
+  html: string,
+  opts: {
+    pixelUrl?: string | null;
+    linkMap?: Map<string, string>;
+    trackOpens: boolean;
+    trackLinks: boolean;
+  },
+): string {
+  let next = html;
+  if (opts.trackLinks && opts.linkMap && opts.linkMap.size > 0) {
+    next = rewriteHtmlLinks(next, opts.linkMap);
+  }
+  if (opts.trackOpens && opts.pixelUrl) next = appendTrackingPixel(next, opts.pixelUrl);
+  return next;
+}
+
+export type TrackedEmailSummary = {
+  trackingId: string;
+  subject: string;
+  sender: string;
+  recipients: string[];
+  gmailThreadId: string | null;
+  gmailMessageId: string | null;
+  sentAt: string;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  openCount: number;
+  clickCount: number;
+  notifyIfNoReply: boolean;
+};
+
+export function summaryFromRemote(
+  row: {
+    tracking_id: string;
+    subject: string;
+    sender: string;
+    recipients?: unknown;
+    gmail_thread_id?: string | null;
+    gmail_message_id?: string | null;
+    sent_at: string;
+    first_opened_at?: string | null;
+    last_opened_at?: string | null;
+    open_count?: number;
+    click_count?: number;
+  },
+  local?: TrackedEmailSummary | null,
+): TrackedEmailSummary {
+  return {
+    trackingId: row.tracking_id,
+    subject: row.subject || '',
+    sender: row.sender || '',
+    recipients: asStringList(row.recipients),
+    gmailThreadId: row.gmail_thread_id || local?.gmailThreadId || null,
+    gmailMessageId: row.gmail_message_id || local?.gmailMessageId || null,
+    sentAt: row.sent_at,
+    firstOpenedAt: row.first_opened_at ?? null,
+    lastOpenedAt: row.last_opened_at ?? null,
+    openCount: row.open_count || 0,
+    clickCount: row.click_count || 0,
+    notifyIfNoReply: local?.notifyIfNoReply ?? false,
+  };
+}
+
+export type TrackingRowQuery = {
+  threadIds: string[];
+  subject: string;
+  emails: string[];
+};
+
+/** Latest tracked send that belongs to this Gmail row. */
+export function matchTrackedEmail(
+  row: TrackingRowQuery,
+  emails: TrackedEmailSummary[],
+): TrackedEmailSummary | null {
+  const ids = new Set(row.threadIds.map((id) => id.trim()).filter(Boolean));
+  if (ids.size > 0) {
+    const byThread = emails.filter((email) => email.gmailThreadId && ids.has(email.gmailThreadId));
+    if (byThread.length > 0) return mostRecent(byThread);
+  }
+
+  const subject = normalizeSubject(row.subject);
+  const rowEmails = new Set(row.emails.map(normalizeEmail).filter(Boolean));
+  if (!subject || rowEmails.size === 0) return null;
+
+  const candidates = emails.filter((email) => {
+    if (email.gmailThreadId && ids.size > 0 && !ids.has(email.gmailThreadId)) return false;
+    if (normalizeSubject(email.subject) !== subject) return false;
+    return email.recipients.some((recipient) => rowEmails.has(normalizeEmail(recipient)));
+  });
+  return candidates.length > 0 ? mostRecent(candidates) : null;
+}
+
+export function normalizeSubject(subject: string): string {
+  let next = subject.replace(/\s+/g, ' ').trim();
+  let prev = '';
+  while (next !== prev) {
+    prev = next;
+    next = next.replace(/^(re|fw|fwd)\s*:\s*/i, '').trim();
+  }
+  return next.toLowerCase();
+}
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase().replace(/^mailto:/i, '');
+}
+
+export function isLoopbackTracker(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
+/** Origin pattern for chrome.permissions.request. Loopback is already granted. */
+export function trackerPermissionOrigin(baseUrl: string): string | null {
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    if (isLoopbackTracker(baseUrl)) return null;
+    return `${url.origin}/*`;
+  } catch {
+    return null;
+  }
+}
+
+export function trackingStatusLine(opts: {
+  trackingEnabled: boolean;
+  trackerBaseUrl: string;
+  personalApiToken: string;
+}): string | null {
+  if (!opts.trackingEnabled) return null;
+  if (!opts.trackerBaseUrl.trim() || !opts.personalApiToken.trim()) {
+    return 'Open tracking is off until a tracker URL and token are saved in Settings.';
+  }
+  if (isLoopbackTracker(opts.trackerBaseUrl)) {
+    return 'Open tracking is on. This tracker is on your computer, so recipient opens will not show until Settings uses a public URL.';
+  }
+  return 'Open tracking is on. A check appears beside sent mail after someone opens it.';
+}
+
+export type TrackingStatusCopy = {
+  opened: boolean;
+  emphasis: string | null;
+  rest: string;
+  headline: string;
+  detail: string;
+  countLabel: string;
+  loopbackWarning: string | null;
+};
+
+export function describeTrackingStatus(
+  email: TrackedEmailSummary,
+  opts?: { now?: number; trackerBaseUrl?: string },
+): TrackingStatusCopy {
+  const now = opts?.now ?? Date.now();
+  const opened = email.openCount > 0;
+  const clicked = email.clickCount > 0;
+  const engaged = opened || clicked;
+  const who = email.recipients.length === 1 ? email.recipients[0] : null;
+  const when = email.lastOpenedAt || email.firstOpenedAt;
+  const ago = when ? formatAgo(when, now) : 'recently';
+
+  let emphasis: string | null = who;
+  let rest: string;
+  if (opened && who) rest = ` opened your email ${ago}.`;
+  else if (opened) rest = `Someone opened your email ${ago}.`;
+  else if (clicked && who) rest = ` clicked a link ${ago}.`;
+  else if (clicked) rest = `Someone clicked a link ${ago}.`;
+  else if (who) rest = ' has not opened this email.';
+  else {
+    emphasis = null;
+    rest = 'No one has opened this email yet.';
+  }
+  if (!emphasis) rest = rest.replace(/^\s*/, '');
+  const headline = `${emphasis || ''}${rest}`.trim();
+
+  let detail = 'No open detected yet.';
+  if (opened && email.firstOpenedAt) {
+    detail = `First opened ${formatAfterSend(email.sentAt, email.firstOpenedAt)}.`;
+  } else if (clicked) {
+    detail = 'A link click was detected, which usually means the message was opened.';
+  }
+
+  let countLabel = 'Not opened yet';
+  if (opened && clicked) {
+    countLabel = `${openCountLabel(email.openCount)} · ${clickCountLabel(email.clickCount)}`;
+  } else if (opened) {
+    countLabel = openCountLabel(email.openCount);
+  } else if (clicked) {
+    countLabel = clickCountLabel(email.clickCount);
+  }
+
+  const loopback = Boolean(opts?.trackerBaseUrl && isLoopbackTracker(opts.trackerBaseUrl));
+  return {
+    opened: engaged,
+    emphasis,
+    rest,
+    headline,
+    detail,
+    countLabel,
+    loopbackWarning: loopback
+      ? 'Gmail loads tracking images from Google’s servers, which cannot reach this computer. Use a public tracker URL in Settings to record recipient opens.'
+      : null,
+  };
+}
+
+export function formatAgo(fromIso: string, now: number): string {
+  const delta = Math.max(0, now - Date.parse(fromIso));
+  return formatSpan(delta, true);
+}
+
+export function formatAfterSend(sentIso: string, openedIso: string): string {
+  const delta = Math.max(0, Date.parse(openedIso) - Date.parse(sentIso));
+  if (!Number.isFinite(delta)) return 'after you sent';
+  if (delta < 60_000) return 'less than a minute after you sent';
+  if (delta < 2 * 60_000) return 'a minute after you sent';
+  if (delta < 60 * 60_000) return `${Math.floor(delta / 60_000)} minutes after you sent`;
+  if (delta < 2 * 60 * 60_000) return 'an hour after you sent';
+  if (delta < 24 * 60 * 60_000) return `${Math.floor(delta / (60 * 60_000))} hours after you sent`;
+  if (delta < 2 * 24 * 60 * 60_000) return 'a day after you sent';
+  return `${Math.floor(delta / (24 * 60 * 60_000))} days after you sent`;
 }
 
 /**
@@ -166,4 +451,51 @@ function trim(s: string): string {
 }
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+function decodeHtmlAttr(s: string): string {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+function urlsEqual(a: string, b: string): boolean {
+  try {
+    return new URL(a).toString() === new URL(b).toString();
+  } catch {
+    return a === b;
+  }
+}
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+function mostRecent(emails: TrackedEmailSummary[]): TrackedEmailSummary {
+  return [...emails].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0))[0];
+}
+function formatSpan(delta: number, ago: boolean): string {
+  if (!Number.isFinite(delta)) return ago ? 'recently' : 'after you sent';
+  if (delta < 60_000) return ago ? 'less than a minute ago' : 'less than a minute';
+  if (delta < 2 * 60_000) return ago ? 'a minute ago' : 'a minute';
+  if (delta < 60 * 60_000) {
+    const minutes = Math.floor(delta / 60_000);
+    return ago ? `${minutes} minutes ago` : `${minutes} minutes`;
+  }
+  if (delta < 2 * 60 * 60_000) return ago ? 'an hour ago' : 'an hour';
+  if (delta < 24 * 60 * 60_000) {
+    const hours = Math.floor(delta / (60 * 60_000));
+    return ago ? `${hours} hours ago` : `${hours} hours`;
+  }
+  if (delta < 2 * 24 * 60 * 60_000) return ago ? 'yesterday' : 'a day';
+  const days = Math.floor(delta / (24 * 60 * 60_000));
+  return ago ? `${days} days ago` : `${days} days`;
+}
+function openCountLabel(count: number): string {
+  if (count === 1) return 'Opened once';
+  return `Opened ${count} times`;
+}
+function clickCountLabel(count: number): string {
+  if (count === 1) return '1 link click';
+  return `${count} link clicks`;
 }

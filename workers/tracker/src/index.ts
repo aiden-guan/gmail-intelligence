@@ -1,19 +1,26 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { safeRedirectUrl, suspectSelfOpen } from './helpers.js';
+import { getStore, StoreError, type EmailRow, type TrackerStore } from './store.js';
 
 export { safeRedirectUrl, suspectSelfOpen } from './helpers.js';
 
 export interface Env {
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-  PERSONAL_API_TOKEN: string;
+  SUPABASE_URL?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  PERSONAL_API_TOKEN?: string;
 }
 
 const TRANSPARENT_GIF = Uint8Array.from(
   atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'),
   (c) => c.charCodeAt(0),
 );
+
+const PatchEmailSchema = z
+  .object({
+    gmail_thread_id: z.string().max(128).nullable().optional(),
+    gmail_message_id: z.string().max(128).nullable().optional(),
+  })
+  .strict();
 
 const CreateEmailSchema = z.object({
   subject: z.string().max(998),
@@ -23,12 +30,6 @@ const CreateEmailSchema = z.object({
   gmail_message_id: z.string().max(128).optional(),
   links: z.array(z.object({ url: z.string().url() })).max(50).optional(),
 });
-
-function db(env: Env): SupabaseClient {
-  return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-}
 
 function requireAuth(req: Request, env: Env): Response | null {
   const auth = req.headers.get('Authorization') || '';
@@ -68,19 +69,25 @@ function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
+function storeFailure(err: unknown): Response | null {
+  if (err instanceof StoreError) return json({ error: err.message }, 500);
+  return null;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    const store = getStore(env);
 
     try {
       // Public pixel
       if (request.method === 'GET' && path.startsWith('/open/')) {
-        return handleOpen(path.slice('/open/'.length), request, env);
+        return handleOpen(path.slice('/open/'.length), request, env, store);
       }
       // Public click
       if (request.method === 'GET' && path.startsWith('/c/')) {
-        return handleClick(path.slice('/c/'.length), request, env);
+        return handleClick(path.slice('/c/'.length), request, env, store);
       }
 
       // Private management
@@ -89,40 +96,52 @@ export default {
         if (denied) return denied;
 
         if (request.method === 'POST' && path === '/api/emails') {
-          return handleCreateEmail(request, env, url.origin);
+          return handleCreateEmail(request, env, url.origin, store);
+        }
+        if (request.method === 'GET' && path === '/api/emails') {
+          return handleListEmails(url, store);
+        }
+        if (request.method === 'PATCH' && path.startsWith('/api/emails/')) {
+          return handlePatchEmail(path.slice('/api/emails/'.length), request, store);
         }
         if (request.method === 'GET' && path.startsWith('/api/emails/') && path.endsWith('/events')) {
           const id = path.slice('/api/emails/'.length, -'/events'.length);
-          return handleGetEvents(id, env);
+          return handleGetEvents(id, store);
         }
         if (request.method === 'GET' && path.startsWith('/api/emails/')) {
           const id = path.slice('/api/emails/'.length);
-          return handleGetEmail(id, env);
+          return handleGetEmail(id, store);
         }
         if (request.method === 'GET' && path === '/api/events/recent') {
-          return handleRecentEvents(env);
+          return handleRecentEvents(store);
         }
       }
 
       if (path === '/health') {
-        return json({ ok: true });
+        return json({ ok: true, store: store.kind });
       }
 
       return json({ error: 'not_found' }, 404);
     } catch (err) {
+      const failed = storeFailure(err);
+      if (failed) return failed;
       console.error(err);
       return json({ error: 'internal' }, 500);
     }
   },
 };
 
-async function handleCreateEmail(request: Request, env: Env, origin: string): Promise<Response> {
+async function handleCreateEmail(
+  request: Request,
+  _env: Env,
+  origin: string,
+  store: TrackerStore,
+): Promise<Response> {
   const body = CreateEmailSchema.parse(await request.json());
   const tracking_id = newId('trk');
-  const supabase = db(env);
   const sent_at = new Date().toISOString();
 
-  const { error } = await supabase.from('tracked_emails').insert({
+  const email: EmailRow = {
     tracking_id,
     subject: body.subject,
     sender: body.sender,
@@ -130,17 +149,22 @@ async function handleCreateEmail(request: Request, env: Env, origin: string): Pr
     gmail_thread_id: body.gmail_thread_id ?? null,
     gmail_message_id: body.gmail_message_id ?? null,
     sent_at,
+    first_opened_at: null,
+    last_opened_at: null,
     open_count: 0,
+    first_clicked_at: null,
+    last_clicked_at: null,
     click_count: 0,
-  });
-  if (error) return json({ error: error.message }, 500);
+    created_at: sent_at,
+  };
+  await store.insertEmail(email);
 
   const rewritten_links: Array<{ click_id: string; original: string; tracked_url: string }> = [];
   for (const link of body.links || []) {
     const safe = safeRedirectUrl(link.url);
     if (!safe) continue;
     const click_id = newId('clk');
-    await supabase.from('tracked_links').insert({
+    await store.insertLink({
       click_id,
       tracking_id,
       destination: safe,
@@ -159,56 +183,60 @@ async function handleCreateEmail(request: Request, env: Env, origin: string): Pr
   });
 }
 
-async function handleGetEmail(id: string, env: Env): Promise<Response> {
+async function handleGetEmail(id: string, store: TrackerStore): Promise<Response> {
   if (!id || id.length > 80) return json({ error: 'bad_id' }, 400);
-  const supabase = db(env);
-  const { data, error } = await supabase
-    .from('tracked_emails')
-    .select('*')
-    .eq('tracking_id', id)
-    .maybeSingle();
-  if (error) return json({ error: error.message }, 500);
+  const data = await store.getEmail(id);
   if (!data) return json({ error: 'not_found' }, 404);
   return json(data);
 }
 
-async function handleGetEvents(id: string, env: Env): Promise<Response> {
+async function handleListEmails(url: URL, store: TrackerStore): Promise<Response> {
+  const raw = Number(url.searchParams.get('limit') || '100');
+  const limit = Number.isFinite(raw) ? Math.min(200, Math.max(1, Math.floor(raw))) : 100;
+  return json(await store.listEmails(limit));
+}
+
+async function handlePatchEmail(
+  id: string,
+  request: Request,
+  store: TrackerStore,
+): Promise<Response> {
+  if (!id || id.length > 80 || id.includes('/') || !/^[\w-]+$/.test(id)) {
+    return json({ error: 'bad_id' }, 400);
+  }
+  const parsed = PatchEmailSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) return json({ error: 'bad_request' }, 400);
+  const existing = await store.getEmail(id);
+  if (!existing) return json({ error: 'not_found' }, 404);
+  const patch: Partial<EmailRow> = {};
+  if (parsed.data.gmail_thread_id !== undefined) patch.gmail_thread_id = parsed.data.gmail_thread_id;
+  if (parsed.data.gmail_message_id !== undefined) patch.gmail_message_id = parsed.data.gmail_message_id;
+  if (Object.keys(patch).length > 0) await store.updateEmail(id, patch);
+  return json(await store.getEmail(id));
+}
+
+async function handleGetEvents(id: string, store: TrackerStore): Promise<Response> {
   if (!id || id.length > 80) return json({ error: 'bad_id' }, 400);
-  const supabase = db(env);
-  const { data, error } = await supabase
-    .from('tracking_events')
-    .select('*')
-    .eq('tracking_id', id)
-    .order('timestamp', { ascending: false })
-    .limit(200);
-  if (error) return json({ error: error.message }, 500);
-  return json(data || []);
+  return json(await store.listEvents(id));
 }
 
-async function handleRecentEvents(env: Env): Promise<Response> {
-  const supabase = db(env);
-  const { data, error } = await supabase
-    .from('tracking_events')
-    .select('*')
-    .order('timestamp', { ascending: false })
-    .limit(50);
-  if (error) return json({ error: error.message }, 500);
-  return json(data || []);
+async function handleRecentEvents(store: TrackerStore): Promise<Response> {
+  return json(await store.recentEvents());
 }
 
-async function handleOpen(trackingId: string, request: Request, env: Env): Promise<Response> {
-  // Always return GIF immediately path — record best-effort
+async function handleOpen(
+  trackingId: string,
+  request: Request,
+  env: Env,
+  store: TrackerStore,
+): Promise<Response> {
+  // Always return the GIF. Recording is best-effort.
   if (!trackingId || trackingId.length > 80 || !/^[\w-]+$/.test(trackingId)) {
     return gifResponse();
   }
 
   try {
-    const supabase = db(env);
-    const { data: email } = await supabase
-      .from('tracked_emails')
-      .select('tracking_id, sent_at, open_count')
-      .eq('tracking_id', trackingId)
-      .maybeSingle();
+    const email = await store.getEmail(trackingId);
 
     if (email) {
       const ua = request.headers.get('User-Agent');
@@ -221,7 +249,7 @@ async function handleOpen(trackingId: string, request: Request, env: Env): Promi
       const self = suspectSelfOpen({ sentAt: email.sent_at, now, ua });
       const ts = new Date(now).toISOString();
 
-      await supabase.from('tracking_events').insert({
+      await store.insertEvent({
         id: newId('evt'),
         tracking_id: trackingId,
         type: 'OPEN',
@@ -233,14 +261,12 @@ async function handleOpen(trackingId: string, request: Request, env: Env): Promi
       });
 
       const open_count = (email.open_count || 0) + 1;
-      const patch: Record<string, unknown> = {
+      const patch: Partial<EmailRow> = {
         open_count,
         last_opened_at: ts,
       };
-      if (open_count === 1) {
-        patch.first_opened_at = ts;
-      }
-      await supabase.from('tracked_emails').update(patch).eq('tracking_id', trackingId);
+      if (open_count === 1) patch.first_opened_at = ts;
+      await store.updateEmail(trackingId, patch);
     }
   } catch (e) {
     console.error('open record failed', e);
@@ -249,18 +275,17 @@ async function handleOpen(trackingId: string, request: Request, env: Env): Promi
   return gifResponse();
 }
 
-async function handleClick(clickId: string, request: Request, env: Env): Promise<Response> {
+async function handleClick(
+  clickId: string,
+  request: Request,
+  env: Env,
+  store: TrackerStore,
+): Promise<Response> {
   if (!clickId || clickId.length > 80 || !/^[\w-]+$/.test(clickId)) {
     return json({ error: 'bad_id' }, 400);
   }
 
-  const supabase = db(env);
-  const { data: link } = await supabase
-    .from('tracked_links')
-    .select('*')
-    .eq('click_id', clickId)
-    .maybeSingle();
-
+  const link = await store.getLink(clickId);
   if (!link) return json({ error: 'not_found' }, 404);
 
   const destination = safeRedirectUrl(link.destination);
@@ -275,7 +300,7 @@ async function handleClick(clickId: string, request: Request, env: Env): Promise
     const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
     const ts = new Date().toISOString();
 
-    await supabase.from('tracking_events').insert({
+    await store.insertEvent({
       id: newId('evt'),
       tracking_id: link.tracking_id,
       type: 'CLICK',
@@ -288,21 +313,14 @@ async function handleClick(clickId: string, request: Request, env: Env): Promise
       confidence: 0.5,
     });
 
-    const { data: email } = await supabase
-      .from('tracked_emails')
-      .select('click_count')
-      .eq('tracking_id', link.tracking_id)
-      .maybeSingle();
-
+    const email = await store.getEmail(link.tracking_id);
     const click_count = (email?.click_count || 0) + 1;
-    const patch: Record<string, unknown> = {
+    const patch: Partial<EmailRow> = {
       click_count,
       last_clicked_at: ts,
     };
-    if (click_count === 1) {
-      patch.first_clicked_at = ts;
-    }
-    await supabase.from('tracked_emails').update(patch).eq('tracking_id', link.tracking_id);
+    if (click_count === 1) patch.first_clicked_at = ts;
+    await store.updateEmail(link.tracking_id, patch);
   } catch (e) {
     console.error('click record failed', e);
   }
