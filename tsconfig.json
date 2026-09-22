@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/gmail" },
+    { "path": "./packages/mailbox" },
+    { "path": "./packages/ai" },
+    { "path": "./packages/search" },
+    { "path": "./packages/agent" },
+    { "path": "./packages/tracking" },
+    { "path": "./apps/extension" },
+    { "path": "./workers/tracker" }
+  ]
+}

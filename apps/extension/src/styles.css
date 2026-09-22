@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --gi-bg: #f6f7f8;
+  --gi-ink: #141b22;
+  --gi-muted: #5b6b7c;
+  --gi-line: #d3dae2;
+  --gi-accent: #1a73e8;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  background: var(--gi-bg);
+  color: var(--gi-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--gi-accent);
+  outline-offset: 1px;
+}

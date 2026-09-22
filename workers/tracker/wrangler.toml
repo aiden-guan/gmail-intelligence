@@ -1,0 +1,11 @@
+name = "gi-tracker"
+main = "src/index.ts"
+compatibility_date = "2025-03-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# Non-secret defaults only. Put secrets via `wrangler secret put`.
+# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PERSONAL_API_TOKEN
+
+[dev]
+port = 8787

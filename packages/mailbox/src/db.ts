@@ -1,0 +1,77 @@
+import Dexie, { type Table } from 'dexie';
+import type {
+  AccountRow,
+  AgentActionRow,
+  AgentRuleRow,
+  ClassificationRow,
+  ContactRow,
+  DraftRow,
+  EmbeddingRow,
+  MessageRow,
+  ModelCacheRow,
+  ReminderRow,
+  SearchDocumentRow,
+  SettingsRow,
+  StyleExampleRow,
+  SummaryRow,
+  SyncStateRow,
+  ThreadRow,
+} from './types.js';
+
+/**
+ * Local mailbox store — IndexedDB via Dexie.
+ * Mailbox contents MUST NOT use chrome.storage.local.
+ * Mailbox contents MUST NEVER be sent to the tracking backend.
+ */
+export class MailboxDatabase extends Dexie {
+  accounts!: Table<AccountRow, string>;
+  threads!: Table<ThreadRow, string>;
+  messages!: Table<MessageRow, string>;
+  contacts!: Table<ContactRow, string>;
+  thread_classifications!: Table<ClassificationRow, string>;
+  thread_summaries!: Table<SummaryRow, string>;
+  draft_suggestions!: Table<DraftRow, string>;
+  reminders!: Table<ReminderRow, string>;
+  agent_actions!: Table<AgentActionRow, string>;
+  agent_rules!: Table<AgentRuleRow, string>;
+  search_documents!: Table<SearchDocumentRow, string>;
+  embeddings!: Table<EmbeddingRow, string>;
+  model_cache!: Table<ModelCacheRow, string>;
+  style_examples!: Table<StyleExampleRow, string>;
+  settings!: Table<SettingsRow, string>;
+  sync_state!: Table<SyncStateRow, string>;
+
+  constructor(name = 'gi_mailbox_v1') {
+    super(name);
+    this.version(1).stores({
+      accounts: 'id, email',
+      threads: 'threadId, accountId, latestTimestamp, classification, contentFingerprint, requiresResponse, awaitingResponse',
+      messages: 'messageId, threadId, accountId, timestamp, fingerprint',
+      contacts: '[accountId+email], email, lastSeenAt',
+      thread_classifications: 'threadId, category, fingerprint, createdAt',
+      thread_summaries: 'threadId, fingerprint, createdAt',
+      draft_suggestions: 'id, threadId, fingerprint, createdAt',
+      reminders: 'id, threadId, status, dueAt',
+      agent_actions: 'id, threadId, createdAt, type',
+      agent_rules: 'id, enabled, createdAt',
+      search_documents: 'id, threadId, fingerprint, timestamp',
+      embeddings: 'fingerprint, model, createdAt',
+      model_cache: 'key, createdAt',
+      style_examples: 'id, createdAt',
+      settings: 'key',
+      sync_state: 'key',
+    });
+  }
+}
+
+let singleton: MailboxDatabase | null = null;
+
+export function getMailboxDb(name?: string): MailboxDatabase {
+  if (name) return new MailboxDatabase(name);
+  if (!singleton) singleton = new MailboxDatabase();
+  return singleton;
+}
+
+export function resetMailboxDbForTests(): void {
+  singleton = null;
+}

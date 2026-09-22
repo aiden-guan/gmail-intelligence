@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "outDir": "dist-types",
+    "rootDir": "src",
+    "composite": true,
+    "types": ["chrome", "vite/client"],
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/gmail" },
+    { "path": "../../packages/mailbox" },
+    { "path": "../../packages/ai" },
+    { "path": "../../packages/search" },
+    { "path": "../../packages/agent" },
+    { "path": "../../packages/tracking" }
+  ]
+}
