@@ -12,12 +12,22 @@ type ModelSession = {
   destroy: () => void;
 };
 
+type ChromeModelOptions = {
+  expectedInputs?: Array<{ type: 'text'; languages: string[] }>;
+  expectedOutputs?: Array<{ type: 'text'; languages: string[] }>;
+  monitor?: (monitor: EventTarget) => void;
+  initialPrompts?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+};
+
+/** Chrome rejects LanguageModel calls that omit a supported output language. */
+export const chromeModelOptions: ChromeModelOptions = {
+  expectedInputs: [{ type: 'text', languages: ['en'] }],
+  expectedOutputs: [{ type: 'text', languages: ['en'] }],
+};
+
 type ModelFactory = {
-  availability: () => Promise<OnDeviceAvailability>;
-  create: (options?: {
-    monitor?: (monitor: EventTarget) => void;
-    initialPrompts?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
-  }) => Promise<ModelSession>;
+  availability: (options?: ChromeModelOptions) => Promise<OnDeviceAvailability>;
+  create: (options?: ChromeModelOptions) => Promise<ModelSession>;
 };
 
 const HARDWARE_HINT =
@@ -37,7 +47,7 @@ export async function getOnDeviceAvailability(): Promise<OnDeviceAvailability> {
   const model = getLanguageModel();
   if (!model) return 'unsupported';
   try {
-    const status = await model.availability();
+    const status = await model.availability(chromeModelOptions);
     if (
       status === 'available' ||
       status === 'downloadable' ||
@@ -59,6 +69,7 @@ export function startOnDeviceDownload(onProgress: (fraction: number) => void): P
   let pending: Promise<ModelSession>;
   try {
     pending = model.create({
+      ...chromeModelOptions,
       monitor(monitor) {
         monitor.addEventListener('downloadprogress', (event) => {
           onProgress(progressFraction(event as DownloadEvent));
@@ -96,11 +107,12 @@ export function onDeviceUnavailableMessage(status: OnDeviceAvailability): string
 async function runPrompt(system: string, user: string): Promise<string> {
   const model = getLanguageModel();
   if (!model) throw new Error(HARDWARE_HINT);
-  const availability = await model.availability();
+  const availability = await model.availability(chromeModelOptions);
   if (availability !== 'available') {
     throw new Error('Download the on-device model in Settings.');
   }
   const session = await model.create({
+    ...chromeModelOptions,
     initialPrompts: system ? [{ role: 'system', content: system }] : undefined,
   });
   try {

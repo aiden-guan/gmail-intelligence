@@ -14,9 +14,24 @@ function keepSingleOnnxWasm(): Plugin {
   };
 }
 
+/** Extension pages reject CORS module loads (`crossorigin`) and absolute `/assets` URLs. */
+function extensionPages(): Plugin {
+  return {
+    name: 'extension-pages',
+    transformIndexHtml(html) {
+      return html.replace(/<script\b[^>]*>|<link\b[^>]*>/gi, (tag) => {
+        if (/^<link\b/i.test(tag) && /https?:/i.test(tag)) return tag;
+        return tag.replace(/ crossorigin(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?/g, '');
+      });
+    },
+  };
+}
+
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
+    extensionPages(),
     keepSingleOnnxWasm(),
     viteStaticCopy({
       targets: [
@@ -45,6 +60,7 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: true,
+    modulePreload: false,
     rollupOptions: {
       input: {
         background: resolve(__dirname, 'src/background/index.ts'),
