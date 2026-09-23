@@ -18,7 +18,8 @@ export const CHATGPT_MODELS = [
 
 const AUTH_CLAIM = 'https://api.openai.com/auth';
 const PROFILE_CLAIM = 'https://api.openai.com/profile';
-const TOKEN_REFRESH_SKEW_MS = 60_000;
+/** ChatGPT web refreshes a bearer once it is inside this window. */
+const TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 
 export type ChatGptSession = {
   accessToken: string;
@@ -73,11 +74,12 @@ export function decodeChatGptIdentity(accessToken: string): ChatGptIdentity {
     const auth = asRecord(payload[AUTH_CLAIM]);
     const profile = asRecord(payload[PROFILE_CLAIM]);
     const exp = payload.exp;
+    const expSeconds = typeof exp === 'number' ? exp : typeof exp === 'string' ? Number(exp) : Number.NaN;
     return {
       accountId: asString(auth?.chatgpt_account_id),
       email: asString(profile?.email),
       planType: asString(auth?.chatgpt_plan_type),
-      expiresAtMs: typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : null,
+      expiresAtMs: Number.isFinite(expSeconds) ? expSeconds * 1000 : null,
     };
   } catch {
     return empty;
@@ -100,9 +102,8 @@ export function sessionFromChatGptAuth(json: unknown, now = Date.now()): ChatGpt
   const identity = decodeChatGptIdentity(accessToken);
   const expiresField = asString(record?.expires);
   const parsedExpires = expiresField ? Date.parse(expiresField) : Number.NaN;
-  const expiresAtMs = Number.isFinite(parsedExpires)
-    ? parsedExpires
-    : (identity.expiresAtMs ?? now + 10 * 60 * 1000);
+  const sessionExpiresAtMs = Number.isFinite(parsedExpires) ? parsedExpires : null;
+  const expiresAtMs = earlierExpiry(identity.expiresAtMs, sessionExpiresAtMs) ?? now + 10 * 60 * 1000;
   return {
     accessToken,
     expiresAtMs,
@@ -128,6 +129,41 @@ export async function fetchChatGptWebSession(
   }
   if (!response.ok) return null;
   return sessionFromChatGptAuth(await response.json(), now);
+}
+
+function earlierExpiry(tokenExp: number | null, sessionExp: number | null): number | null {
+  if (tokenExp != null && sessionExp != null) return Math.min(tokenExp, sessionExp);
+  return tokenExp ?? sessionExp;
+}
+
+export function buildChatGptConversationRequest(input: {
+  accessToken: string;
+  accountId: string;
+  model: string;
+  instructions: string;
+  input: string;
+}): { url: string; headers: Record<string, string>; body: string } {
+  const body = buildChatGptConversationBody({
+    model: input.model,
+    instructions: input.instructions,
+    input: input.input,
+    messageId: crypto.randomUUID(),
+    parentMessageId: crypto.randomUUID(),
+  });
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${input.accessToken}`,
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  };
+  if (input.accountId) headers['ChatGPT-Account-ID'] = input.accountId;
+  return { url: CHATGPT_CONVERSATION_URL, headers, body: JSON.stringify(body) };
+}
+
+export function chatGptTextFromHttp(status: number, raw: string): { text: string; usage?: UsageStats } {
+  if (status !== 200 && status !== 201) {
+    throw new ChatGptHttpError(status, publicHttpError(status, raw));
+  }
+  return parseChatGptConversationSse(raw);
 }
 
 export function buildChatGptConversationBody(input: {
@@ -173,35 +209,19 @@ export async function requestChatGptText(
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ text: string; usage?: UsageStats }> {
-  const body = buildChatGptConversationBody({
-    model: input.model,
-    instructions: input.instructions,
-    input: input.input,
-    messageId: crypto.randomUUID(),
-    parentMessageId: crypto.randomUUID(),
-  });
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${input.accessToken}`,
-    'Content-Type': 'application/json',
-    Accept: 'text/event-stream',
-  };
-  if (input.accountId) headers['ChatGPT-Account-ID'] = input.accountId;
-
+  const request = buildChatGptConversationRequest(input);
   let response: Response;
   try {
-    response = await fetchImpl(CHATGPT_CONVERSATION_URL, {
+    response = await fetchImpl(request.url, {
       method: 'POST',
       credentials: 'include',
-      headers,
-      body: JSON.stringify(body),
+      headers: request.headers,
+      body: request.body,
     });
   } catch {
     throw new ChatGptHttpError(0, 'Could not reach ChatGPT.');
   }
 
-  if (response.status === 401 || response.status === 403) {
-    throw new ChatGptHttpError(response.status, 'ChatGPT session expired. Sign in again.');
-  }
   if (!response.ok) {
     throw new ChatGptHttpError(response.status, publicHttpError(response.status, await response.text()));
   }
@@ -263,10 +283,17 @@ async function readBoundedBody(response: Response): Promise<string> {
 
 function publicHttpError(status: number, body: string): string {
   if (status === 429) return 'rate_limited';
-  if (status === 401 || status === 403) return 'ChatGPT session expired. Sign in again.';
   const detail = clipPublic(body);
   if (/sentinel|turnstile|proof of work|proof-token/i.test(detail)) {
     return 'ChatGPT could not verify this browser session. Open chatgpt.com, sign in, and try again.';
+  }
+  if (status === 401 || (status === 403 && /unauthorized|access token|expired/i.test(detail))) {
+    return 'ChatGPT session expired. Sign in again.';
+  }
+  if (status === 403) {
+    return detail
+      ? `ChatGPT rejected the request: ${detail}`
+      : 'ChatGPT rejected the request. Open chatgpt.com and try again.';
   }
   if (status === 404 || /model/i.test(detail)) {
     return 'That ChatGPT model is not available on this account. Pick another model in Settings.';

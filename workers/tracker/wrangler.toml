@@ -4,8 +4,8 @@ compatibility_date = "2025-03-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-# Non-secret defaults only. Put secrets via `wrangler secret put`.
-# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PERSONAL_API_TOKEN
+# Non-secret defaults only. Secrets go in .dev.vars locally, or `wrangler secret put` when deploying.
+# With SUPABASE_URL unset, `wrangler dev` stores events in memory.
 
 [dev]
 port = 8787

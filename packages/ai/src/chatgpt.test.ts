@@ -54,7 +54,7 @@ describe('ChatGPT plan session', () => {
       email: 'me@example.com',
       planType: 'plus',
       source: 'chatgpt-web',
-      expiresAtMs: Date.parse('2030-01-01T00:00:00.000Z'),
+      expiresAtMs: 1_800_000_000_000,
     });
     expect(session).not.toHaveProperty('refreshToken');
   });
@@ -62,7 +62,20 @@ describe('ChatGPT plan session', () => {
   it('ignores a session payload without an access token', () => {
     expect(sessionFromChatGptAuth({})).toBeNull();
     expect(isChatGptSessionStale(Date.now() + 10 * 60 * 1000)).toBe(false);
+    expect(isChatGptSessionStale(Date.now() + 4 * 60 * 1000)).toBe(true);
     expect(isChatGptSessionStale(Date.now())).toBe(true);
+  });
+
+  it('treats the sooner of the token and the session clock as the deadline', () => {
+    const access = fakeJwt({
+      exp: 1_800_000_000,
+      'https://api.openai.com/auth': { chatgpt_account_id: 'acct_123', chatgpt_plan_type: 'plus' },
+    });
+    const session = sessionFromChatGptAuth({
+      accessToken: access,
+      expires: '2026-01-01T00:00:00.000Z',
+    });
+    expect(session?.expiresAtMs).toBe(Date.parse('2026-01-01T00:00:00.000Z'));
   });
 
   it('loads the session from chatgpt.com', async () => {
@@ -137,6 +150,38 @@ describe('ChatGPT plan conversation', () => {
     expect(body.model).toBe('auto');
     expect(body.history_and_training_disabled).toBe(true);
     expect(String(init.body)).not.toMatch(/codex/i);
+  });
+
+  it('keeps a browser-check failure distinct from an expired session', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"detail":"sentinel proof required"}', { status: 403 }));
+    await expect(
+      requestChatGptText(
+        {
+          accessToken: 'access',
+          accountId: 'acct_123',
+          model: 'auto',
+          instructions: 'Be brief.',
+          input: 'Hello',
+        },
+        fetchImpl as typeof fetch,
+      ),
+    ).rejects.toThrow(/verify this browser session/);
+  });
+
+  it('reports an unauthorized conversation call as an expired session', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"detail":"Unauthorized"}', { status: 401 }));
+    await expect(
+      requestChatGptText(
+        {
+          accessToken: 'access',
+          accountId: 'acct_123',
+          model: 'auto',
+          instructions: 'Be brief.',
+          input: 'Hello',
+        },
+        fetchImpl as typeof fetch,
+      ),
+    ).rejects.toThrow('ChatGPT session expired. Sign in again.');
   });
 });
 

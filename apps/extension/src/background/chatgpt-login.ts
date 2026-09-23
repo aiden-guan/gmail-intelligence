@@ -1,9 +1,14 @@
 import {
   ChatGptAuthError,
+  ChatGptHttpError,
+  buildChatGptConversationRequest,
+  chatGptTextFromHttp,
+  decodeChatGptIdentity,
   fetchChatGptWebSession,
   isChatGptSessionStale,
   sessionFromChatGptAuth,
   type ChatGptSession,
+  type UsageStats,
 } from '@gi/ai';
 
 const SESSION_KEY = 'chatgptSession';
@@ -35,8 +40,13 @@ type PageSession = {
 };
 
 let refreshLock: Promise<ChatGptSession> | null = null;
+let tabLock: Promise<number> | null = null;
+let lastRefreshAt = 0;
+let pageTabId: number | null = null;
 let onSignedIn: ((session: { email: string | null; planType: string | null }) => Promise<void>) | null =
   null;
+
+const REFRESH_COOLDOWN_MS = 60_000;
 
 export function setChatGptSignedInHandler(
   handler: (session: { email: string | null; planType: string | null }) => Promise<void>,
@@ -50,6 +60,7 @@ export function installChatGptLoginListeners(): void {
     void tryCompleteLogin(tabId);
   });
   chrome.tabs.onRemoved.addListener((tabId) => {
+    if (pageTabId === tabId) pageTabId = null;
     void abandonIfPending(tabId);
   });
 }
@@ -112,12 +123,45 @@ export async function getChatGptAccess(): Promise<{ accessToken: string; account
   if (!isChatGptSessionStale(session.expiresAtMs)) {
     return { accessToken: session.accessToken, accountId: session.accountId };
   }
+  if (Date.now() - lastRefreshAt < REFRESH_COOLDOWN_MS) {
+    return { accessToken: session.accessToken, accountId: session.accountId };
+  }
   const next = await refreshSession();
   return { accessToken: next.accessToken, accountId: next.accountId };
 }
 
 export async function forceRefreshChatGpt(): Promise<void> {
+  lastRefreshAt = 0;
   await refreshSession();
+}
+
+export async function sendChatGptConversation(input: {
+  model: string;
+  instructions: string;
+  input: string;
+}): Promise<{ text: string; usage?: UsageStats }> {
+  const access = await getChatGptAccess();
+  const request = buildChatGptConversationRequest({
+    accessToken: access.accessToken,
+    accountId: access.accountId,
+    model: input.model,
+    instructions: input.instructions,
+    input: input.input,
+  });
+  const tabId = await ensureChatGptTab();
+  let injected: { result?: { status: number; text: string } } | undefined;
+  try {
+    [injected] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: postChatGptInPage,
+      args: [request.url, request.headers, request.body],
+    });
+  } catch {
+    throw new ChatGptHttpError(0, 'Could not reach ChatGPT. Open chatgpt.com and try again.');
+  }
+  const result = injected?.result;
+  if (!result) throw new ChatGptHttpError(0, 'Could not reach ChatGPT. Open chatgpt.com and try again.');
+  return chatGptTextFromHttp(result.status, result.text);
 }
 
 async function tryCompleteLogin(tabId: number): Promise<void> {
@@ -172,10 +216,33 @@ function readChatGptSessionInPage(): Promise<PageSession | null> {
 }
 
 async function storeSession(session: ChatGptSession): Promise<void> {
+  lastRefreshAt = 0;
   await chrome.storage.local.set({ [SESSION_KEY]: session });
   await chrome.storage.local.remove(LAST_ERROR_KEY);
   await onSignedIn?.({ email: session.email, planType: session.planType });
   await broadcastLogin({ ok: true, email: session.email, planType: session.planType });
+}
+
+function postChatGptInPage(
+  url: string,
+  headers: Record<string, string>,
+  body: string,
+): Promise<{ status: number; text: string }> {
+  const nextHeaders = { ...headers };
+  const device = document.cookie.match(/(?:^|; )oai-did=([^;]+)/);
+  if (device?.[1] && !nextHeaders['OAI-Device-Id']) {
+    nextHeaders['OAI-Device-Id'] = decodeURIComponent(device[1]);
+  }
+  if (!nextHeaders['OAI-Language']) nextHeaders['OAI-Language'] = navigator.language || 'en-US';
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: nextHeaders,
+    body,
+  }).then(async (response) => {
+    const text = await response.text();
+    return { status: response.status, text: text.slice(0, 2_000_000) };
+  });
 }
 
 async function refreshSession(): Promise<ChatGptSession> {
@@ -184,19 +251,113 @@ async function refreshSession(): Promise<ChatGptSession> {
       const current = await readSession();
       if (!current) throw new Error('Sign in with ChatGPT in Settings.');
       try {
-        const next = await fetchChatGptWebSession();
-        if (!next) {
+        const fromPage = await readSessionFromPage();
+        if (fromPage === 'unavailable') {
+          const fallback = await fetchChatGptWebSession();
+          if (!fallback) {
+            throw new ChatGptAuthError('Could not reach ChatGPT to refresh the sign-in. Try again.', false);
+          }
+          lastRefreshAt = Date.now();
+          await chrome.storage.local.set({ [SESSION_KEY]: fallback });
+          return fallback;
+        }
+        if (!fromPage) {
           await chrome.storage.local.remove(SESSION_KEY);
           throw new ChatGptAuthError('ChatGPT sign-in expired. Sign in again.', true);
         }
-        await chrome.storage.local.set({ [SESSION_KEY]: next });
-        return next;
+        lastRefreshAt = Date.now();
+        await chrome.storage.local.set({ [SESSION_KEY]: fromPage });
+        return fromPage;
       } finally {
         refreshLock = null;
       }
     })();
   }
   return refreshLock;
+}
+
+async function readSessionFromPage(): Promise<ChatGptSession | null | 'unavailable'> {
+  try {
+    const tabId = await ensureChatGptTab();
+    const [injected] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readChatGptSessionInPage,
+    });
+    return sessionFromChatGptAuth(injected?.result ?? null);
+  } catch {
+    return 'unavailable';
+  }
+}
+
+async function ensureChatGptTab(): Promise<number> {
+  if (!tabLock) {
+    tabLock = openChatGptTab().finally(() => {
+      tabLock = null;
+    });
+  }
+  return tabLock;
+}
+
+async function openChatGptTab(): Promise<number> {
+  const pending = await readPending();
+  if (pageTabId != null && pageTabId !== pending?.tabId) {
+    try {
+      const tab = await chrome.tabs.get(pageTabId);
+      if (tab.id != null && !tab.discarded && tab.url?.startsWith('https://chatgpt.com/')) {
+        if (tab.status !== 'complete') await waitUntilComplete(tab.id);
+        return tab.id;
+      }
+    } catch {
+      pageTabId = null;
+    }
+  }
+
+  const open = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+  const existing = open.find((tab) => tab.id != null && !tab.discarded && tab.id !== pending?.tabId);
+  if (existing?.id != null) {
+    pageTabId = existing.id;
+    if (existing.status !== 'complete') await waitUntilComplete(existing.id);
+    return existing.id;
+  }
+
+  const created = await chrome.tabs.create({ url: LOGIN_URL, active: false });
+  if (created.id == null) throw new Error('Could not open ChatGPT.');
+  pageTabId = created.id;
+  try {
+    await waitUntilComplete(created.id);
+  } catch (error) {
+    await chrome.tabs.remove(created.id).catch(() => undefined);
+    if (pageTabId === created.id) pageTabId = null;
+    throw error;
+  }
+  return created.id;
+}
+
+function waitUntilComplete(tabId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(new Error('ChatGPT did not finish loading.'));
+    }, 20_000);
+    const onUpdated = (id: number, info: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+      if (id !== tabId || info.status !== 'complete') return;
+      if (!tab.url?.startsWith('https://chatgpt.com/')) return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    void chrome.tabs.get(tabId).then(
+      (tab) => {
+        if (tab.status === 'complete' && tab.url?.startsWith('https://chatgpt.com/')) {
+          clearTimeout(timer);
+          chrome.tabs.onUpdated.removeListener(onUpdated);
+          resolve();
+        }
+      },
+      () => undefined,
+    );
+  });
 }
 
 async function abandonIfPending(tabId: number): Promise<void> {
@@ -240,9 +401,13 @@ function asSession(value: unknown): ChatGptSession | null {
   if (!value || typeof value !== 'object') return null;
   const session = value as Partial<ChatGptSession>;
   if (session.source !== 'chatgpt-web' || !session.accessToken) return null;
+  const storedExpiry = session.expiresAtMs ?? 0;
+  const tokenExpiry = decodeChatGptIdentity(session.accessToken).expiresAtMs;
+  const expiresAtMs =
+    tokenExpiry != null && storedExpiry > 0 ? Math.min(tokenExpiry, storedExpiry) : (tokenExpiry ?? storedExpiry);
   return {
     accessToken: session.accessToken,
-    expiresAtMs: session.expiresAtMs ?? 0,
+    expiresAtMs,
     accountId: session.accountId ?? '',
     email: session.email ?? null,
     planType: session.planType ?? null,

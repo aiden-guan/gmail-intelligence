@@ -12,13 +12,14 @@ Thanks for helping improve Gmail Intelligence.
 
 ## Dev setup
 
+Node.js 20 or newer.
+
 ```bash
-npm install
+npm run setup
 npm test
-npm run typecheck
-npm run lint
-npm run build
 ```
+
+`npm run dev` rebuilds the extension while you edit. Click **Reload** on `chrome://extensions` after each rebuild. `npm run tracker` starts a local open/click tracker with no cloud account.
 
 ## Packages
 

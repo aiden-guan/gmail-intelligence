@@ -1,0 +1,9 @@
+# Copy to .dev.vars (npm run setup does this) or fill in by hand.
+# `npm run tracker` reads this file. It is gitignored once copied.
+
+PERSONAL_API_TOKEN=generate-a-long-random-token
+
+# Leave these commented to keep events in memory for local testing.
+# They reset when the tracker process stops.
+# SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+# SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-never-in-extension

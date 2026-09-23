@@ -496,6 +496,8 @@ export {
   ChatGptAuthError,
   ChatGptHttpError,
   buildChatGptConversationBody,
+  buildChatGptConversationRequest,
+  chatGptTextFromHttp,
   decodeChatGptIdentity,
   fetchChatGptWebSession,
   isChatGptModel,

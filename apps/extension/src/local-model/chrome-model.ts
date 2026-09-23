@@ -15,6 +15,8 @@ type ModelSession = {
 type ChromeModelOptions = {
   expectedInputs?: Array<{ type: 'text'; languages: string[] }>;
   expectedOutputs?: Array<{ type: 'text'; languages: string[] }>;
+  /** Older Chrome builds read this instead of expectedOutputs. */
+  outputLanguage?: string;
   monitor?: (monitor: EventTarget) => void;
   initialPrompts?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
 };
@@ -23,6 +25,7 @@ type ChromeModelOptions = {
 export const chromeModelOptions: ChromeModelOptions = {
   expectedInputs: [{ type: 'text', languages: ['en'] }],
   expectedOutputs: [{ type: 'text', languages: ['en'] }],
+  outputLanguage: 'en',
 };
 
 type ModelFactory = {
