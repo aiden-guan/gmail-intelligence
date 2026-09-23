@@ -17,7 +17,8 @@
     "https://mail.google.com/*",
     "http://127.0.0.1:8787/*",
     "http://localhost:8787/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://*.convex.site/*"
   ],
   "optional_host_permissions": [
     "https://api.openai.com/*",
@@ -44,7 +45,7 @@
     }
   ],
   "action": {
-    "default_popup": "src/popup/index.html",
+    "default_popup": "popup.html",
     "default_title": "Gmail Intelligence",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -53,10 +54,10 @@
     }
   },
   "side_panel": {
-    "default_path": "src/sidepanel/index.html"
+    "default_path": "sidepanel.html"
   },
   "options_ui": {
-    "page": "src/settings/index.html",
+    "page": "settings.html",
     "open_in_tab": true
   },
   "icons": {

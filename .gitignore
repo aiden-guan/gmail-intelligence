@@ -6,7 +6,9 @@ build/
 .coverage/
 coverage/
 .env
+.local/
 .env.local
+apps/extension/public/tracker-config.json
 .env.*.local
 .DS_Store
 *.log

@@ -59,7 +59,27 @@ const workerTabs = new WorkerTabController({
 async function loadSettings(): Promise<ExtensionSettings> {
   const stored = await chrome.storage.local.get('settings');
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings as Partial<ExtensionSettings> | undefined) };
+  await applyBundledTracker();
   return settings;
+}
+
+async function applyBundledTracker(): Promise<void> {
+  if (settings.trackerBaseUrl.trim() && settings.personalApiToken.trim()) return;
+  try {
+    const response = await fetch(chrome.runtime.getURL('tracker-config.json'));
+    if (!response.ok) return;
+    const config = (await response.json()) as { trackerBaseUrl?: string; personalApiToken?: string };
+    if (!config.trackerBaseUrl?.startsWith('https://') || !config.personalApiToken) return;
+    await saveSettings({
+      trackingEnabled: true,
+      trackOpens: true,
+      trackLinks: true,
+      trackerBaseUrl: config.trackerBaseUrl.replace(/\/$/, ''),
+      personalApiToken: config.personalApiToken,
+    });
+  } catch {
+    /* No machine-local tracker config is bundled. */
+  }
 }
 
 async function saveSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
@@ -429,15 +449,15 @@ async function pollTracking(): Promise<void> {
       const email = local.find((item) => item.trackingId === ev.tracking_id);
       const who = email?.recipients.length === 1 ? email.recipients[0] : 'Someone';
       const subject = email?.subject || 'your email';
-      chrome.notifications.create(ev.id, {
+      void Promise.resolve(chrome.notifications.create(ev.id, {
         type: 'basic',
-        iconUrl: 'icons/icon128.png',
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
         title: ev.type === 'OPEN' ? 'Open detected' : 'Link click detected',
         message:
           ev.type === 'OPEN'
             ? `${who} opened “${subject}”`
             : `${who} clicked a link in “${subject}”`,
-      });
+      })).catch(() => undefined);
     }
   } catch (e) {
     console.warn('[gi] tracking poll failed', e);
@@ -497,12 +517,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     for (const r of due) {
       if (r.dueAt <= now) {
         await db.reminders.update(r.id, { status: 'fired' });
-        chrome.notifications.create(`rem_${r.id}`, {
+        void Promise.resolve(chrome.notifications.create(`rem_${r.id}`, {
           type: 'basic',
-          iconUrl: 'icons/icon128.png',
+          iconUrl: chrome.runtime.getURL('icons/icon128.png'),
           title: 'Follow-up reminder',
           message: r.reason,
-        });
+        })).catch(() => undefined);
       }
     }
   }

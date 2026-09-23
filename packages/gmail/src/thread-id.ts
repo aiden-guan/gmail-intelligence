@@ -14,18 +14,19 @@ function asPromise<T>(value: T | Promise<T>): Promise<T> {
  */
 export async function resolveThreadId(view: ThreadIdView | null | undefined): Promise<string | null> {
   if (!view) return null;
+  // InboxSDK warns if getThreadID is touched. Use the async method whenever it exists.
+  if (typeof view.getThreadIDAsync === 'function') {
+    try {
+      const asyncId = await asPromise(view.getThreadIDAsync());
+      if (typeof asyncId === 'string' && asyncId.trim()) return asyncId.trim();
+    } catch {
+      return null;
+    }
+  }
   try {
     if (typeof view.getThreadID === 'function') {
       const sync = await asPromise(view.getThreadID());
       if (typeof sync === 'string' && sync.trim()) return sync.trim();
-    }
-  } catch {
-    /* try the async method */
-  }
-  try {
-    if (typeof view.getThreadIDAsync === 'function') {
-      const asyncId = await asPromise(view.getThreadIDAsync());
-      if (typeof asyncId === 'string' && asyncId.trim()) return asyncId.trim();
     }
   } catch {
     return null;

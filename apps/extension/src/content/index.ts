@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS } from '@gi/shared';
 import {
   CompositeGmailAdapter,
   findNotice,
+  resolveThreadId,
   findThreadRows,
   normalizeOpenedThread,
   normalizeVisibleRow,
@@ -33,20 +34,42 @@ let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
 let currentThreadId: string | null = null;
 
-async function refreshSettings(): Promise<void> {
+function runtimeAlive(): boolean {
   try {
-    const res = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })) as { settings?: ExtensionSettings };
-    if (res?.settings) settings = res.settings;
+    return Boolean(chrome.runtime?.id);
   } catch {
-    /* settings stay at the last known value */
+    return false;
   }
+}
+
+function send<T>(message: unknown): Promise<T | undefined> {
+  if (!runtimeAlive()) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    try {
+      const pending = chrome.runtime.sendMessage(message, (response) => {
+        if (!runtimeAlive() || chrome.runtime.lastError) {
+          resolve(undefined);
+          return;
+        }
+        resolve(response as T);
+      });
+      void Promise.resolve(pending).catch(() => resolve(undefined));
+    } catch {
+      resolve(undefined);
+    }
+  });
+}
+
+async function refreshSettings(): Promise<void> {
+  const res = await send<{ settings?: ExtensionSettings }>({ type: 'GET_SETTINGS' });
+  if (res?.settings) settings = res.settings;
 }
 
 async function tryLoadInboxSdk(): Promise<InboxSdkLike | null> {
   const appId = settings.inboxSdkAppId.trim();
   if (!appId) return null;
   try {
-    await chrome.runtime.sendMessage({ type: 'ENSURE_INBOXSDK_PAGEWORLD' }).catch(() => undefined);
+    await send({ type: 'ENSURE_INBOXSDK_PAGEWORLD' });
     const mod = await import('@inboxsdk/core');
     const loader = (mod as { load?: (version: number, appId: string, opts?: { appName?: string }) => Promise<unknown> }).load;
     if (!loader) return null;
@@ -63,7 +86,7 @@ function reportRuntime(lastAction?: { success: boolean; action: string; reason?:
   const rowsOk = diagnostics.find((item) => item.key === 'threadRow')?.found;
   const threadOk = diagnostics.find((item) => item.key === 'openThread')?.found;
   const onList = /#(inbox|search|sent|starred)/i.test(location.hash);
-  chrome.runtime.sendMessage({
+  void send({
     type: 'REPORT_RUNTIME',
     runtime: {
       connected: true,
@@ -76,7 +99,7 @@ function reportRuntime(lastAction?: { success: boolean; action: string; reason?:
       currentThreadId,
       lastAction: lastAction ? { ...lastAction, at: Date.now() } : undefined,
     },
-  }).catch(() => undefined);
+  });
 }
 
 async function boot(): Promise<void> {
@@ -93,14 +116,14 @@ async function boot(): Promise<void> {
     if (event.type === 'VISIBLE_ROWS_CHANGED') {
       const threads = event.rows.map((row) => normalizeVisibleRow(row, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom'));
       if (threads.length) {
-        chrome.runtime.sendMessage({ type: 'INGEST_THREADS', direction: 'inbound', threads });
+        void send({ type: 'INGEST_THREADS', direction: 'inbound', threads });
         void paintVisibleChips(threads.map((thread) => thread.threadId));
       }
     }
     if (event.type === 'THREAD_OPENED' || event.type === 'THREAD_DATA_UPDATED') {
       currentThreadId = event.thread.threadId;
       const thread = normalizeOpenedThread(event.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
-      chrome.runtime.sendMessage({ type: 'INGEST_THREAD', direction: 'inbound', thread });
+      void send({ type: 'INGEST_THREAD', direction: 'inbound', thread });
       if (!sdkReady) showDomThreadPanel(event.thread.threadId);
     }
     if (event.type === 'COMPOSE_OPENED') {
@@ -116,7 +139,7 @@ async function boot(): Promise<void> {
   sentStatus = installSentStatus({
     trackerBaseUrl: settings.trackerBaseUrl,
     onNotify: (trackingId, enabled) => {
-      chrome.runtime.sendMessage({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }, (res) => {
+      void send<{ emails?: TrackedEmailSummary[] }>({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }).then((res) => {
         if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
       });
     },
@@ -135,7 +158,7 @@ async function boot(): Promise<void> {
       void refreshThread(threadId);
     }
   });
-  chrome.runtime.sendMessage({ type: 'GET_TRACKED_EMAILS' }, (res) => {
+  void send<{ emails?: TrackedEmailSummary[] }>({ type: 'GET_TRACKED_EMAILS' }).then((res) => {
     if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
   });
   setupCommandPalette();
@@ -149,7 +172,7 @@ function trackingDeps() {
     createTracked,
     linkTracked,
     onSent: ({ subject, recipients, bodyText }: { subject: string; recipients: string[]; bodyText: string }) => {
-      chrome.runtime.sendMessage({ type: 'OUTGOING_COMPOSE', subject, recipients, bodyText, threadId: currentThreadId || 'sent' });
+      void send({ type: 'OUTGOING_COMPOSE', subject, recipients, bodyText, threadId: currentThreadId || 'sent' });
     },
   };
 }
@@ -157,7 +180,7 @@ function trackingDeps() {
 function mountSdkUi(sdk: InboxSdkLike): void {
   try {
     sdk.Lists.registerThreadRowViewHandler(async (rowView) => {
-      const threadId = typeof rowView.getThreadIDAsync === 'function' ? await rowView.getThreadIDAsync() : rowView.getThreadID?.();
+      const threadId = await resolveThreadId(rowView);
       const rowElement = typeof rowView.getElement === 'function' ? rowView.getElement() : null;
       const threadRow = rowElement?.closest?.('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]') || rowElement;
       if (threadRow instanceof HTMLElement && typeof threadId === 'string') {
@@ -199,7 +222,7 @@ function mountSdkUi(sdk: InboxSdkLike): void {
         name,
         routeID: `gi/${category.toLowerCase()}`,
         onClick: () => {
-          chrome.runtime.sendMessage({ type: 'OPEN_SPLIT', category });
+          void send({ type: 'OPEN_SPLIT', category });
         },
       });
     }
@@ -213,8 +236,7 @@ async function mountSdkSidebar(threadView: {
   getThreadIDAsync?: () => string | Promise<string | null | undefined>;
   addSidebarContentPanel?: (desc: unknown) => void;
 }): Promise<void> {
-  const raw = threadView.getThreadIDAsync ? await threadView.getThreadIDAsync() : await threadView.getThreadID?.();
-  const threadId = typeof raw === 'string' ? raw : '';
+  const threadId = (await resolveThreadId(threadView)) || '';
   if (!threadId || !threadView.addSidebarContentPanel) return;
   const el = document.createElement('div');
   el.setAttribute('data-gi-ui', 'thread-sidebar');
@@ -272,9 +294,7 @@ async function refreshThread(threadId: string): Promise<void> {
 }
 
 async function paintVisibleChips(threadIds: string[]): Promise<void> {
-  const res = (await chrome.runtime.sendMessage({ type: 'GET_THREAD_INTEL_MANY', threadIds })) as {
-    intel?: Record<string, ThreadIntelData>;
-  };
+  const res = await send<{ intel?: Record<string, ThreadIntelData> }>({ type: 'GET_THREAD_INTEL_MANY', threadIds });
   const intel = res?.intel || {};
   for (const threadId of threadIds) {
     const category = intel[threadId]?.classification?.category;
@@ -301,31 +321,24 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
 }
 
 function getIntel(threadId: string): Promise<ThreadIntelData | undefined> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'GET_THREAD_INTEL', threadId }, (intel?: ThreadIntelData) => {
-      resolve(intel);
-    });
-  });
+  return send<ThreadIntelData>({ type: 'GET_THREAD_INTEL', threadId });
 }
 
-function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrackedEmailResult | null> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'CREATE_TRACKED_EMAIL', input }, (res) => {
-      if (chrome.runtime.lastError || !res?.ok || !res.tracking_id || !res.pixel_url) {
-        resolve(null);
-        return;
-      }
-      resolve({
-        tracking_id: res.tracking_id,
-        pixel_url: res.pixel_url,
-        rewritten_links: res.rewritten_links || [],
-      });
-    });
+async function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrackedEmailResult | null> {
+  const res = await send<{ ok?: boolean; tracking_id?: string; pixel_url?: string; rewritten_links?: CreateTrackedEmailResult['rewritten_links'] }>({
+    type: 'CREATE_TRACKED_EMAIL',
+    input,
   });
+  if (!res?.ok || !res.tracking_id || !res.pixel_url) return null;
+  return {
+    tracking_id: res.tracking_id,
+    pixel_url: res.pixel_url,
+    rewritten_links: res.rewritten_links || [],
+  };
 }
 
 function linkTracked(link: { trackingId: string; gmailThreadId: string | null; gmailMessageId: string | null }): void {
-  chrome.runtime.sendMessage({ type: 'LINK_TRACKED_EMAIL', ...link });
+  void send({ type: 'LINK_TRACKED_EMAIL', ...link });
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -583,15 +596,9 @@ async function remind(threadId: string): Promise<void> {
   showToast(`Reminder set for ${when}.`);
 }
 
-function send<T>(message: unknown): Promise<T> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(message, (response) => resolve(response as T));
-  });
-}
-
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void boot(), { once: true });
-else void boot();
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void boot().catch(() => undefined), { once: true });
+else void boot().catch(() => undefined);

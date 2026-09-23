@@ -46,6 +46,15 @@ describe('adapter lifecycle', () => {
     expect(await resolveThreadId({ getThreadID: () => 'sync-id' })).toBe('sync-id');
     expect(await resolveThreadId({ getThreadIDAsync: async () => 'async-id' })).toBe('async-id');
     expect(await resolveThreadId({ getThreadID: () => Promise.resolve('promised') })).toBe('promised');
+    let syncCalls = 0;
+    expect(await resolveThreadId({
+      getThreadID: () => {
+        syncCalls += 1;
+        return 'sync';
+      },
+      getThreadIDAsync: async () => 'async-preferred',
+    })).toBe('async-preferred');
+    expect(syncCalls).toBe(0);
     expect(await resolveThreadId({ getThreadID: () => null, getThreadIDAsync: async () => null })).toBeNull();
   });
 

@@ -10,8 +10,11 @@
     "workers/*"
   ],
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "open": "node scripts/open.mjs",
     "build": "npm run build -w @gi/shared && npm run build -w @gi/gmail && npm run build -w @gi/mailbox && npm run build -w @gi/ai && npm run build -w @gi/search && npm run build -w @gi/agent && npm run build -w @gi/tracking && npm run build -w @gi/extension && npm run build -w @gi/tracker",
     "dev": "npm run dev -w @gi/extension",
+    "tracker": "npm run dev -w @gi/tracker",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
@@ -33,5 +36,8 @@
   "engines": {
     "node": ">=20"
   },
-  "packageManager": "npm@10.9.2"
+  "packageManager": "npm@10.9.2",
+  "dependencies": {
+    "convex": "^1.46.0"
+  }
 }

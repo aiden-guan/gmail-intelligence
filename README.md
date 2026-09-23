@@ -100,9 +100,19 @@ curl -s http://127.0.0.1:8787/health
 
 You want `{"ok":true,"store":"memory"}`.
 
-### Deploy tracking (optional)
+### Public tracking with Convex
 
-Use this when the tracker should keep a public URL after your computer is off.
+The tracker for this machine is deployed at `https://energized-eagle-668.convex.site`. A gitignored `apps/extension/public/tracker-config.json` fills Settings with that URL and your token the first time the tracker fields are empty. Rebuild, then reload the extension.
+
+To push tracker changes later:
+
+```bash
+npx convex dev --once
+```
+
+### Deploy tracking on Cloudflare (optional)
+
+Use this if you want the tracker on Cloudflare instead of Convex.
 
 **Supabase**
 
