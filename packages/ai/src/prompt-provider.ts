@@ -15,6 +15,7 @@ import type {
   SummarizeInput,
   UsageStats,
 } from './index.js';
+import { EMAIL_SUMMARY_SYSTEM_PROMPT } from './summary-prompt.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -81,7 +82,7 @@ export function createPromptBackedProvider(
     },
     async summarizeThread(input: SummarizeInput) {
       const { data, usage } = await chatJson(
-        'Summarize the email thread. oneLine is under 200 characters. keyPoints, decisions, unansweredQuestions, commitments, dates, and actionItems are short string arrays. Use empty arrays when there are none.',
+        EMAIL_SUMMARY_SYSTEM_PROMPT,
         JSON.stringify({
           subject: input.subject,
           messages: input.messages.slice(-8).map((message) => ({

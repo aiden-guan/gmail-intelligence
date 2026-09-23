@@ -270,7 +270,8 @@ export function normalizeSubject(subject: string): string {
     prev = next;
     next = next.replace(/^(re|fw|fwd)\s*:\s*/i, '').trim();
   }
-  return next.toLowerCase();
+  const withoutChip = next.replace(/(respond|waiting|fyi|notifications|promotions|news)\s*·?$/i, '').trim();
+  return (withoutChip || next).toLowerCase();
 }
 
 export function normalizeEmail(email: string): string {

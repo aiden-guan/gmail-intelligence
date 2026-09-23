@@ -113,18 +113,18 @@ export function paintRows(
       if (row.dataset.giTracked) delete row.dataset.giTracked;
       return;
     }
-    const slot = existing instanceof HTMLElement ? existing : createSlot(row);
-    renderSlot(slot, match, trackerBaseUrl, onNotify);
+    const slot = placeRowSlot(row, existing instanceof HTMLElement ? existing : null);
+    renderSlot(slot, match, trackerBaseUrl, onNotify, false, statusColor(row, match.openCount > 0 || match.clickCount > 0));
     row.dataset.giTracked = match.openCount > 0 || match.clickCount > 0 ? 'opened' : 'pending';
   });
 }
 
 function readSubject(row: Element): string {
-  const known =
-    row.querySelector('span[data-thread-id]')?.textContent?.trim() ||
-    row.querySelector('.bog')?.textContent?.trim() ||
-    row.querySelector('.y6 span')?.textContent?.trim() ||
-    '';
+  const node =
+    row.querySelector('span[data-thread-id]') ||
+    row.querySelector('.bog') ||
+    row.querySelector('.y6 span:not(.gi-cat-chip)');
+  const known = node ? textWithoutChips(node) : '';
   if (known) return known;
   const sender = row.querySelector('[email], [data-hovercard-id]');
   for (const cell of row.querySelectorAll('td, [role="gridcell"]')) {
@@ -133,6 +133,12 @@ function readSubject(row: Element): string {
     if (text && !text.includes('@')) return text;
   }
   return '';
+}
+
+function textWithoutChips(node: Element): string {
+  const clone = node.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('.gi-cat-chip, .gi-track-slot').forEach((chip) => chip.remove());
+  return clone.textContent?.replace(/\s+/g, ' ').trim() || '';
 }
 
 function collectThreadIds(row: Element): string[] {
@@ -167,7 +173,8 @@ export function paintConversation(
     return;
   }
   const slot = existing || createSlotAfter(heading);
-  renderSlot(slot, match, trackerBaseUrl, onNotify, true);
+  const opened = match.openCount > 0 || match.clickCount > 0;
+  renderSlot(slot, match, trackerBaseUrl, onNotify, true, statusColor(heading, opened));
 }
 
 export function matchConversation(root: ParentNode, emails: TrackedEmailSummary[]): TrackedEmailSummary | null {
@@ -210,16 +217,54 @@ function statusSignatureFor(root: ParentNode, emails: TrackedEmailSummary[], tra
   return `${match.trackingId}:${copy.markLabel}:${copy.countLabel}`;
 }
 
-function createSlot(row: HTMLElement): HTMLElement {
+/** Sit the check in the recipient line, just before "To: Name". A span between table cells is not shown. */
+function senderHost(row: HTMLElement): HTMLElement | null {
+  const named = row.querySelector<HTMLElement>('.yW');
+  if (named && !named.closest('.gi-track-slot')) return named;
+  const email = [...row.querySelectorAll<HTMLElement>('[email], [data-hovercard-id]')].find(
+    (node) => !node.closest('.gi-track-slot'),
+  );
+  if (!email) return null;
+  const cell = email.closest('td, [role="gridcell"]');
+  if (cell instanceof HTMLElement) return cell;
+  return email.parentElement;
+}
+
+function placeRowSlot(row: HTMLElement, existing: HTMLElement | null): HTMLElement {
+  const host = senderHost(row);
+  if (existing && host && existing.parentElement === host && host.firstElementChild === existing) return existing;
+  existing?.remove();
   const slot = document.createElement('span');
   slot.className = 'gi-track-slot';
   slot.setAttribute('data-gi-ui', 'track');
-  const sender = row.querySelector<HTMLElement>('.yW, .zF, [email], [data-hovercard-id]');
-  const cell = sender?.closest('td, [role="gridcell"]');
-  if (cell?.parentElement) cell.parentElement.insertBefore(slot, cell);
-  else if (sender?.parentElement) sender.parentElement.insertBefore(slot, sender);
+  if (host) host.insertBefore(slot, host.firstChild);
   else row.insertBefore(slot, row.firstChild);
   return slot;
+}
+
+function statusColor(row: Element, opened: boolean): string {
+  return opened ? (isDarkRow(row) ? '#81c995' : '#188038') : isDarkRow(row) ? '#9aa0a6' : '#80868b';
+}
+
+function isDarkRow(row: Element): boolean {
+  let current: Element | null = row;
+  for (let i = 0; i < 8 && current; i += 1) {
+    const opaque = opaqueColor(getComputedStyle(current).backgroundColor);
+    if (opaque) {
+      const luminance = (opaque[0] * 299 + opaque[1] * 587 + opaque[2] * 114) / 1000;
+      return luminance < 140;
+    }
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function opaqueColor(bg: string): [number, number, number] | null {
+  const match = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+  if (!match) return null;
+  const alpha = match[4] === undefined ? 1 : Number(match[4]);
+  if (!Number.isFinite(alpha) || alpha < 0.5) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 function createSlotAfter(anchor: HTMLElement): HTMLElement {
@@ -236,12 +281,14 @@ function renderSlot(
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
   labeled = false,
+  color?: string,
 ): void {
   const copy = describeTrackingStatus(match, { trackerBaseUrl });
-  const signature = `${match.trackingId}:${copy.opened}:${copy.countLabel}:${copy.markLabel}:${labeled}:${match.notifyIfNoReply}:${trackerBaseUrl}`;
+  const ink = color || (copy.opened ? '#188038' : '#80868b');
+  const signature = `${match.trackingId}:${copy.opened}:${copy.countLabel}:${copy.markLabel}:${labeled}:${match.notifyIfNoReply}:${trackerBaseUrl}:${ink}`;
   if (slot.dataset.signature === signature && slot.querySelector('.gi-track-btn')) return;
   slot.dataset.signature = signature;
-  slot.replaceChildren(renderButton(match, copy, trackerBaseUrl, onNotify, labeled));
+  slot.replaceChildren(renderButton(match, copy, trackerBaseUrl, onNotify, labeled, ink));
 }
 
 function renderButton(
@@ -250,6 +297,7 @@ function renderButton(
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
   labeled: boolean,
+  color: string,
 ): HTMLElement {
   const button = document.createElement('span');
   button.className = 'gi-track-btn';
@@ -260,25 +308,13 @@ function renderButton(
   button.tabIndex = 0;
   button.setAttribute('aria-label', copy.headline);
   button.title = copy.headline;
-  button.style.cssText = controlStyle(copy.opened);
-  button.innerHTML = copy.opened ? DOUBLE_CHECK : SINGLE_CHECK;
+  button.style.cssText = controlStyle(color);
+  button.innerHTML = CHECK_ICON;
   if (labeled) {
     const label = document.createElement('span');
     label.className = 'gi-track-label';
     label.textContent = copy.markLabel;
     button.append(label);
-  }
-  if (email.openCount > 1) {
-    const count = document.createElement('span');
-    count.className = 'gi-track-n';
-    count.textContent = String(email.openCount);
-    button.append(count);
-  }
-  if (email.clickCount > 0) {
-    const link = document.createElement('span');
-    link.className = 'gi-track-link';
-    link.textContent = '↗';
-    button.append(link);
   }
   button.addEventListener('pointerdown', (event) => {
     event.stopPropagation();
@@ -300,19 +336,19 @@ function renderButton(
   return button;
 }
 
-function controlStyle(opened: boolean): string {
+function controlStyle(color: string): string {
   return [
     'display:inline-flex',
     'align-items:center',
     'gap:4px',
     'width:auto',
     'height:auto',
-    'margin:0 8px 0 0',
+    'margin:0',
     'padding:0',
     'border:0',
     'background:transparent',
     'box-shadow:none',
-    `color:${opened ? '#188038' : '#80868b'}`,
+    `color:${color}`,
     'cursor:pointer',
     'font-weight:600',
     'font-size:13px',
@@ -320,6 +356,7 @@ function controlStyle(opened: boolean): string {
     'font-family:"Google Sans",Roboto,Arial,sans-serif',
     'vertical-align:middle',
     'white-space:nowrap',
+    'flex:0 0 auto',
   ].join(';');
 }
 
@@ -487,7 +524,7 @@ function ensureStyles(): void {
   const style = document.createElement('style');
   style.id = 'gi-track-style';
   style.textContent = `
-    .gi-track-slot { display: inline-flex; align-items: center; margin-right: 6px; vertical-align: middle; flex: 0 0 auto; }
+    .gi-track-slot { display: inline-flex !important; align-items: center; margin: 0 8px 0 0; vertical-align: middle; flex: 0 0 auto; min-width: 16px; line-height: 0; overflow: visible; }
     .gi-track-btn { display: inline-flex; align-items: center; gap: 4px; width: auto; height: auto; padding: 0; border: 0; background: transparent; cursor: pointer; }
     .gi-track-btn[data-state="opened"] { color: #188038; }
     .gi-track-btn[data-state="pending"] { color: #80868b; }
@@ -515,6 +552,5 @@ function ensureStyles(): void {
   document.documentElement.append(style);
 }
 
-const SINGLE_CHECK = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M2.5 8.2 6.2 11.8 13.5 4.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-const DOUBLE_CHECK = `<svg viewBox="0 0 20 16" width="18" height="14" fill="none" aria-hidden="true"><path d="M1.2 8.2 4.3 11.3 10.2 4.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M7.2 8.4 10.3 11.5 18.2 3.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const CHECK_ICON = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" aria-hidden="true"><path d="M3.1 8.3 6.3 11.5 12.9 4.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const EYE_ICON = `<svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true"><path d="M1.8 10S4.8 4.8 10 4.8 18.2 10 18.2 10 15.2 15.2 10 15.2 1.8 10 1.8 10Z" stroke="#5f6368" stroke-width="1.4"/><circle cx="10" cy="10" r="2.2" stroke="#5f6368" stroke-width="1.4"/></svg>`;

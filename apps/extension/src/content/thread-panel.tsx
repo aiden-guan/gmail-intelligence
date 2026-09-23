@@ -1,9 +1,19 @@
 import { useState, type CSSProperties } from 'react';
 import { categoryLabel } from './chips';
 
+export type ThreadSummaryView = {
+  oneLine?: string;
+  keyPoints?: string[];
+  decisions?: string[];
+  unansweredQuestions?: string[];
+  commitments?: string[];
+  dates?: string[];
+  actionItems?: string[];
+};
+
 export type ThreadIntelData = {
   classification?: { category?: string; needsReply?: boolean; reason?: string };
-  summary?: { summary?: { oneLine?: string; keyPoints?: string[]; actionItems?: string[] } };
+  summary?: { summary?: ThreadSummaryView };
   draft?: { suggestion?: { body?: string } };
   manual?: boolean;
 };
@@ -26,10 +36,22 @@ export function ThreadIntelCard(props: {
 }) {
   const [open, setOpen] = useState(false);
   const category = categoryLabel(props.intel?.classification?.category);
-  const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
+  const summaryData = props.intel?.summary?.summary;
+  const summary = summaryData?.oneLine || props.preview || null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
-  const points = props.intel?.summary?.summary?.keyPoints || [];
-  const actions = props.intel?.summary?.summary?.actionItems || [];
+  const points = summaryData?.keyPoints || [];
+  const actions = summaryData?.actionItems || [];
+  const dates = summaryData?.dates || [];
+  const questions = summaryData?.unansweredQuestions || [];
+  const decisions = summaryData?.decisions || [];
+  const commitments = summaryData?.commitments || [];
+  const detailSections = [
+    ['Decisions', decisions],
+    ['Still open', questions],
+    ['Commitments', commitments],
+    ['Dates', dates],
+    ['Next steps', actions],
+  ].filter((section): section is [string, string[]] => section[1].length > 0);
 
   return (
     <div style={{ font: '13px/1.45 "Google Sans", Roboto, Arial, sans-serif', color: '#202124' }}>
@@ -42,6 +64,18 @@ export function ThreadIntelCard(props: {
         ) : null}
       </div>
       <p style={{ margin: '8px 0 0', color: '#3c4043' }}>{summary || props.pending || 'No summary yet.'}</p>
+      {points.length ? (
+        <ul style={{ margin: '8px 0 0', paddingLeft: 18, color: '#3c4043' }}>
+          {points.slice(0, 4).map((point) => (
+            <li key={point} style={{ marginTop: 2 }}>
+              {point}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {dates.length ? (
+        <p style={{ margin: '8px 0 0', color: '#5f6368' }}>{dates.join(' · ')}</p>
+      ) : null}
       {props.tracking ? (
         <div style={{ marginTop: 8 }}>
           <div style={{ color: props.tracking.opened ? '#188038' : '#5f6368', fontWeight: 600 }}>{props.tracking.markLabel}</div>
@@ -73,29 +107,23 @@ export function ThreadIntelCard(props: {
           Remind
         </button>
       </div>
-      {points.length || actions.length ? (
+      {detailSections.length ? (
         <button type="button" onClick={() => setOpen((value) => !value)} style={{ ...buttonStyle, marginTop: 8 }}>
           {open ? 'Hide details' : 'Details'}
         </button>
       ) : null}
       {open ? (
         <div style={{ marginTop: 8, color: '#3c4043' }}>
-          {points.length ? (
-            <div>
-              <div style={{ color: '#5f6368', marginBottom: 4 }}>Key points</div>
-              {points.map((point) => (
-                <div key={point}>{point}</div>
-              ))}
+          {detailSections.map(([label, items]) => (
+            <div key={label} style={{ marginTop: 8 }}>
+              <div style={{ color: '#5f6368', marginBottom: 4 }}>{label}</div>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {items.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
             </div>
-          ) : null}
-          {actions.length ? (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ color: '#5f6368', marginBottom: 4 }}>Actions</div>
-              {actions.map((item) => (
-                <div key={item}>{item}</div>
-              ))}
-            </div>
-          ) : null}
+          ))}
         </div>
       ) : null}
     </div>

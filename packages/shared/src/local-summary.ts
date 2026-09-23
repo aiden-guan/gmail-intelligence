@@ -22,7 +22,12 @@ export function localThreadSummary(input: {
   const bodies = input.messages.map((message) => cleanMessage(message.bodyText)).filter((text) => text.length > 0);
   const body = bodies.at(-1) || '';
   const sentences = sentencesFrom(body).filter((sentence) => sentence.length > 1 && !FOOTER.test(` ${sentence}`));
-  const lead = sentences.find((sentence) => sentence.length > 24) || sentences[0] || body || input.subject.trim();
+  const lead =
+    sentences.find((sentence) => sentence.length > 24 && !isGreeting(sentence)) ||
+    sentences.map(dropGreeting).find((sentence) => sentence.length > 24) ||
+    sentences[0] ||
+    body ||
+    input.subject.trim();
   const oneLine = clip(lead || 'Empty message', 200);
   const keyPoints = sentences
     .filter((sentence) => sentence !== lead)
@@ -41,9 +46,17 @@ export function localThreadSummary(input: {
 }
 
 function cleanMessage(text: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const collapsed = text.replace(/\s+/g, ' ').replace(/([,;:])(?=[A-Za-z])/g, '$1 ').trim();
   const withoutQuote = collapsed.split(/\bOn .{0,120}? wrote:/i)[0] || collapsed;
   return withoutQuote.replace(FOOTER, '').trim();
+}
+
+function isGreeting(sentence: string): boolean {
+  return /^(hi|hello|hey|dear|good (morning|afternoon|evening))\b/i.test(sentence);
+}
+
+function dropGreeting(sentence: string): string {
+  return sentence.replace(/^(hi|hello|hey|dear)\b[^,.!]{0,48}[,.!]\s*/i, '').trim();
 }
 
 function sentencesFrom(text: string): string[] {

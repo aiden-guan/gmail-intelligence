@@ -33,6 +33,7 @@ const waiting: TrackedEmailSummary = {
 
 beforeEach(() => {
   document.body.innerHTML = '';
+  document.body.style.backgroundColor = '';
   document.getElementById('gi-track-style')?.remove();
   document.querySelector('[data-gi-ui="track-card"]')?.remove();
 });
@@ -61,6 +62,9 @@ describe('sent mail open status', () => {
     expect(buttons[0].style.color).toBe('rgb(24, 128, 56)');
     expect(buttons[1].style.color).toBe('rgb(128, 134, 139)');
     expect(document.querySelector('[data-legacy-thread-id="thread-1"]')?.getAttribute('data-gi-tracked')).toBe('opened');
+    const slot = document.querySelector('[data-legacy-thread-id="thread-1"] .gi-track-slot');
+    expect(slot?.parentElement?.classList.contains('yW')).toBe(true);
+    expect(slot?.parentElement?.firstElementChild).toBe(slot);
   });
 
   it('opens a status card with the open count and a no-reply switch', () => {
@@ -116,6 +120,15 @@ describe('sent mail open status', () => {
     const button = document.querySelector('.gi-track-btn');
     expect(button?.getAttribute('data-state')).toBe('opened');
     expect(button?.getAttribute('aria-label')).toMatch(/opened your email/);
+    const name = document.querySelector('[email="aiden@example.com"]');
+    expect(name?.parentElement?.firstElementChild?.classList.contains('gi-track-slot')).toBe(true);
+  });
+
+  it('uses a bright check when the sent list is dark', () => {
+    document.body.style.backgroundColor = 'rgb(32, 33, 36)';
+    row('thread-1', 'aiden@example.com', 'Hello');
+    paintRows(document, [opened], 'https://track.example', () => undefined);
+    expect(document.querySelector<HTMLElement>('.gi-track-btn')?.style.color).toBe('rgb(129, 201, 149)');
   });
 
   it('leaves untracked rows alone', () => {

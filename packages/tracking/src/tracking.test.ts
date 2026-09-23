@@ -10,6 +10,7 @@ import {
   describeTrackingStatus,
   isLoopbackTracker,
   matchTrackedEmail,
+  normalizeSubject,
   summaryFromRemote,
   trackerPermissionOrigin,
   type TrackedEmailSummary,
@@ -149,6 +150,16 @@ describe('sent mail status', () => {
   it('matches one tracked email by subject when the row has no address', () => {
     expect(
       matchTrackedEmail({ threadIds: ['other-id'], subject: 'Hello', emails: [] }, [base])?.trackingId,
+    ).toBe('trk_1');
+  });
+
+  it('matches a sent row when a category chip is glued to the subject', () => {
+    expect(normalizeSubject('sdefsfseWaiting')).toBe('sdefsfse');
+    expect(
+      matchTrackedEmail(
+        { threadIds: [], subject: 'HelloWaiting', emails: ['a@b.com'] },
+        [{ ...base, gmailThreadId: null }],
+      )?.trackingId,
     ).toBe('trk_1');
   });
 

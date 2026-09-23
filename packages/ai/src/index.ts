@@ -10,6 +10,7 @@ import {
   type VoiceProfile,
 } from '@gi/shared';
 import { z } from 'zod';
+import { EMAIL_SUMMARY_SYSTEM_PROMPT } from './summary-prompt.js';
 
 export type ClassifyInput = {
   subject: string;
@@ -161,8 +162,15 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
 
   async summarizeThread(input: SummarizeInput) {
     const { data, usage } = await this.chatJson(
-      'Summarize the email thread. Return JSON only. Concise bullets.',
-      JSON.stringify(input),
+      EMAIL_SUMMARY_SYSTEM_PROMPT,
+      JSON.stringify({
+        subject: input.subject,
+        messages: input.messages.slice(-8).map((message) => ({
+          sender: message.sender,
+          timestamp: message.timestamp,
+          bodyText: message.bodyText.slice(0, 4000),
+        })),
+      }),
       ThreadSummarySchema,
     );
     return { result: data, usage };

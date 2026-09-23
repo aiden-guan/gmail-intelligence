@@ -127,6 +127,34 @@ describe('reactive intelligence', () => {
     });
     expect(host.textContent).toContain('Our weekend sale starts Friday.');
     expect(host.textContent).not.toContain('Could not summarize');
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'PROMOTIONS' },
+            summary: {
+              summary: {
+                oneLine: 'ACA invited you to the Berkeley China Summit with TikTok Recruiting.',
+                keyPoints: ['TikTok Recruiting is a partner'],
+                dates: ['Friday'],
+                actionItems: ['Open the summit details'],
+              },
+            },
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.querySelector('li')?.textContent).toBe('TikTok Recruiting is a partner');
+    expect(host.textContent).toContain('Friday');
+    const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
+    expect(details).toBeTruthy();
+    await act(async () => {
+      details?.click();
+    });
+    expect(host.textContent).toContain('Next steps');
+    expect(host.textContent).toContain('Open the summit details');
     root.unmount();
   });
 });
