@@ -100,15 +100,18 @@ curl -s http://127.0.0.1:8787/health
 
 You want `{"ok":true,"store":"memory"}`.
 
-### Public tracking with Convex
+### Use your own Convex tracker (optional)
 
-The tracker for this machine is deployed at `https://energized-eagle-668.convex.site`. A gitignored `apps/extension/public/tracker-config.json` fills Settings with that URL and your token the first time the tracker fields are empty. Rebuild, then reload the extension.
+This project does not host a shared tracker. If you want persistent open/click tracking, deploy the Convex functions to a Convex project that you own. The deployment URL, API token, and any tracking data belong to you; none are committed here.
 
-To push tracker changes later:
+From the repository root:
 
 ```bash
 npx convex dev --once
+npx convex env set PERSONAL_API_TOKEN 'replace-with-a-long-random-token'
 ```
+
+`npx convex dev --once` configures your own Convex development deployment and writes the local, gitignored `.env.local` file. Copy that deployment's `CONVEX_SITE_URL` and the same token into **Settings → Tracking**. Rebuild, then reload the unpacked extension. For a production deployment, use `npx convex deploy` against your own Convex project and set the token with `npx convex env set --prod PERSONAL_API_TOKEN 'replace-with-a-long-random-token'`.
 
 ### Deploy tracking on Cloudflare (optional)
 
