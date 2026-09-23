@@ -238,4 +238,16 @@ describe('prompt-backed provider', () => {
     expect(calls).toBe(2);
     expect(result.oneLine).toBe('A short update');
   });
+
+  it('accepts a summary that only includes the one-line field', async () => {
+    const provider = createPromptBackedProvider('test', async () => ({
+      text: JSON.stringify({ summary: 'The weekend sale starts Friday.' }),
+    }));
+    const { result } = await provider.summarizeThread({
+      subject: 'Sale',
+      messages: [{ sender: 'deals@shop.test', bodyText: 'The weekend sale starts Friday.', timestamp: '' }],
+    });
+    expect(result.oneLine).toBe('The weekend sale starts Friday.');
+    expect(result.keyPoints).toEqual([]);
+  });
 });

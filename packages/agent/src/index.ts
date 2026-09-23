@@ -4,6 +4,7 @@ import {
   AgentSafetyTier,
   addBusinessDays,
   detectPlaceholders,
+  localThreadSummary,
   type ClassificationResult,
   type ExtensionSettings,
 } from '@gi/shared';
@@ -42,6 +43,7 @@ export type AgentLoopDeps = {
  */
 export class AgentLoop {
   private lastClassifierRun: number | null = null;
+  private summaryAttempts = new Set<string>();
 
   constructor(private readonly deps: AgentLoopDeps) {}
 
@@ -240,32 +242,57 @@ export class AgentLoop {
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
   }): Promise<void> {
     const existing = await this.deps.db.thread_summaries.get(input.threadId);
-    if (existing?.fingerprint === input.fingerprint) return;
-    if (!this.deps.ai || this.deps.settings().aiMode === 'disabled') return;
-    try {
-      const { result } = await this.deps.queue.enqueue('summary', input.fingerprint, () =>
-        this.deps.ai!.summarizeThread({
-          subject: input.subject,
-          messages: input.messages,
-        }),
-      );
-      await this.deps.db.thread_summaries.put({
-        threadId: input.threadId,
-        fingerprint: input.fingerprint,
-        summary: result,
-        createdAt: Date.now(),
-      });
-      await this.deps.log({
-        type: 'summarize',
-        threadId: input.threadId,
-        detail: result.oneLine,
-        tier: AgentSafetyTier.READ_ONLY,
-      });
-      this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
-      this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
-    } catch {
-      /* non-blocking */
+    if (existing?.fingerprint === input.fingerprint && existing.source !== 'message') return;
+
+    const aiReady = Boolean(this.deps.ai) && this.deps.settings().aiMode !== 'disabled';
+    const attemptKey = `${input.threadId}:${input.fingerprint}`;
+    if (aiReady && !this.summaryAttempts.has(attemptKey)) {
+      this.summaryAttempts.add(attemptKey);
+      try {
+        const { result } = await this.deps.queue.enqueue('summary', input.fingerprint, () =>
+          this.deps.ai!.summarizeThread({
+            subject: input.subject,
+            messages: input.messages,
+          }),
+        );
+        await this.deps.db.thread_summaries.put({
+          threadId: input.threadId,
+          fingerprint: input.fingerprint,
+          summary: result,
+          createdAt: Date.now(),
+          source: 'model',
+        });
+        await this.deps.log({
+          type: 'summarize',
+          threadId: input.threadId,
+          detail: result.oneLine,
+          tier: AgentSafetyTier.READ_ONLY,
+        });
+        this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
+        this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+        return;
+      } catch {
+        /* Keep a summary of the text on screen when the model fails. */
+      }
     }
+
+    if (existing?.fingerprint === input.fingerprint) return;
+    const summary = localThreadSummary(input);
+    await this.deps.db.thread_summaries.put({
+      threadId: input.threadId,
+      fingerprint: input.fingerprint,
+      summary,
+      createdAt: Date.now(),
+      source: 'message',
+    });
+    await this.deps.log({
+      type: 'summarize',
+      threadId: input.threadId,
+      detail: summary.oneLine,
+      tier: AgentSafetyTier.READ_ONLY,
+    });
+    this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
+    this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
   }
 
   async requestSummary(input: {
@@ -274,9 +301,6 @@ export class AgentLoop {
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
   }): Promise<{ ok: boolean; oneLine?: string; reason?: string }> {
-    if (!this.deps.ai || this.deps.settings().aiMode === 'disabled') {
-      return { ok: false, reason: 'Turn on AI in Settings to summarize.' };
-    }
     if (!input.messages.some((message) => message.bodyText.trim())) {
       return { ok: false, reason: 'Open the thread so the message can be read.' };
     }
@@ -298,10 +322,12 @@ export class AgentLoop {
     if (!input.messages.some((message) => message.bodyText.trim())) {
       return { ok: false, reason: 'Open the thread so a reply can be drafted.' };
     }
-    await this.draftResponse(input, false);
+    const failure = await this.draftResponse(input, false);
     const drafts = await this.deps.db.draft_suggestions.where('threadId').equals(input.threadId).toArray();
     const draft = drafts.sort((a, b) => b.createdAt - a.createdAt)[0];
-    if (!draft?.suggestion.body) return { ok: false, reason: 'Could not draft a reply.' };
+    if (!draft?.suggestion.body || (failure && draft.fingerprint !== input.fingerprint)) {
+      return { ok: false, reason: failure || 'Could not draft a reply.' };
+    }
     return { ok: true, body: draft.suggestion.body };
   }
 
@@ -310,13 +336,13 @@ export class AgentLoop {
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
-  }, insertIntoGmail = false): Promise<void> {
+  }, insertIntoGmail = false): Promise<string | null> {
     const existing = await this.deps.db.draft_suggestions
       .where('threadId')
       .equals(input.threadId)
       .first();
-    if (existing?.fingerprint === input.fingerprint) return;
-    if (!this.deps.ai) return;
+    if (existing?.fingerprint === input.fingerprint) return null;
+    if (!this.deps.ai) return 'Turn on AI in Settings to draft a reply.';
     try {
       const { result } = await this.deps.queue.enqueue('draft', input.fingerprint, () =>
         this.deps.ai!.draftReply({
@@ -354,8 +380,9 @@ export class AgentLoop {
       });
       this.deps.onIntel?.(input.threadId, 'THREAD_DRAFT_READY');
       this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
-    } catch {
-      /* non-blocking */
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not draft a reply.';
     }
   }
 

@@ -4,7 +4,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it } from 'vitest';
-import { applyCategoryChip } from './chips';
+import { applyCategoryChip, rowsForThread } from './chips';
 import { isVisibleCommand, VISIBLE_COMMANDS } from './commands';
 import { ThreadIntelCard } from './thread-panel';
 
@@ -36,6 +36,17 @@ describe('reactive intelligence', () => {
     applyCategoryChip(row, 'RESPOND', true);
     expect(row.textContent).toContain('Respond');
     expect(row.querySelector('.gi-cat-chip')?.getAttribute('data-manual')).toBe('1');
+  });
+
+  it('finds a row when the thread id is on the subject', () => {
+    document.body.innerHTML = `
+      <div role="list">
+        <div role="listitem">
+          <span data-legacy-thread-id="t9">Hello</span>
+        </div>
+      </div>
+    `;
+    expect(rowsForThread('t9')).toHaveLength(1);
   });
 
   it('shows the summary and draft button when they are ready', async () => {
@@ -103,6 +114,19 @@ describe('reactive intelligence', () => {
     expect(host.textContent).toContain('A short note to Dylan.');
     expect(host.textContent).toContain('opened your email');
     expect(host.textContent).not.toContain('Reading this thread');
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{ classification: { category: 'PROMOTIONS' } }}
+          pending="Could not summarize this thread."
+          preview="Our weekend sale starts Friday."
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.textContent).toContain('Our weekend sale starts Friday.');
+    expect(host.textContent).not.toContain('Could not summarize');
     root.unmount();
   });
 });

@@ -117,6 +117,8 @@ export type SummaryRow = {
   fingerprint: string;
   summary: ThreadSummary;
   createdAt: number;
+  /** `message` is read from the open email. A later model result can replace it. */
+  source?: 'model' | 'message';
 };
 
 export type DraftRow = {

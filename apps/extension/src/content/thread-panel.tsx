@@ -19,13 +19,14 @@ export type ThreadTrackingStatus = {
 export function ThreadIntelCard(props: {
   intel?: ThreadIntelData;
   pending?: string | null;
+  preview?: string | null;
   tracking?: ThreadTrackingStatus | null;
   onDraft: () => void;
   onRemind: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const category = categoryLabel(props.intel?.classification?.category);
-  const summary = props.intel?.summary?.summary?.oneLine;
+  const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
   const points = props.intel?.summary?.summary?.keyPoints || [];
   const actions = props.intel?.summary?.summary?.actionItems || [];

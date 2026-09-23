@@ -151,4 +151,46 @@ describe('manual classification and drafts', () => {
     });
     expect((await db.thread_summaries.get('t2'))?.summary.oneLine).toBe('The order shipped.');
   });
+
+  it('summarizes the open message when the model fails', async () => {
+    const db = getMailboxDb('agent_' + Math.random());
+    const ai = {
+      summarizeThread: async () => {
+        throw new Error('ChatGPT rejected the request');
+      },
+    } as unknown as AIProvider;
+    const agent = new AgentLoop({
+      db,
+      ai,
+      queue: new AIJobQueue(),
+      settings: () => ({ ...DEFAULT_SETTINGS, aiMode: 'remote', autoSummarize: true }),
+      archiveViaGmail: async () => ({ success: false }),
+      insertDraftViaGmail: async () => ({ success: true }),
+      log: async () => 'log',
+    });
+    const result = await agent.requestSummary({
+      threadId: 't3',
+      fingerprint: 'fp3',
+      subject: '50% off this weekend',
+      messages: [{
+        sender: 'deals@shop.test',
+        bodyText: 'Our weekend sale starts Friday and ends Sunday. Use code FALL.',
+        timestamp: '',
+      }],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.oneLine).toMatch(/weekend sale starts Friday/i);
+    expect((await db.thread_summaries.get('t3'))?.source).toBe('message');
+    const again = await agent.requestSummary({
+      threadId: 't3',
+      fingerprint: 'fp3',
+      subject: '50% off this weekend',
+      messages: [{
+        sender: 'deals@shop.test',
+        bodyText: 'Our weekend sale starts Friday and ends Sunday. Use code FALL.',
+        timestamp: '',
+      }],
+    });
+    expect(again.oneLine).toMatch(/weekend sale starts Friday/i);
+  });
 });

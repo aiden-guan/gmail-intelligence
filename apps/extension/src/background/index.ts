@@ -531,6 +531,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'LOCAL_MODEL_PROGRESS' || message?.type === 'LOCAL_MODEL_RELEASE') return false;
   void (async () => {
+    try {
     await loadSettings();
     if (!agent) rebuildAgent();
 
@@ -623,20 +624,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === 'SUMMARIZE_THREAD' || message?.type === 'DRAFT_REPLY') {
         const threadId = String(message.threadId || '');
         const thread = threadId ? await db.threads.get(threadId) : null;
-        const messages = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
-        if (!thread || !agent) {
+        const stored = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
+        const pageMessages = pageMessagesFrom(message.messages);
+        const storedMessages = stored.map((row) => ({
+          sender: row.sender.email,
+          bodyText: row.bodyText,
+          timestamp: row.timestamp,
+        }));
+        const messages = longerMessages(storedMessages, pageMessages);
+        if ((!thread && !messages.length) || !agent) {
           sendResponse({ ok: false, reason: 'Open the thread first.' });
           return;
         }
         const input = {
           threadId,
-          fingerprint: thread.contentFingerprint,
-          subject: thread.subject,
-          messages: messages.map((row) => ({
-            sender: row.sender.email,
-            bodyText: row.bodyText,
-            timestamp: row.timestamp,
-          })),
+          fingerprint: thread?.contentFingerprint || `page:${threadId}`,
+          subject: thread?.subject || String(message.subject || ''),
+          messages,
         };
         const result = message.type === 'SUMMARIZE_THREAD' ? await agent.requestSummary(input) : await agent.requestDraft(input);
         sendResponse(result);
@@ -1013,9 +1017,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       default:
         sendResponse({ error: 'unhandled' });
     }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'The extension hit an error.';
+      try {
+        sendResponse({ ok: false, reason });
+      } catch {
+        /* The response was already sent. */
+      }
+    }
   })();
   return true;
 });
+
+function pageMessagesFrom(value: unknown): Array<{ sender: string; bodyText: string; timestamp: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 20).flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const row = item as { sender?: unknown; bodyText?: unknown; timestamp?: unknown };
+    const bodyText = typeof row.bodyText === 'string' ? row.bodyText.slice(0, 20_000) : '';
+    if (!bodyText.trim()) return [];
+    return [{
+      sender: typeof row.sender === 'string' ? row.sender.slice(0, 200) : 'unknown',
+      bodyText,
+      timestamp: typeof row.timestamp === 'string' ? row.timestamp.slice(0, 80) : '',
+    }];
+  });
+}
+
+function longerMessages(
+  stored: Array<{ sender: string; bodyText: string; timestamp: string }>,
+  page: Array<{ sender: string; bodyText: string; timestamp: string }>,
+): Array<{ sender: string; bodyText: string; timestamp: string }> {
+  const length = (rows: Array<{ bodyText: string }>) => rows.reduce((sum, row) => sum + row.bodyText.trim().length, 0);
+  if (length(page) > length(stored)) return page;
+  return stored.length ? stored : page;
+}
 
 setChatGptSignedInHandler(async () => {
   const model = isChatGptModel(settings.aiModel) ? settings.aiModel : CHATGPT_DEFAULT_MODEL;

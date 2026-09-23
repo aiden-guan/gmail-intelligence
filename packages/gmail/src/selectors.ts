@@ -14,6 +14,8 @@ export const SELECTORS = {
     'div[role="listitem"][data-legacy-thread-id]',
     'div.zA',
     '[role="main"] [role="row"]',
+    '[role="grid"] [role="row"]',
+    '[role="list"] [role="listitem"]',
   ],
   threadRowSubject: ['span[data-thread-id]', '.bog', '.bqe', '[data-legacy-thread-id] span[email]', '.y6 span'],
   threadRowSnippet: ['.y2', '.Zt'],
@@ -160,6 +162,8 @@ function looksLikeMailRow(el: HTMLElement): boolean {
   if (el.closest('[data-gi-ui], .gi-track-card, .gi-track-slot')) return false;
   if (el.matches('tr.zA, div.zA, [data-legacy-thread-id], [data-thread-perm-id]')) return true;
   if (el.querySelector('span[data-thread-id], [data-legacy-thread-id], [data-thread-perm-id]')) return true;
+  const role = el.getAttribute('role');
+  if ((role === 'row' || role === 'listitem') && el.querySelector('[email], [data-hovercard-id]')) return true;
   return Boolean(el.querySelector('[role="checkbox"]') && el.querySelector('[email], [data-hovercard-id]'));
 }
 
@@ -176,7 +180,7 @@ function checkboxRows(root: ParentNode): HTMLElement[] {
   if (!scope.querySelectorAll) return [];
   const found = new Set<HTMLElement>();
   for (const box of scope.querySelectorAll('[role="checkbox"]')) {
-    const row = box.closest('tr, [role="row"]');
+    const row = box.closest('tr, [role="row"], [role="listitem"]');
     if (!(row instanceof HTMLElement) || !looksLikeMailRow(row)) continue;
     addRow(found, row);
   }
@@ -235,8 +239,29 @@ export function findMessageBodies(root: ParentNode = document): HTMLElement[] {
 
 export function messageText(el: Element): string {
   const clone = el.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll('[data-gi-ui], .gi-track-slot, .gi-track-btn, .gi-cat-chip').forEach((node) => node.remove());
-  return clone.textContent?.replace(/\s+/g, ' ').trim() || '';
+  clone.querySelectorAll('[data-gi-ui], .gi-track-slot, .gi-track-btn, .gi-cat-chip, #gi-thread-panel').forEach((node) => node.remove());
+  const direct = clone.textContent?.replace(/\s+/g, ' ').trim() || '';
+  const framed = readFrameText(el);
+  if (framed.length > direct.length) return framed;
+  return direct || framed;
+}
+
+/** Promotional mail often keeps the body in a same-origin frame. */
+function readFrameText(el: Element): string {
+  const frames = el instanceof HTMLIFrameElement ? [el] : [...el.querySelectorAll('iframe')];
+  const parts: string[] = [];
+  for (const frame of frames) {
+    if (!(frame instanceof HTMLIFrameElement)) continue;
+    let raw = '';
+    try {
+      raw = frame.contentDocument?.body?.textContent || '';
+    } catch {
+      raw = '';
+    }
+    const text = raw.replace(/\s+/g, ' ').trim();
+    if (text) parts.push(text);
+  }
+  return parts.join(' ');
 }
 
 export function findComposeRoot(root: ParentNode = document): HTMLElement | null {

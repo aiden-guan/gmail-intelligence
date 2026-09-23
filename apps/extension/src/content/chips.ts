@@ -30,12 +30,19 @@ export function applyCategoryChip(row: HTMLElement, category: string, manual: bo
 }
 
 export function rowsForThread(threadId: string, root: ParentNode = document): HTMLElement[] {
-  return [...root.querySelectorAll<HTMLElement>('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]')].filter((row) => {
-    const ids = [
-      row.getAttribute('data-legacy-thread-id'),
-      row.getAttribute('data-thread-id'),
-      row.getAttribute('data-gi-thread-id'),
-    ];
-    return ids.includes(threadId);
-  });
+  const matched = [...root.querySelectorAll<HTMLElement>('tr, [role="row"], [role="listitem"]')].filter((row) =>
+    rowHasThreadId(row, threadId),
+  );
+  return matched.filter((row) => !matched.some((other) => other !== row && other.contains(row)));
+}
+
+function rowHasThreadId(row: HTMLElement, threadId: string): boolean {
+  const attrs = ['data-legacy-thread-id', 'data-thread-id', 'data-thread-perm-id', 'data-gi-thread-id'];
+  const nodes = [row, ...row.querySelectorAll('[data-legacy-thread-id], [data-thread-id], [data-thread-perm-id], [data-gi-thread-id]')];
+  for (const node of nodes) {
+    for (const attr of attrs) {
+      if (node.getAttribute(attr) === threadId) return true;
+    }
+  }
+  return false;
 }

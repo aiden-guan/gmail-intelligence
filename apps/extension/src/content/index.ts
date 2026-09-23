@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ExtensionSettings } from '@gi/shared';
-import { DEFAULT_SETTINGS } from '@gi/shared';
+import { DEFAULT_SETTINGS, localThreadSummary } from '@gi/shared';
 import {
   CompositeGmailAdapter,
   findNotice,
@@ -34,7 +34,7 @@ let booted = false;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
 let currentThreadId: string | null = null;
-const summaryNotes = new Map<string, { pending: boolean; reason: string | null }>();
+const summaryNotes = new Map<string, { pending: boolean; reason: string | null; preview: string | null }>();
 const summaryKeys = new Map<string, string>();
 
 function runtimeAlive(): boolean {
@@ -129,7 +129,6 @@ async function boot(): Promise<void> {
       const bodyKey = `${thread.threadId}:${thread.messages.map((message) => message.bodyText.length).join(',')}`;
       if (summaryKeys.get(thread.threadId) !== bodyKey) {
         summaryKeys.set(thread.threadId, bodyKey);
-        summaryNotes.set(thread.threadId, { pending: true, reason: null });
         void summarizeOpenThread(thread);
       }
       if (!sdkReady) showDomThreadPanel(event.thread.threadId);
@@ -325,35 +324,60 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
   }
   const tracking = sentStatus?.openThreadStatus() ?? null;
   const note = summaryNotes.get(threadId);
-  const pending = intel?.summary
+  const preview = intel?.summary?.summary?.oneLine ? null : note?.preview || null;
+  const pending = intel?.summary?.summary?.oneLine
     ? null
-    : note?.pending
-      ? 'Reading this thread…'
-      : note?.reason || (intel?.classification ? null : 'Reading this thread…');
+    : preview
+      ? null
+      : note?.pending
+        ? 'Reading this thread…'
+        : note?.reason || (intel?.classification ? null : 'Reading this thread…');
   root.render(
     createElement(ThreadIntelCard, {
       intel,
       tracking,
       pending,
+      preview,
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
     }),
   );
 }
 
+function previewLine(thread: NormalizedThread): string | null {
+  if (!thread.messages.some((message) => message.bodyText.trim())) return null;
+  const line = localThreadSummary({
+    subject: thread.subject,
+    messages: thread.messages.map((message) => ({ bodyText: message.bodyText })),
+  }).oneLine.trim();
+  return line && line !== 'Empty message' ? line : null;
+}
+
 async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
+  const preview = previewLine(thread);
+  summaryNotes.set(thread.threadId, { pending: !preview, reason: null, preview });
+  await refreshThread(thread.threadId);
   const direction = thread.route === 'sent' ? 'outbound' : 'inbound';
   await send({ type: 'INGEST_THREAD', direction, thread });
-  const readable = thread.messages.some((message) => message.bodyText.trim());
-  if (!readable) {
-    summaryNotes.set(thread.threadId, { pending: false, reason: 'The message text is not on screen yet.' });
+  if (!preview) {
+    summaryNotes.set(thread.threadId, { pending: false, reason: 'The message text is not on screen yet.', preview: null });
     await refreshThread(thread.threadId);
     return;
   }
-  const res = await send<{ ok?: boolean; reason?: string }>({ type: 'SUMMARIZE_THREAD', threadId: thread.threadId });
+  const res = await send<{ ok?: boolean; reason?: string }>({
+    type: 'SUMMARIZE_THREAD',
+    threadId: thread.threadId,
+    subject: thread.subject,
+    messages: thread.messages.map((message) => ({
+      sender: message.sender.email,
+      bodyText: message.bodyText,
+      timestamp: message.timestamp || '',
+    })),
+  });
   summaryNotes.set(thread.threadId, {
     pending: false,
-    reason: res?.ok ? null : res?.reason || 'Could not summarize this thread.',
+    reason: res?.ok ? null : res?.reason || null,
+    preview,
   });
   await refreshThread(thread.threadId);
 }
@@ -587,7 +611,18 @@ async function runCommand(id: string): Promise<void> {
   }
   if (command === 'summarize') {
     showToast('Summarizing…');
-    const res = await send<{ ok?: boolean; oneLine?: string; reason?: string }>({ type: 'SUMMARIZE_THREAD', threadId });
+    const current = await adapter.getCurrentThread();
+    const opened = current.thread;
+    const res = await send<{ ok?: boolean; oneLine?: string; reason?: string }>({
+      type: 'SUMMARIZE_THREAD',
+      threadId,
+      subject: opened?.subject || '',
+      messages: (opened?.messages || []).map((message) => ({
+        sender: message.sender.email,
+        bodyText: message.bodyText,
+        timestamp: message.timestamp || '',
+      })),
+    });
     showToast(res?.ok ? res.oneLine || 'Summary ready.' : res?.reason || 'Could not summarize.');
     await refreshThread(threadId);
     return;

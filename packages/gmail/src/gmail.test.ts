@@ -6,7 +6,7 @@ import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { GmailActionAdapter } from './GmailActionAdapter.js';
 import { validateGmailJsBridgePayload } from './GmailJsCaptureAdapter.js';
 import { CompositeGmailAdapter } from './index.js';
-import { findThreadRows, isOpenThreadRoute, SELECTORS, threadIdFromLocation } from './selectors.js';
+import { findThreadRows, getThreadIdFromRow, isOpenThreadRoute, messageText, SELECTORS, threadIdFromLocation } from './selectors.js';
 
 function fixtureInbox(): void {
   document.body.innerHTML = `
@@ -80,6 +80,40 @@ describe('DomFallbackAdapter fixtures', () => {
     expect(res.thread?.threadId).toBe('KtbxAbc');
     expect(res.thread?.messages[0]?.bodyText).toBe('sfeefse');
     expect(res.thread?.messages[0]?.sender.email).toBe('me@berkeley.edu');
+  });
+
+  it('reads a list row and the message text inside a frame', async () => {
+    document.body.innerHTML = `
+      <div role="main">
+        <div role="list">
+          <div role="listitem">
+            <span email="ada@example.com">Ada</span>
+            <span data-thread-id="thread-f:1" data-legacy-thread-id="thread-7">Weekend sale</span>
+          </div>
+        </div>
+      </div>
+    `;
+    const rows = findThreadRows(document);
+    expect(rows).toHaveLength(1);
+    expect(getThreadIdFromRow(rows[0]!)).toBe('thread-7');
+
+    location.hash = '#inbox/thread-7';
+    document.body.innerHTML = `
+      <div role="main">
+        <h2 class="hP">Weekend sale</h2>
+        <div class="a3s aiL" data-message-id="m1"></div>
+      </div>
+    `;
+    const frame = document.createElement('iframe');
+    document.querySelector('.a3s')!.append(frame);
+    const frameBody = frame.contentDocument?.body;
+    expect(frameBody).toBeTruthy();
+    frameBody!.innerHTML = '<div>Our weekend sale starts Friday.</div>';
+    expect(messageText(document.querySelector('.a3s')!)).toBe('Our weekend sale starts Friday.');
+    const adapter = new DomFallbackAdapter();
+    const opened = await adapter.getCurrentThread();
+    expect(opened.thread?.threadId).toBe('thread-7');
+    expect(opened.thread?.messages[0]?.bodyText).toBe('Our weekend sale starts Friday.');
   });
 
   it('detects compose', async () => {

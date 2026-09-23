@@ -3,6 +3,7 @@ import {
   DraftSuggestionSchema,
   ThreadSummarySchema,
   type DraftSuggestion,
+  type ThreadSummary,
 } from '@gi/shared';
 import { z } from 'zod';
 import type {
@@ -57,7 +58,7 @@ export function createPromptBackedProvider(
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'invalid JSON';
       const repair = await complete(
-        `Fix the JSON so it matches the requested object. ${JSON_RULE}`,
+        `Fix the JSON so it matches the requested object. Include every required key. Use empty arrays or empty strings when a value is missing. ${JSON_RULE}`,
         clip(`Problem: ${reason}\n\nPrevious output:\n${first.text}`, maxUserChars),
       );
       return { data: schema.parse(extractJsonObject(repair.text)), usage: repair.usage ?? first.usage };
@@ -80,7 +81,7 @@ export function createPromptBackedProvider(
     },
     async summarizeThread(input: SummarizeInput) {
       const { data, usage } = await chatJson(
-        'Summarize the email thread. oneLine is under 200 characters. keyPoints, decisions, unansweredQuestions, commitments, dates, and actionItems are short string arrays.',
+        'Summarize the email thread. oneLine is under 200 characters. keyPoints, decisions, unansweredQuestions, commitments, dates, and actionItems are short string arrays. Use empty arrays when there are none.',
         JSON.stringify({
           subject: input.subject,
           messages: input.messages.slice(-8).map((message) => ({
@@ -89,7 +90,7 @@ export function createPromptBackedProvider(
             bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),
           })),
         }),
-        ThreadSummarySchema,
+        z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
       );
       return { result: data, usage };
     },
@@ -164,7 +165,54 @@ async function draft(
   };
 }
 
+/** Accept the shorter objects models actually return. */
+export function coerceThreadSummary(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) return value;
+  const oneLine = firstString(record, ['oneLine', 'one_line', 'summary', 'tldr', 'tl_dr']);
+  if (!oneLine) return value;
+  return {
+    oneLine: clip(oneLine, 280),
+    keyPoints: stringList(record.keyPoints ?? record.key_points ?? record.points),
+    decisions: stringList(record.decisions),
+    unansweredQuestions: stringList(record.unansweredQuestions ?? record.unanswered_questions ?? record.questions),
+    commitments: stringList(record.commitments),
+    dates: stringList(record.dates),
+    actionItems: stringList(record.actionItems ?? record.action_items ?? record.actions),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      const joined = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).join(' ');
+      if (joined) return joined;
+    }
+  }
+  return null;
+}
+
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => clip(item.trim(), 240))
+      .slice(0, 8);
+  }
+  if (typeof value === 'string' && value.trim()) return [clip(value.trim(), 240)];
+  return [];
+}
+
 function clip(text: string, max: number): string {
   if (text.length <= max) return text;
-  return `${text.slice(0, max)}…`;
+  if (max < 2) return text.slice(0, max);
+  return `${text.slice(0, max - 1)}…`;
 }
