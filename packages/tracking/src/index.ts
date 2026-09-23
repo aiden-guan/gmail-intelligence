@@ -128,7 +128,8 @@ export class TrackingClient {
  */
 export function buildTrackingPixelHtml(pixelUrl: string): string {
   const src = escapeAttr(pixelUrl);
-  return `<img src="${src}" width="1" height="1" alt="" border="0" referrerpolicy="no-referrer" style="width:1px;height:1px;border:0;outline:none;overflow:hidden;" />`;
+  // A table keeps the image when Gmail rewrites the message. Zero-size and display:none are not fetched.
+  return `<table role="presentation" width="1" height="1" cellpadding="0" cellspacing="0" border="0" style="width:1px;height:1px;border:0;"><tr><td style="width:1px;height:1px;line-height:0;"><img src="${src}" width="1" height="1" alt="" border="0" referrerpolicy="no-referrer" style="display:block;width:1px;height:1px;border:0;outline:none;" /></td></tr></table>`;
 }
 
 export function appendTrackingPixel(html: string, pixelUrl: string): string {
@@ -242,14 +243,14 @@ export function matchTrackedEmail(
 ): TrackedEmailSummary | null {
   const ids = new Set(row.threadIds.map((id) => id.trim()).filter(Boolean));
   if (ids.size > 0) {
-    const byThread = emails.filter((email) => email.gmailThreadId && ids.has(email.gmailThreadId));
+    const byThread = emails.filter((email) => threadIdsMatch(email.gmailThreadId, ids));
     if (byThread.length > 0) return mostRecent(byThread);
   }
 
   const subject = normalizeSubject(row.subject);
   if (!subject) return null;
   const rowEmails = new Set(row.emails.map(normalizeEmail).filter(Boolean));
-  let candidates = emails.filter((email) => normalizeSubject(email.subject) === subject);
+  let candidates = emails.filter((email) => subjectsMatch(row.subject, email.subject));
   if (rowEmails.size > 0) {
     candidates = candidates.filter((email) =>
       email.recipients.some((recipient) => rowEmails.has(normalizeEmail(recipient))),
@@ -261,6 +262,33 @@ export function matchTrackedEmail(
     (email) => !email.gmailThreadId || ids.size === 0 || ids.has(email.gmailThreadId),
   );
   return sameThread.length > 0 ? mostRecent(sameThread) : null;
+}
+
+function threadIdsMatch(stored: string | null, ids: Set<string>): boolean {
+  if (!stored) return false;
+  const needle = canonicalThreadId(stored);
+  if (!needle) return false;
+  for (const id of ids) {
+    if (canonicalThreadId(id) === needle) return true;
+  }
+  return false;
+}
+
+function canonicalThreadId(id: string): string {
+  return id.trim().replace(/^#/, '').replace(/^msg-a:/i, '');
+}
+
+/** Sent rows append the snippet or a category chip onto the subject. */
+export function subjectsMatch(rowSubject: string, emailSubject: string): boolean {
+  const row = normalizeSubject(rowSubject);
+  const email = normalizeSubject(emailSubject);
+  if (!row || !email) return false;
+  if (row === email) return true;
+  if (email.length >= 4 && (row.startsWith(`${email} `) || row.startsWith(`${email}-`) || row.startsWith(`${email}—`))) {
+    return true;
+  }
+  if (row.length >= 4 && (email.startsWith(`${row} `) || email.startsWith(`${row}-`))) return true;
+  return false;
 }
 
 export function normalizeSubject(subject: string): string {

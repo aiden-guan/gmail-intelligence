@@ -18,7 +18,7 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['"IBM Plex Sans"', 'Segoe UI', 'system-ui', 'sans-serif'],
+        sans: ['"Instrument Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
       },
     },

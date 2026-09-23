@@ -4,7 +4,9 @@ import {
   AgentSafetyTier,
   addBusinessDays,
   detectPlaceholders,
+  isPastedSummary,
   localThreadSummary,
+  tightenSummary,
   type ClassificationResult,
   type ExtensionSettings,
 } from '@gi/shared';
@@ -242,45 +244,51 @@ export class AgentLoop {
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
   }): Promise<void> {
     const existing = await this.deps.db.thread_summaries.get(input.threadId);
-    if (existing?.fingerprint === input.fingerprint && existing.source !== 'message') return;
+    const fingerprint = `${input.fingerprint}:sum3`;
+    const storedLine = existing?.summary.oneLine || '';
+    const stalePaste = Boolean(storedLine) && isPastedSummary(storedLine, input.messages);
+    if (existing?.fingerprint === fingerprint && existing.source === 'model' && !stalePaste) return;
 
     const aiReady = Boolean(this.deps.ai) && this.deps.settings().aiMode !== 'disabled';
-    const attemptKey = `${input.threadId}:${input.fingerprint}`;
+    const attemptKey = `${input.threadId}:${fingerprint}`;
     if (aiReady && !this.summaryAttempts.has(attemptKey)) {
       this.summaryAttempts.add(attemptKey);
       try {
-        const { result } = await this.deps.queue.enqueue('summary', input.fingerprint, () =>
+        const { result } = await this.deps.queue.enqueue('summary', fingerprint, () =>
           this.deps.ai!.summarizeThread({
             subject: input.subject,
             messages: input.messages,
           }),
         );
-        await this.deps.db.thread_summaries.put({
-          threadId: input.threadId,
-          fingerprint: input.fingerprint,
-          summary: result,
-          createdAt: Date.now(),
-          source: 'model',
-        });
-        await this.deps.log({
-          type: 'summarize',
-          threadId: input.threadId,
-          detail: result.oneLine,
-          tier: AgentSafetyTier.READ_ONLY,
-        });
-        this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
-        this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
-        return;
+        const summary = tightenSummary(result, input);
+        if (summary.oneLine && !isPastedSummary(summary.oneLine, input.messages)) {
+          await this.deps.db.thread_summaries.put({
+            threadId: input.threadId,
+            fingerprint,
+            summary,
+            createdAt: Date.now(),
+            source: 'model',
+          });
+          await this.deps.log({
+            type: 'summarize',
+            threadId: input.threadId,
+            detail: summary.oneLine,
+            tier: AgentSafetyTier.READ_ONLY,
+          });
+          this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
+          this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+          return;
+        }
       } catch {
         /* Keep a summary of the text on screen when the model fails. */
       }
     }
 
-    if (existing?.fingerprint === input.fingerprint) return;
+    if (existing?.fingerprint === fingerprint && !stalePaste) return;
     const summary = localThreadSummary(input);
     await this.deps.db.thread_summaries.put({
       threadId: input.threadId,
-      fingerprint: input.fingerprint,
+      fingerprint,
       summary,
       createdAt: Date.now(),
       source: 'message',

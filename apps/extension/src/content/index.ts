@@ -22,7 +22,8 @@ import { applyCategoryChip, rowsForThread } from './chips';
 import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
 import { attachSdkComposeTracking, installDomComposeTracking, prepareDomCompose } from './compose-tracking';
 import { installSentStatus, type SentStatusController } from './sent-status';
-import { ThreadIntelCard, type ThreadIntelData } from './thread-panel';
+import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
+import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
 import { showToast } from './toasts';
 
 const adapter = new CompositeGmailAdapter();
@@ -33,6 +34,7 @@ let sentStatus: SentStatusController | null = null;
 let booted = false;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
+let islandMode: IslandMode | null = null;
 let currentThreadId: string | null = null;
 const summaryNotes = new Map<string, { pending: boolean; reason: string | null; preview: string | null }>();
 const summaryKeys = new Map<string, string>();
@@ -105,9 +107,25 @@ function reportRuntime(lastAction?: { success: boolean; action: string; reason?:
   });
 }
 
+function currentIslandMode(): IslandMode {
+  if (islandMode) return islandMode;
+  try {
+    const stored = sessionStorage.getItem('gi.island');
+    if (stored === 'docked' || stored === 'open' || stored === 'expanded') {
+      islandMode = stored;
+      return stored;
+    }
+  } catch {
+    /* sessionStorage can throw on hardened pages */
+  }
+  islandMode = 'open';
+  return 'open';
+}
+
 async function boot(): Promise<void> {
   if (booted) return;
   booted = true;
+  ensureSurface();
   await refreshSettings();
   const sdk = await tryLoadInboxSdk();
   if (sdk) {
@@ -174,6 +192,13 @@ async function boot(): Promise<void> {
     if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
   });
   setupCommandPalette();
+  const pullTracking = () => {
+    if (document.visibilityState === 'hidden') return;
+    void send({ type: 'TRACKING_POLL' });
+  };
+  pullTracking();
+  window.setInterval(pullTracking, 12_000);
+  document.addEventListener('visibilitychange', pullTracking);
   reportRuntime();
 }
 
@@ -252,7 +277,8 @@ async function mountSdkSidebar(threadView: {
   if (!threadId || !threadView.addSidebarContentPanel) return;
   const el = document.createElement('div');
   el.setAttribute('data-gi-ui', 'thread-sidebar');
-  el.style.padding = '8px 4px';
+  el.style.padding = '0';
+  el.style.background = 'transparent';
   threadView.addSidebarContentPanel({
     title: 'Intelligence',
     iconUrl: chrome.runtime.getURL('icons/icon48.png'),
@@ -262,31 +288,41 @@ async function mountSdkSidebar(threadView: {
   await refreshPanel(el, threadId);
 }
 
+function placeFloatPanel(panel: HTMLElement): void {
+  const main = document.querySelector<HTMLElement>('[role="main"]');
+  const rect = main?.getBoundingClientRect();
+  const scrollbar = main ? Math.max(0, main.offsetWidth - main.clientWidth) : 0;
+  const right = rect ? floatPanelRightPx(window.innerWidth, rect.right, scrollbar) : 28;
+  panel.style.setProperty('right', `${right}px`, 'important');
+}
+
 function showDomThreadPanel(threadId: string): void {
+  ensureSurface();
   let panel = document.getElementById('gi-thread-panel');
   if (!panel) {
     panel = document.createElement('aside');
     panel.id = 'gi-thread-panel';
     panel.setAttribute('data-gi-ui', 'thread-panel');
-    panel.style.cssText = [
-      'position:fixed',
-      'top:64px',
-      'right:16px',
-      'width:280px',
-      'z-index:20',
-      'background:#fff',
-      'border:1px solid #dadce0',
-      'border-radius:8px',
-      'padding:12px',
-    ].join(';');
+    panel.addEventListener('mousedown', (event) => event.stopPropagation());
+    panel.addEventListener('click', (event) => event.stopPropagation());
     document.documentElement.append(panel);
+    window.addEventListener('resize', () => {
+      const current = document.getElementById('gi-thread-panel');
+      if (current) placeFloatPanel(current);
+    });
   }
+  placeFloatPanel(panel);
   void refreshPanel(panel, threadId);
 }
 
 function hideDomThreadPanel(): void {
   const panel = document.getElementById('gi-thread-panel');
   if (!panel) return;
+  const mount = panel.shadowRoot?.querySelector<HTMLElement>('#gi-mount');
+  if (mount) {
+    panelRoots.get(mount)?.unmount();
+    panelRoots.delete(mount);
+  }
   panelRoots.get(panel)?.unmount();
   panelRoots.delete(panel);
   panel.remove();
@@ -316,11 +352,14 @@ async function paintVisibleChips(threadIds: string[]): Promise<void> {
 }
 
 async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
+  const host = el.id === 'gi-mount' ? ((el.getRootNode() as ShadowRoot).host as HTMLElement) : el;
+  const variant = host.getAttribute('data-gi-ui') === 'thread-sidebar' ? 'sidebar' : 'float';
+  const mount = shadowMount(host);
   const intel = await getIntel(threadId);
-  let root = panelRoots.get(el);
+  let root = panelRoots.get(mount);
   if (!root) {
-    root = createRoot(el);
-    panelRoots.set(el, root);
+    root = createRoot(mount);
+    panelRoots.set(mount, root);
   }
   const tracking = sentStatus?.openThreadStatus() ?? null;
   const note = summaryNotes.get(threadId);
@@ -338,6 +377,25 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       tracking,
       pending,
       preview,
+      mode: currentIslandMode(),
+      variant,
+      onMode: (mode) => {
+        islandMode = mode;
+        try {
+          sessionStorage.setItem('gi.island', mode);
+        } catch {
+          /* ignore */
+        }
+        void refreshPanel(host, threadId);
+        if (host.id === 'gi-thread-panel') {
+          document.querySelectorAll<HTMLElement>('[data-gi-ui="thread-sidebar"]').forEach((node) => {
+            void refreshPanel(node, threadId);
+          });
+        } else {
+          const floatHost = document.getElementById('gi-thread-panel');
+          if (floatHost) void refreshPanel(floatHost, threadId);
+        }
+      },
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
     }),
@@ -400,7 +458,9 @@ async function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrac
 }
 
 function linkTracked(link: { trackingId: string; gmailThreadId: string | null; gmailMessageId: string | null }): void {
-  void send({ type: 'LINK_TRACKED_EMAIL', ...link });
+  void send({ type: 'LINK_TRACKED_EMAIL', ...link }).then(() => {
+    void send({ type: 'TRACKING_POLL' });
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -555,37 +615,121 @@ function setupCommandPalette(): void {
 
 function openCommandPalette(): void {
   if (document.querySelector('[data-gi-ui="cmdk"]')) return;
-  const wrap = document.createElement('div');
-  wrap.setAttribute('data-gi-ui', 'cmdk');
-  wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(32,33,36,.32);display:flex;justify-content:center;padding-top:12vh';
+  ensureSurface();
+  const host = document.createElement('div');
+  host.setAttribute('data-gi-ui', 'cmdk');
+  host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;';
+  const shadow = host.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.textContent = SURFACE_CSS;
+  const scrim = document.createElement('div');
+  scrim.className = 'gi-cmdk';
   const panel = document.createElement('div');
-  panel.style.cssText = 'width:min(480px,92vw);background:#fff;border-radius:8px;overflow:hidden;font:14px/1.4 "Google Sans",Roboto,Arial,sans-serif';
+  panel.className = 'gi-cmdk-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Commands');
+  const core = document.createElement('div');
+  core.className = 'gi-cmdk-core';
   const input = document.createElement('input');
+  input.className = 'gi-cmdk-input';
   input.placeholder = 'Search commands';
-  input.style.cssText = 'width:100%;border:0;border-bottom:1px solid #dadce0;padding:12px 14px;outline:none;font:inherit';
+  input.setAttribute('aria-label', 'Search commands');
   const list = document.createElement('div');
+  list.className = 'gi-cmdk-list';
+  list.setAttribute('role', 'listbox');
+  const foot = document.createElement('div');
+  foot.className = 'gi-cmdk-foot';
+  foot.innerHTML = '<span><kbd class="gi-kbd">↑↓</kbd> move</span><span><kbd class="gi-kbd">↵</kbd> run</span><span><kbd class="gi-kbd">esc</kbd> close</span>';
+
+  let active = 0;
+  let items: HTMLButtonElement[] = [];
+
+  const close = () => {
+    window.removeEventListener('keydown', onWindowKey, true);
+    host.remove();
+  };
+  const onWindowKey = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
+  const choose = (index: number) => {
+    const id = items[index]?.dataset.command;
+    if (!id) return;
+    close();
+    void runCommand(id);
+  };
+  const paintActive = (scroll = false) => {
+    items.forEach((row, index) => {
+      const on = index === active;
+      row.dataset.active = on ? 'true' : 'false';
+      row.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    if (scroll) items[active]?.scrollIntoView({ block: 'nearest' });
+  };
   const render = (filter: string) => {
     list.replaceChildren();
-    for (const command of VISIBLE_COMMANDS.filter((item) => item.label.toLowerCase().includes(filter.toLowerCase()))) {
+    items = [];
+    const commands = VISIBLE_COMMANDS.filter((item) => item.label.toLowerCase().includes(filter.toLowerCase()));
+    if (active >= commands.length) active = 0;
+    if (!commands.length) {
+      const empty = document.createElement('div');
+      empty.className = 'gi-cmdk-empty';
+      empty.textContent = 'No matching commands';
+      list.append(empty);
+      return;
+    }
+    commands.forEach((command, index) => {
       const row = document.createElement('button');
       row.type = 'button';
+      row.className = 'gi-cmdk-row';
+      row.dataset.command = command.id;
+      row.dataset.active = index === active ? 'true' : 'false';
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', index === active ? 'true' : 'false');
       row.textContent = command.label;
-      row.style.cssText = 'display:block;width:100%;text-align:left;padding:10px 14px;border:0;background:#fff;cursor:pointer;font:inherit';
-      row.onclick = () => {
-        wrap.remove();
-        void runCommand(command.id);
+      row.onmouseenter = () => {
+        active = index;
+        paintActive();
       };
+      row.onclick = () => choose(index);
+      items.push(row);
       list.append(row);
+    });
+  };
+
+  input.oninput = () => {
+    active = 0;
+    render(input.value);
+  };
+  input.onkeydown = (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      event.stopPropagation();
+      active = Math.min(active + 1, Math.max(items.length - 1, 0));
+      paintActive(true);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      event.stopPropagation();
+      active = Math.max(active - 1, 0);
+      paintActive(true);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      choose(active);
     }
   };
+  scrim.addEventListener('click', (event) => {
+    if (event.target === scrim) close();
+  });
   render('');
-  input.oninput = () => render(input.value);
-  wrap.onclick = (event) => {
-    if (event.target === wrap) wrap.remove();
-  };
-  panel.append(input, list);
-  wrap.append(panel);
-  document.documentElement.append(wrap);
+  core.append(input, list, foot);
+  panel.append(core);
+  scrim.append(panel);
+  shadow.append(style, scrim);
+  document.documentElement.append(host);
+  window.addEventListener('keydown', onWindowKey, true);
   input.focus();
 }
 

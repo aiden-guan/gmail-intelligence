@@ -114,7 +114,7 @@ export default defineConfig(({ mode }) => ({
       output: {
         entryFileNames: (chunk) => {
           if (chunk.name === 'background') return 'background.js';
-          if (chunk.name === 'content') return 'content.js';
+          if (chunk.name === 'content') return 'gmail.js';
           if (chunk.name === 'mainWorld') return 'main-world.js';
           return 'assets/[name]-[hash].js';
         },
@@ -145,7 +145,7 @@ export default defineConfig(({ mode }) => ({
             output: {
               format: 'iife' as const,
               inlineDynamicImports: true,
-              entryFileNames: 'content.js',
+              entryFileNames: 'gmail.js',
             },
           },
         },

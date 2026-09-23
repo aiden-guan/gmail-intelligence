@@ -16,29 +16,53 @@ export function PopupApp() {
     });
   }, []);
 
-  const ai = diag?.ai?.status === 'ready' ? 'AI ready' : diag?.ai?.status === 'disabled' ? 'AI off' : 'AI needs setup';
-  const tracking = diag?.tracking === 'healthy' ? 'Tracker connected' : diag?.tracking === 'not_configured' ? 'Tracking not set up' : 'Tracker unavailable';
+  const aiReady = diag?.ai?.status === 'ready';
+  const aiOff = diag?.ai?.status === 'disabled';
+  const ai = aiReady ? 'AI ready' : aiOff ? 'AI off' : 'AI needs setup';
+  const trackingReady = diag?.tracking === 'healthy';
+  const tracking =
+    trackingReady ? 'Tracker connected' : diag?.tracking === 'not_configured' ? 'Tracking not set up' : 'Tracker unavailable';
 
   return (
-    <div className="w-[280px] bg-white p-4 text-[#202124]">
-      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5f6368]">Gmail Intelligence</div>
-      <ul className="mt-3 space-y-1 text-[13px]">
-        <li>{diag?.gmailTab === 'connected' ? '✓ Gmail connected' : 'Gmail not connected'}</li>
-        <li>{diag?.ai?.status === 'ready' || diag?.ai?.status === 'disabled' ? `✓ ${ai}` : ai}</li>
-        <li>{diag?.tracking === 'healthy' ? `✓ ${tracking}` : tracking}</li>
-      </ul>
-      <div className="mt-4 flex flex-col gap-2">
-        <button className="rounded border border-[#dadce0] px-3 py-2 text-left text-[13px]" onClick={() => chrome.tabs.create({ url: 'https://mail.google.com/' })}>
-          Open Gmail
-        </button>
-        <button className="rounded border border-[#dadce0] px-3 py-2 text-left text-[13px]" onClick={() => void openInbox()}>
-          Open Inbox Intelligence
-        </button>
-        <button className="rounded border border-[#dadce0] px-3 py-2 text-left text-[13px]" onClick={() => chrome.runtime.openOptionsPage()}>
-          Settings
-        </button>
+    <div className="gi-app w-[320px] p-3">
+      <div className="gi-shell">
+        <div className="gi-core">
+          <div className="flex items-center gap-2.5">
+            <span className="gi-mark" aria-hidden="true" />
+            <div>
+              <div className="gi-kicker">Gmail</div>
+              <div className="text-[15px] font-semibold tracking-[-0.03em]">Intelligence</div>
+            </div>
+          </div>
+          <ul className="mt-3">
+            <Status on={diag?.gmailTab === 'connected'} label={diag?.gmailTab === 'connected' ? 'Gmail connected' : 'Gmail not connected'} />
+            <Status on={aiReady || aiOff} label={ai} />
+            <Status on={trackingReady} label={tracking} />
+          </ul>
+          <div className="mt-4 grid gap-2">
+            <button type="button" className="gi-btn gi-btn-block" onClick={() => chrome.tabs.create({ url: 'https://mail.google.com/' })}>
+              Open Gmail
+            </button>
+            <button type="button" className="gi-btn gi-btn-ghost gi-btn-block" onClick={() => void openInbox()}>
+              Open Inbox Intelligence
+            </button>
+            <button type="button" className="gi-btn gi-btn-ghost gi-btn-block" onClick={() => chrome.runtime.openOptionsPage()}>
+              Settings
+            </button>
+          </div>
+          <p className="gi-hint">⌘K in Gmail opens commands</p>
+        </div>
       </div>
     </div>
+  );
+}
+
+function Status(props: { on: boolean; label: string }) {
+  return (
+    <li className="gi-status">
+      <span className={props.on ? 'gi-dot' : 'gi-dot is-quiet'} />
+      <span>{props.label}</span>
+    </li>
   );
 }
 

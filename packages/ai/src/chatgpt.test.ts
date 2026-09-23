@@ -241,16 +241,19 @@ describe('prompt-backed provider', () => {
 
   it('asks the selected model for a short formatted summary', async () => {
     let system = '';
-    const provider = createPromptBackedProvider('test', async (prompt) => {
+    let user = '';
+    const provider = createPromptBackedProvider('test', async (prompt, content) => {
       system = prompt;
+      user = content;
       return { text: JSON.stringify({ oneLine: 'ACA invited you to the Berkeley China Summit.' }) };
     });
     await provider.summarizeThread({
       subject: 'Berkeley China Summit',
       messages: [{ sender: 'aca@example.com', bodyText: 'Hi all, we are excited to share an opportunity.', timestamp: '' }],
     });
-    expect(system).toContain('one complete sentence');
-    expect(system).toContain('Do not start with Hi');
+    expect(system).toContain('Never quote');
+    expect(system).toContain('you can sign up here');
+    expect(user).toContain('Do not copy its sentences');
     expect(system).toContain('actionItems');
     expect(system).toContain('Return one JSON object only');
   });

@@ -15,7 +15,7 @@ import type {
   SummarizeInput,
   UsageStats,
 } from './index.js';
-import { EMAIL_SUMMARY_SYSTEM_PROMPT } from './summary-prompt.js';
+import { EMAIL_SUMMARY_SYSTEM_PROMPT, summaryUserContent } from './summary-prompt.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -83,14 +83,16 @@ export function createPromptBackedProvider(
     async summarizeThread(input: SummarizeInput) {
       const { data, usage } = await chatJson(
         EMAIL_SUMMARY_SYSTEM_PROMPT,
-        JSON.stringify({
-          subject: input.subject,
-          messages: input.messages.slice(-8).map((message) => ({
-            sender: message.sender,
-            timestamp: message.timestamp,
-            bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),
-          })),
-        }),
+        summaryUserContent(
+          JSON.stringify({
+            subject: input.subject,
+            messages: input.messages.slice(-8).map((message) => ({
+              sender: message.sender,
+              timestamp: message.timestamp,
+              bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),
+            })),
+          }),
+        ),
         z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
       );
       return { result: data, usage };

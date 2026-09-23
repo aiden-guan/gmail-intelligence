@@ -163,6 +163,15 @@ describe('sent mail status', () => {
     ).toBe('trk_1');
   });
 
+  it('matches a sent row whose subject line also contains the preview', () => {
+    expect(
+      matchTrackedEmail(
+        { threadIds: [], subject: 'Hello - can you review this today', emails: ['a@b.com'] },
+        [{ ...base, gmailThreadId: null }],
+      )?.trackingId,
+    ).toBe('trk_1');
+  });
+
   it('matches an unlinked send by subject and recipient', () => {
     const unlinked = { ...base, gmailThreadId: null };
     expect(

@@ -107,46 +107,64 @@ export function SidePanelApp() {
   const label = CATEGORIES.find((item) => item[0] === category)?.[1] || 'Inbox';
 
   return (
-    <div className="flex h-full flex-col bg-white text-[#202124]">
-      <header className="border-b border-[#e8eaed] px-3 py-2">
-        <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5f6368]">Gmail Intelligence</div>
-        <div className="mt-2 flex gap-1">
-          <Tab active={mode === 'inbox'} onClick={() => setMode('inbox')}>Inbox</Tab>
-          <Tab active={mode === 'ask'} onClick={() => { setMode('ask'); chrome.storage.session.set({ panelState: { mode: 'ask', splitCategory: category } }); }}>Ask</Tab>
+    <div className="gi-app flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden">
+      <header className="px-4 pb-3 pt-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="gi-mark" aria-hidden="true" />
+            <span className="gi-kicker">Intelligence</span>
+          </div>
+          <div className="gi-segbar shrink-0">
+            <Tab active={mode === 'inbox'} onClick={() => setMode('inbox')}>
+              Inbox
+            </Tab>
+            <Tab
+              active={mode === 'ask'}
+              onClick={() => {
+                setMode('ask');
+                chrome.storage.session.set({ panelState: { mode: 'ask', splitCategory: category } });
+              }}
+            >
+              Ask
+            </Tab>
+          </div>
         </div>
+        <h1 className="mt-3 truncate text-[22px] font-medium tracking-[-0.04em]">{mode === 'ask' ? 'Ask' : label}</h1>
+        {mode === 'inbox' ? (
+          <p className="gi-muted mt-1 text-[12px]">{threads.length === 1 ? '1 thread' : `${threads.length} threads`}</p>
+        ) : (
+          <p className="gi-muted mt-1 text-[12px]">Mail already on this computer</p>
+        )}
       </header>
       {mode === 'inbox' ? (
-        <div className="flex min-h-0 flex-1">
-          <nav className="w-[132px] shrink-0 border-r border-[#e8eaed] py-2">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <nav className="gi-rail" aria-label="Splits">
             {CATEGORIES.map(([id, name]) => (
-              <button
-                key={id}
-                className={`block w-full px-3 py-1.5 text-left text-[13px] ${id === category ? 'bg-[#e8f0fe] font-medium text-[#174ea6]' : 'text-[#3c4043]'}`}
-                onClick={() => choose(id)}
-              >
+              <button key={id} type="button" className="gi-chip-btn" data-active={id === category} onClick={() => choose(id)}>
                 {name}
               </button>
             ))}
           </nav>
-          <main className="min-w-0 flex-1 overflow-auto">
-            <div className="px-3 py-2 text-[12px] text-[#5f6368]">{label} · {threads.length}</div>
+          <main className="min-h-0 flex-1 overflow-auto">
             {threads.length === 0 ? (
-              <p className="px-3 text-[13px] text-[#5f6368]">Nothing here yet. Threads appear after Gmail loads them.</p>
+              <p className="gi-muted px-4 text-[13px] leading-relaxed">Nothing here yet. Threads show up after Gmail loads them.</p>
             ) : (
-              <ul>
+              <ul className="gi-list">
                 {threads.map((thread) => (
                   <li key={thread.threadId}>
-                    <button className="block w-full px-3 py-2 text-left hover:bg-[#f6f7f8]" onClick={() => openThread(thread.threadId)}>
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="truncate text-[13px] font-medium">{thread.sender}</span>
-                        <span className="shrink-0 text-[11px] text-[#5f6368]">{when(thread.timestamp)}</span>
+                    <button type="button" className="gi-mail" onClick={() => openThread(thread.threadId)}>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="truncate text-[13px] font-semibold tracking-[-0.02em]">{thread.sender}</span>
+                        <span className="gi-time shrink-0">{when(thread.timestamp)}</span>
                       </div>
-                      <div className="truncate text-[13px]">{thread.subject || '(no subject)'}</div>
-                      <div className="truncate text-[12px] text-[#5f6368]">
-                        {thread.snippet || ''}
-                        {thread.manual ? ' · Manual' : ''}
-                        {thread.priority === 'HIGH' ? ' · Priority' : ''}
-                      </div>
+                      <div className="mt-0.5 truncate text-[13px] text-[#dfe2ea]">{thread.subject || '(no subject)'}</div>
+                      {thread.snippet ? <div className="gi-muted mt-0.5 truncate text-[12px]">{thread.snippet}</div> : null}
+                      {thread.manual || thread.priority === 'HIGH' ? (
+                        <div className="mt-1.5 flex gap-1.5">
+                          {thread.manual ? <span className="gi-mini">Set by you</span> : null}
+                          {thread.priority === 'HIGH' ? <span className="gi-mini is-hot">Priority</span> : null}
+                        </div>
+                      ) : null}
                     </button>
                   </li>
                 ))}
@@ -156,30 +174,17 @@ export function SidePanelApp() {
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex gap-2 border-b border-[#e8eaed] p-3">
-            <input
-              className="min-w-0 flex-1 rounded border border-[#dadce0] px-2 py-1.5 text-[13px]"
-              placeholder="Ask about mail on this computer"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => event.key === 'Enter' && ask()}
-            />
-            <button className="rounded bg-[#1a73e8] px-3 text-[13px] text-white" disabled={loading} onClick={ask}>
-              {loading ? '…' : 'Ask'}
-            </button>
-          </div>
-          <div className="flex-1 overflow-auto p-3 text-[13px]">
-            {coverage ? <p className="mb-3 text-[12px] text-[#5f6368]">{coverage}</p> : null}
-            {settings.aiMode === 'disabled' ? (
-              <p className="mb-3 text-[12px] text-[#5f6368]">AI is off. Results are local matches.</p>
-            ) : null}
-            {result?.error ? <p className="text-red-700">{result.error}</p> : null}
-            {result?.answer ? <p className="whitespace-pre-wrap">{result.answer}</p> : null}
+          <div className="min-h-0 flex-1 overflow-auto px-4 pb-2">
+            {coverage ? <p className="gi-muted mb-3 text-[12px] leading-relaxed">{coverage}</p> : null}
+            {settings.aiMode === 'disabled' ? <p className="gi-muted mb-3 text-[12px]">AI is off. Results are local matches.</p> : null}
+            {result?.error ? <p className="gi-danger">{result.error}</p> : null}
+            {result?.answer ? <p className="whitespace-pre-wrap text-[14px] leading-relaxed tracking-[-0.011em]">{result.answer}</p> : null}
+            {!result && !loading ? <p className="gi-muted text-[13px] leading-relaxed">Ask about a person, a promise, or a thread you already opened.</p> : null}
             {result?.citations?.length ? (
-              <ul className="mt-3 space-y-1">
+              <ul className="mt-4 space-y-2">
                 {result.citations.map((citation) => (
                   <li key={citation.threadId}>
-                    <button className="text-left text-[#1a73e8]" onClick={() => openThread(citation.threadId)}>
+                    <button type="button" className="gi-link text-[13px]" onClick={() => openThread(citation.threadId)}>
                       {citation.subject || citation.threadId}
                     </button>
                   </li>
@@ -187,6 +192,23 @@ export function SidePanelApp() {
               </ul>
             ) : null}
           </div>
+          <form
+            className="gi-composer"
+            onSubmit={(event) => {
+              event.preventDefault();
+              ask();
+            }}
+          >
+            <input
+              className="gi-field min-w-0 flex-1"
+              placeholder="Ask about mail on this computer"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <button type="submit" className="gi-btn shrink-0" disabled={loading || !query.trim()}>
+              {loading ? 'Asking' : 'Ask'}
+            </button>
+          </form>
         </div>
       )}
     </div>
@@ -195,10 +217,7 @@ export function SidePanelApp() {
 
 function Tab(props: { active: boolean; onClick: () => void; children: string }) {
   return (
-    <button
-      className={`rounded px-2 py-1 text-[13px] ${props.active ? 'bg-[#e8f0fe] font-medium text-[#174ea6]' : 'text-[#3c4043]'}`}
-      onClick={props.onClick}
-    >
+    <button type="button" className="gi-seg" data-active={props.active} onClick={props.onClick}>
       {props.children}
     </button>
   );

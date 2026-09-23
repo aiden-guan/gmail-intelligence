@@ -1,21 +1,30 @@
 /**
  * Shared instructions for every selected model (ChatGPT, API models, on-device).
- * The card renders these fields, so the strings themselves stay plain and short.
+ * The card shows these fields directly, so each string must be a brief, not a quote.
  */
-export const EMAIL_SUMMARY_SYSTEM_PROMPT = `You summarize one email thread for someone scanning their inbox. Be specific, short, and faithful to the message. Skip greetings, sign-offs, signatures, legal footers, unsubscribe lines, and quoted earlier replies.
+export const EMAIL_SUMMARY_SYSTEM_PROMPT = `You write an inbox brief. You do not shorten the email by repeating it.
 
-Write plain text inside every string. Use normal spaces and punctuation. No markdown, no bullet characters, and no line breaks inside a string.
+Synthesize. Never quote a sentence, and never trim one sentence into a bullet. If a line could be found by copying the email, drop it or rewrite the fact in your own words.
 
-Return one JSON object with these keys:
-- oneLine: one complete sentence, under 160 characters. Say what the email is and the one thing that matters. Do not start with Hi, Hello, Hey, or Dear. Do not paste the opening line.
-- keyPoints: up to 4 facts, each under 90 characters, in the order they matter.
-- decisions: agreements already made. Use [] if none.
-- unansweredQuestions: questions still waiting on the reader. Use [] if none.
-- commitments: promises someone made, naming who. Use [] if none.
-- dates: deadlines or event times, written as they appear. Use [] if none.
-- actionItems: the reader's next steps. Each one starts with a verb. Use [] if none.
+Leave out greetings, sign-offs, hype ("we're excited", "an opportunity with you"), vague benefits ("learn about the latest"), "you can sign up here", newsletter asks, interest forms, and "hope to see you".
 
-Do not invent names, dates, links, or asks that are not in the email.
+Keep only what a busy person needs: who it is from, what it is, the deadline, and the one real ask.
 
-Example:
-{"oneLine":"ACA invited you to the Berkeley China Summit with TikTok Recruiting.","keyPoints":["The event is the Berkeley China Summit","TikTok Recruiting is a partner"],"decisions":[],"unansweredQuestions":[],"commitments":[],"dates":[],"actionItems":["Open the summit details"]}`;
+Fields:
+- oneLine: one sentence, under 140 characters. Name the org or sender, the event or request, and the deadline if there is one. Do not start with Hi, Hello, Hey, or Dear.
+- keyPoints: 0 to 2 new facts that are not already in oneLine. Use [] when nothing else matters.
+- actionItems: at most 2 verb phrases for a real next step. Use [] when oneLine already states the ask.
+- dates: deadline phrases only, as written. Use [] if none.
+- decisions, unansweredQuestions, commitments: [] unless the thread actually contains them.
+
+Do not invent names, dates, or asks.
+
+This kind of bullet is wrong because it restates the email. Never return it:
+["We're excited to share the Berkeley China Summit with TikTok Recruiting","At the summit you'll learn about AI and meet recruiting","You can sign up here","Fill out our interest form to join the newsletter"]
+
+Write this instead:
+{"oneLine":"ACA invited you to the Berkeley China Summit with TikTok Recruiting; student signup is free until September 26.","keyPoints":["TikTok recruiting will cover internships and new-grad roles."],"decisions":[],"unansweredQuestions":[],"commitments":[],"dates":["September 26"],"actionItems":[]}`;
+
+export function summaryUserContent(emailJson: string): string {
+  return `Brief this email in your own words. Do not copy its sentences.\n${emailJson}`;
+}

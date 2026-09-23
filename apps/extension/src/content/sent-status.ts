@@ -6,6 +6,7 @@ import {
   type TrackingStatusCopy,
 } from '@gi/tracking';
 import { findThreadRows, threadIdFromLocation } from '@gi/gmail';
+import { ensureSurface } from './surface';
 
 export type SentStatusController = {
   setEmails(emails: TrackedEmailSummary[]): void;
@@ -40,6 +41,7 @@ export function installSentStatus(opts: {
   const paint = () => {
     paintRows(document, emails, trackerBaseUrl, opts.onNotify);
     paintConversation(document, emails, trackerBaseUrl, opts.onNotify);
+    refreshOpenCard(emails, trackerBaseUrl);
     const next = statusSignatureFor(document, emails, trackerBaseUrl);
     if (next !== statusSignature) {
       statusSignature = next;
@@ -243,7 +245,7 @@ function placeRowSlot(row: HTMLElement, existing: HTMLElement | null): HTMLEleme
 }
 
 function statusColor(row: Element, opened: boolean): string {
-  return opened ? (isDarkRow(row) ? '#81c995' : '#188038') : isDarkRow(row) ? '#9aa0a6' : '#80868b';
+  return opened ? (isDarkRow(row) ? '#c9c2ff' : '#5c4ed0') : isDarkRow(row) ? '#9aa0a6' : '#80868b';
 }
 
 function isDarkRow(row: Element): boolean {
@@ -284,7 +286,7 @@ function renderSlot(
   color?: string,
 ): void {
   const copy = describeTrackingStatus(match, { trackerBaseUrl });
-  const ink = color || (copy.opened ? '#188038' : '#80868b');
+  const ink = color || (copy.opened ? '#5c4ed0' : '#80868b');
   const signature = `${match.trackingId}:${copy.opened}:${copy.countLabel}:${copy.markLabel}:${labeled}:${match.notifyIfNoReply}:${trackerBaseUrl}:${ink}`;
   if (slot.dataset.signature === signature && slot.querySelector('.gi-track-btn')) return;
   slot.dataset.signature = signature;
@@ -353,7 +355,7 @@ function controlStyle(color: string): string {
     'font-weight:600',
     'font-size:13px',
     'line-height:1',
-    'font-family:"Google Sans",Roboto,Arial,sans-serif',
+    'font-family:ui-sans-serif,system-ui,sans-serif',
     'vertical-align:middle',
     'white-space:nowrap',
     'flex:0 0 auto',
@@ -511,6 +513,33 @@ function placeCard(card: HTMLElement, anchor: HTMLElement): void {
   }
 }
 
+function refreshOpenCard(emails: TrackedEmailSummary[], trackerBaseUrl: string): void {
+  if (!openCard?.isConnected || !openTrackingId) return;
+  const email = emails.find((item) => item.trackingId === openTrackingId);
+  if (!email) return;
+  const copy = describeTrackingStatus(email, {
+    trackerBaseUrl: openCard.querySelector<HTMLElement>('.gi-track-btn')?.dataset.trackerBase || trackerBaseUrl,
+  });
+  const headline = openCard.querySelector('.gi-track-headline');
+  if (headline) {
+    headline.replaceChildren();
+    if (copy.emphasis) {
+      const strong = document.createElement('strong');
+      strong.textContent = copy.emphasis;
+      headline.append(strong, document.createTextNode(copy.rest));
+    } else {
+      headline.textContent = copy.headline;
+    }
+  }
+  const detail = openCard.querySelector('.gi-track-detail span');
+  if (detail) detail.textContent = copy.detail;
+  const count = openCard.querySelector('.gi-track-count');
+  if (count) {
+    count.textContent = copy.countLabel;
+    count.className = copy.opened ? 'gi-track-count is-open' : 'gi-track-count';
+  }
+}
+
 function closeCard(): void {
   openCard?.remove();
   openBackdrop?.remove();
@@ -520,37 +549,8 @@ function closeCard(): void {
 }
 
 function ensureStyles(): void {
-  if (document.getElementById('gi-track-style')) return;
-  const style = document.createElement('style');
-  style.id = 'gi-track-style';
-  style.textContent = `
-    .gi-track-slot { display: inline-flex !important; align-items: center; margin: 0 8px 0 0; vertical-align: middle; flex: 0 0 auto; min-width: 16px; line-height: 0; overflow: visible; }
-    .gi-track-btn { display: inline-flex; align-items: center; gap: 4px; width: auto; height: auto; padding: 0; border: 0; background: transparent; cursor: pointer; }
-    .gi-track-btn[data-state="opened"] { color: #188038; }
-    .gi-track-btn[data-state="pending"] { color: #80868b; }
-    .gi-track-label { font: 600 13px/1 "Google Sans", Roboto, Arial, sans-serif; }
-    .gi-track-n { font: 600 11px/1 "Google Sans", Roboto, Arial, sans-serif; }
-    .gi-track-backdrop { position: fixed; inset: 0; z-index: 2147483645; background: transparent; }
-    .gi-track-card { position: fixed; z-index: 2147483646; box-sizing: border-box; width: 340px; padding: 16px 16px 12px; background: #fff; color: #202124; border-radius: 8px; box-shadow: 0 8px 28px rgba(32, 33, 36, 0.28); font: 14px/1.4 "Google Sans", Roboto, Arial, sans-serif; }
-    .gi-track-headline { margin: 0; color: #202124; }
-    .gi-track-headline strong { font-weight: 600; }
-    .gi-track-detail { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 0; color: #5f6368; font-size: 13px; }
-    .gi-track-detail svg { flex: 0 0 auto; margin-top: 1px; }
-    .gi-track-count { margin-top: 14px; border-radius: 4px; background: #f1f3f4; color: #3c4043; text-align: center; font-weight: 500; padding: 10px 12px; }
-    .gi-track-count.is-open { background: #188038; color: #fff; }
-    .gi-track-warning { margin: 10px 0 0; color: #8a6116; font-size: 12px; line-height: 1.4; }
-    .gi-track-footer { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e8eaed; }
-    .gi-track-notify { color: #3c4043; font-size: 13px; }
-    .gi-switch { position: relative; width: 36px; height: 20px; flex: 0 0 auto; border: 0; border-radius: 999px; background: #dadce0; padding: 0; cursor: pointer; }
-    .gi-switch[aria-checked="true"] { background: #188038; }
-    .gi-switch-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 160ms ease; }
-    .gi-switch[aria-checked="true"] .gi-switch-knob { transform: translateX(16px); }
-    .gi-track-arrow { position: absolute; width: 12px; height: 12px; background: #fff; transform: translateX(-50%) rotate(45deg); }
-    .gi-track-card[data-placement="above"] .gi-track-arrow { bottom: -6px; }
-    .gi-track-card[data-placement="below"] .gi-track-arrow { top: -6px; }
-  `;
-  document.documentElement.append(style);
+  ensureSurface();
 }
 
 const CHECK_ICON = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" aria-hidden="true"><path d="M3.1 8.3 6.3 11.5 12.9 4.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-const EYE_ICON = `<svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true"><path d="M1.8 10S4.8 4.8 10 4.8 18.2 10 18.2 10 15.2 15.2 10 15.2 1.8 10 1.8 10Z" stroke="#5f6368" stroke-width="1.4"/><circle cx="10" cy="10" r="2.2" stroke="#5f6368" stroke-width="1.4"/></svg>`;
+const EYE_ICON = `<svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true"><path d="M1.8 10S4.8 4.8 10 4.8 18.2 10 18.2 10 15.2 15.2 10 15.2 1.8 10 1.8 10Z" stroke="currentColor" stroke-width="1.4"/><circle cx="10" cy="10" r="2.2" stroke="currentColor" stroke-width="1.4"/></svg>`;

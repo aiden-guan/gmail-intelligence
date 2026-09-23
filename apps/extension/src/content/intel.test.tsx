@@ -157,4 +157,36 @@ describe('reactive intelligence', () => {
     expect(host.textContent).toContain('Open the summit details');
     root.unmount();
   });
+
+  it('hides the card to a pill and brings it back', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'RESPOND', needsReply: true },
+            summary: { summary: { oneLine: 'Asked about Thursday.', keyPoints: ['Thursday is open'] } },
+            draft: { suggestion: { body: 'Thursday works.' } },
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    const hide = host.querySelector('[aria-label="Hide intelligence"]') as HTMLButtonElement;
+    await act(async () => {
+      hide.click();
+    });
+    expect(host.textContent).not.toContain('Draft reply');
+    const show = host.querySelector('[aria-label="Show intelligence"]') as HTMLButtonElement;
+    expect(show?.textContent).toContain('Respond');
+    await act(async () => {
+      show.click();
+    });
+    expect(host.textContent).toContain('Draft reply');
+    expect(host.textContent).toContain('Thursday is open');
+    root.unmount();
+  });
 });

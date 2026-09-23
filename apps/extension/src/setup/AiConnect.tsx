@@ -33,7 +33,7 @@ type AdvancedDraft = {
   apiKey: string;
 };
 
-const inputClass = 'w-full rounded border border-[#d3dae2] bg-white px-3 py-2 text-sm';
+const inputClass = 'gi-field';
 
 export function AiConnect({
   settings,
@@ -236,7 +236,7 @@ export function AiConnect({
 
   return (
     <div id="ai-setup" className="space-y-3">
-      <p className="text-sm text-[#5b6b7c]">
+      <p className="text-sm gi-muted">
         Use a model on this computer, or an API key. Mail never goes to the tracker.
       </p>
 
@@ -244,7 +244,7 @@ export function AiConnect({
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-sm font-medium">ChatGPT account · Experimental</div>
-            <p className="mt-1 text-xs text-[#5b6b7c]">
+            <p className="mt-1 text-xs gi-muted">
               May stop working when ChatGPT web internals change.{' '}
               {status.signedIn
                 ? accountLabel
@@ -270,7 +270,7 @@ export function AiConnect({
           ) : null}
         </div>
         {status.signedIn && chatgptActive ? (
-          <label className="mt-3 block text-xs text-[#5b6b7c]">
+          <label className="mt-3 block text-xs gi-muted">
             Model
             <select
               className={`${inputClass} mt-1`}
@@ -291,12 +291,12 @@ export function AiConnect({
             </select>
           </label>
         ) : null}
-        {showChatGptError ? <p className="mt-2 text-xs text-red-700">{showChatGptError}</p> : null}
+        {showChatGptError ? <p className="mt-2 text-xs gi-danger">{showChatGptError}</p> : null}
       </div>
 
       <div className={cardClass(Boolean(localActiveId) || onDeviceActive)}>
         <div className="text-sm font-medium">On this computer</div>
-        <p className="mt-1 text-xs text-[#5b6b7c]">
+        <p className="mt-1 text-xs gi-muted">
           Each model downloads only when you choose it. Remove deletes its files from this computer.
         </p>
         <div className="mt-3 space-y-3">
@@ -305,14 +305,14 @@ export function AiConnect({
             const active = localActiveId === model.id;
             const downloading = downloadingId === model.id;
             return (
-              <div key={model.id} className="rounded border border-[#e6eef8] p-2">
+              <div key={model.id} className="gi-inset">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-sm font-medium">
                       {model.label}
-                      <span className="ml-2 font-normal text-[#5b6b7c]">{formatDownloadSize(model.bytes)}</span>
+                      <span className="ml-2 font-normal gi-muted">{formatDownloadSize(model.bytes)}</span>
                     </div>
-                    <p className="mt-1 text-xs text-[#5b6b7c]">{model.blurb}</p>
+                    <p className="mt-1 text-xs gi-muted">{model.blurb}</p>
                   </div>
                   {active ? <Badge>In use</Badge> : null}
                 </div>
@@ -344,11 +344,11 @@ export function AiConnect({
               </div>
             );
           })}
-          <div className="rounded border border-[#e6eef8] p-2">
+          <div className="gi-inset">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-medium">Chrome Gemini Nano</div>
-                <p className="mt-1 text-xs text-[#5b6b7c]">
+                <p className="mt-1 text-xs gi-muted">
                   {availability === 'available'
                     ? 'Already downloaded by Chrome. Summaries and drafts stay on this device.'
                     : 'Chrome’s built-in model. Larger download, for desktop Chrome with enough memory and disk.'}
@@ -386,11 +386,11 @@ export function AiConnect({
             </div>
             {downloadingId === 'gemini-nano' ? <ProgressBar progress={progress} /> : null}
             {hardwareHint && availability !== 'available' ? (
-              <p className="mt-2 text-xs text-[#5b6b7c]">{hardwareHint}</p>
+              <p className="mt-2 text-xs gi-muted">{hardwareHint}</p>
             ) : null}
           </div>
         </div>
-        {downloadError ? <p className="mt-2 text-xs text-red-700">{downloadError}</p> : null}
+        {downloadError ? <p className="mt-2 text-xs gi-danger">{downloadError}</p> : null}
       </div>
 
       {settings.aiMode !== 'disabled' ? (
@@ -398,17 +398,17 @@ export function AiConnect({
           Turn AI off
         </button>
       ) : (
-        <p className="text-xs text-[#5b6b7c]">AI is off. Categories still use local rules until you connect a model.</p>
+        <p className="text-xs gi-muted">AI is off. Categories still use local rules until you connect a model.</p>
       )}
 
       {compact ? null : (
-        <div className="rounded-lg border border-[#d3dae2] bg-[#fbfcfd] p-3">
-          <button className="text-sm text-[#1a73e8]" onClick={() => setAdvancedOpen((open) => !open)}>
+        <div className="gi-card">
+          <button type="button" className="gi-text-btn" onClick={() => setAdvancedOpen((open) => !open)}>
             {advancedOpen ? 'Hide API key and Ollama' : 'API key or Ollama'}
           </button>
           {advancedOpen ? (
             <div className="mt-3 space-y-3">
-              <label className="block text-xs text-[#5b6b7c]">
+              <label className="block text-xs gi-muted">
                 Provider
                 <select
                   className={`${inputClass} mt-1`}
@@ -433,7 +433,7 @@ export function AiConnect({
                   <option value="gemini">Gemini API</option>
                 </select>
               </label>
-              <label className="block text-xs text-[#5b6b7c]">
+              <label className="block text-xs gi-muted">
                 Model
                 <input
                   className={`${inputClass} mt-1`}
@@ -441,7 +441,7 @@ export function AiConnect({
                   onChange={(event) => setAdvanced((current) => ({ ...current, model: event.target.value }))}
                 />
               </label>
-              <label className="block text-xs text-[#5b6b7c]">
+              <label className="block text-xs gi-muted">
                 Endpoint
                 <input
                   className={`${inputClass} mt-1`}
@@ -450,7 +450,7 @@ export function AiConnect({
                 />
               </label>
               {advanced.provider === 'ollama' ? null : (
-                <label className="block text-xs text-[#5b6b7c]">
+                <label className="block text-xs gi-muted">
                   API key
                   <input
                     className={`${inputClass} mt-1`}
@@ -474,7 +474,7 @@ export function AiConnect({
               >
                 Use this connection
               </button>
-              <p className="text-xs text-[#5b6b7c]">
+              <p className="text-xs gi-muted">
                 The key stays in extension storage. Anthropic and Gemini API adapters are not finished; use an
                 OpenAI-compatible endpoint for those.
               </p>
@@ -518,21 +518,17 @@ function formatAccount(email: string | null, planType: string | null): string {
 }
 
 function cardClass(active: boolean): string {
-  return active
-    ? 'rounded-lg border border-[#1a73e8] bg-white p-3'
-    : 'rounded-lg border border-[#d3dae2] bg-white p-3';
+  return active ? 'gi-card gi-card-active' : 'gi-card';
 }
 
 function ProgressBar({ progress }: { progress: number }) {
+  const amount = Math.max(progress || 0.05, 0.05);
   return (
     <div className="mt-2">
-      <div className="h-1.5 overflow-hidden rounded bg-[#e6eef8]">
-        <div
-          className="h-full rounded bg-[#1a73e8] transition-[width]"
-          style={{ width: `${Math.round((progress || 0.05) * 100)}%` }}
-        />
+      <div className="gi-progress" aria-hidden="true">
+        <div style={{ transform: `scaleX(${amount})` }} />
       </div>
-      <p className="mt-1 text-xs text-[#5b6b7c]">
+      <p className="mt-1 text-xs gi-muted">
         {progress > 0 ? `${Math.round(progress * 100)}%` : 'Starting download…'} Keep this page open.
       </p>
     </div>
@@ -540,17 +536,12 @@ function ProgressBar({ progress }: { progress: number }) {
 }
 
 function Badge({ children }: { children: string }) {
-  return (
-    <span className="shrink-0 rounded bg-[#e8f0fe] px-2 py-0.5 text-[11px] font-medium text-[#174ea6]">
-      {children}
-    </span>
-  );
+  return <span className="gi-badge">{children}</span>;
 }
 
 function hasRuntime(): boolean {
   return typeof chrome !== 'undefined' && Boolean(chrome.runtime?.sendMessage);
 }
 
-const primaryClass =
-  'rounded bg-[#1a73e8] px-3 py-2 text-sm font-medium text-white disabled:cursor-default disabled:opacity-60';
-const quietClass = 'rounded border border-[#d3dae2] bg-white px-3 py-2 text-sm';
+const primaryClass = 'gi-btn';
+const quietClass = 'gi-btn gi-btn-ghost';

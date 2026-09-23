@@ -426,16 +426,27 @@ async function classifyIngested(thread: IngestThread, fingerprint: string, quali
 async function pollTracking(): Promise<void> {
   if (!settings.trackingEnabled || !settings.trackerBaseUrl || !settings.personalApiToken) return;
   const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+  const local = await readTrackedEmails();
+  const byId = new Map(local.map((email) => [email.trackingId, email]));
   try {
     const remote = await client.listEmails(200);
-    const local = await readTrackedEmails();
-    const byId = new Map(local.map((email) => [email.trackingId, email]));
     for (const row of remote) {
       byId.set(row.tracking_id, summaryFromRemote(row, byId.get(row.tracking_id) || null));
     }
     await writeTrackedEmails([...byId.values()]);
   } catch (e) {
     console.warn('[gi] tracking list failed', e);
+    await Promise.all(
+      local.slice(0, 40).map(async (email) => {
+        try {
+          const row = await client.getEmail(email.trackingId);
+          byId.set(row.tracking_id, summaryFromRemote(row, email));
+        } catch {
+          /* keep the last status we already have */
+        }
+      }),
+    );
+    if (local.length) await writeTrackedEmails([...byId.values()]);
   }
   try {
     await loadNotifiedEvents();

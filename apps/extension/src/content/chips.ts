@@ -1,3 +1,5 @@
+import { ensureSurface } from './surface';
+
 const LABELS: Record<string, string> = {
   RESPOND: 'Respond',
   WAITING: 'Waiting',
@@ -13,6 +15,7 @@ export function categoryLabel(category: string | undefined): string {
 }
 
 export function applyCategoryChip(row: HTMLElement, category: string, manual: boolean): void {
+  ensureSurface();
   const label = categoryLabel(category);
   if (!label) return;
   let chip = row.querySelector<HTMLElement>('.gi-cat-chip');

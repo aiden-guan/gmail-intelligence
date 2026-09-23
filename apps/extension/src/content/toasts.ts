@@ -1,38 +1,34 @@
+import { ensureSurface, SURFACE_CSS } from './surface';
+
 export function showToast(message: string, retry?: () => void): void {
   document.querySelector('[data-gi-ui="toast"]')?.remove();
+  ensureSurface();
+  const host = document.createElement('div');
+  host.setAttribute('data-gi-ui', 'toast');
+  host.style.cssText = 'position:fixed;left:0;right:0;bottom:24px;z-index:2147483646;pointer-events:none;';
+  const shadow = host.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.textContent = SURFACE_CSS;
+  const wrap = document.createElement('div');
+  wrap.className = 'gi-toast-wrap';
   const toast = document.createElement('div');
-  toast.setAttribute('data-gi-ui', 'toast');
-  toast.style.cssText = [
-    'position:fixed',
-    'left:50%',
-    'bottom:24px',
-    'transform:translateX(-50%)',
-    'z-index:2147483646',
-    'background:#202124',
-    'color:#fff',
-    'border-radius:8px',
-    'padding:10px 14px',
-    'font:13px/1.4 "Google Sans",Roboto,Arial,sans-serif',
-    'display:flex',
-    'gap:12px',
-    'align-items:center',
-    'box-shadow:0 4px 16px rgba(0,0,0,.28)',
-    'max-width:420px',
-  ].join(';');
+  toast.className = 'gi-toast';
   const text = document.createElement('span');
   text.textContent = message;
   toast.append(text);
   if (retry) {
     const button = document.createElement('button');
     button.type = 'button';
+    button.className = 'gi-toast-retry';
     button.textContent = 'Retry';
-    button.style.cssText = 'border:0;background:transparent;color:#8ab4f8;font:inherit;cursor:pointer;padding:0';
     button.onclick = () => {
-      toast.remove();
+      host.remove();
       retry();
     };
     toast.append(button);
   }
-  document.documentElement.append(toast);
-  window.setTimeout(() => toast.remove(), 6000);
+  wrap.append(toast);
+  shadow.append(style, wrap);
+  document.documentElement.append(host);
+  window.setTimeout(() => host.remove(), 6000);
 }

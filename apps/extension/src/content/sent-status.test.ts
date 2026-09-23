@@ -59,7 +59,7 @@ describe('sent mail open status', () => {
     expect(buttons[0].getAttribute('aria-label')).toMatch(/opened your email/);
     expect(buttons[0].textContent).not.toMatch(/Opened/);
     expect(buttons[1].getAttribute('aria-label')).toBe('Not opened yet.');
-    expect(buttons[0].style.color).toBe('rgb(24, 128, 56)');
+    expect(buttons[0].style.color).toBe('rgb(92, 78, 208)');
     expect(buttons[1].style.color).toBe('rgb(128, 134, 139)');
     expect(document.querySelector('[data-legacy-thread-id="thread-1"]')?.getAttribute('data-gi-tracked')).toBe('opened');
     const slot = document.querySelector('[data-legacy-thread-id="thread-1"] .gi-track-slot');
@@ -128,7 +128,7 @@ describe('sent mail open status', () => {
     document.body.style.backgroundColor = 'rgb(32, 33, 36)';
     row('thread-1', 'aiden@example.com', 'Hello');
     paintRows(document, [opened], 'https://track.example', () => undefined);
-    expect(document.querySelector<HTMLElement>('.gi-track-btn')?.style.color).toBe('rgb(129, 201, 149)');
+    expect(document.querySelector<HTMLElement>('.gi-track-btn')?.style.color).toBe('rgb(201, 194, 255)');
   });
 
   it('leaves untracked rows alone', () => {

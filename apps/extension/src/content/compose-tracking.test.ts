@@ -11,6 +11,8 @@ import {
   planTrackingInjection,
   prepareDomCompose,
   resetComposeSessionsForTests,
+  TRACKING_READY_WAIT_MS,
+  trackedOutgoingBody,
   type SdkComposeView,
 } from './compose-tracking';
 
@@ -41,9 +43,62 @@ function deps(create?: (input: { links?: Array<{ url: string }> }) => { tracking
 }
 
 describe('compose tracking does not block send', () => {
-  it('sends the original body when tracking is not ready', async () => {
+  it('sends the original body when tracking does not become ready', async () => {
     resetComposeSessionsForTests();
-    let modifier: ((params: { body: string }) => Promise<{ body: string }>) | null = null;
+    vi.useFakeTimers();
+    try {
+      let modifier: ((params: { body: string }) => Promise<{ body: string }>) | null = null;
+      const view: SdkComposeView = {
+        registerRequestModifier(fn) {
+          modifier = fn;
+        },
+        on() {},
+        getSubject: () => 'Hello',
+        getToRecipients: () => [{ emailAddress: 'a@b.com' }],
+        getElement: () => document.createElement('div'),
+      };
+      attachSdkComposeTracking(view, {
+        ...deps(),
+        createTracked: () => new Promise(() => undefined),
+      });
+      const pending = modifier?.({ body: '<p>Hi</p>' });
+      await vi.advanceTimersByTimeAsync(TRACKING_READY_WAIT_MS);
+      const result = await pending;
+      expect(result?.body).toBe('<p>Hi</p>');
+      expect(planTrackingInjection(undefined)).toBe('send-untracked');
+    } finally {
+      vi.useRealTimers();
+      resetComposeSessionsForTests();
+    }
+  });
+
+  it('waits until send to add the pixel if the recipient was not there yet', async () => {
+    resetComposeSessionsForTests();
+    let modifier: ((params: { body: string; isPlainText?: boolean }) => Promise<{ body: string; ishtml?: '1' }>) | null = null;
+    let recipients: Array<{ emailAddress: string }> = [];
+    const element = document.createElement('div');
+    const view: SdkComposeView = {
+      registerRequestModifier(fn) {
+        modifier = fn;
+      },
+      on() {},
+      getSubject: () => 'Hello',
+      getToRecipients: () => recipients,
+      getElement: () => element,
+    };
+    const id = attachSdkComposeTracking(view, deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.inflight).toBeNull());
+    expect(getComposeSession(id)?.ready).toBe(false);
+    recipients = [{ emailAddress: 'a@b.com' }];
+    const result = await modifier?.({ body: '<p>Hi</p>' });
+    expect(result?.body).toContain('https://track.example/open/trk_1');
+    expect(getComposeSession(id)?.ready).toBe(true);
+  });
+
+  it('turns a plain-text send into html that contains the pixel', async () => {
+    resetComposeSessionsForTests();
+    let modifier: ((params: { body: string; isPlainText?: boolean }) => Promise<{ body: string; ishtml?: '1' }>) | null = null;
+    const element = document.createElement('div');
     const view: SdkComposeView = {
       registerRequestModifier(fn) {
         modifier = fn;
@@ -51,15 +106,60 @@ describe('compose tracking does not block send', () => {
       on() {},
       getSubject: () => 'Hello',
       getToRecipients: () => [{ emailAddress: 'a@b.com' }],
+      getElement: () => element,
+    };
+    const id = attachSdkComposeTracking(view, deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.ready).toBe(true));
+    const result = await modifier?.({ body: 'Hi <there>', isPlainText: true });
+    expect(result?.ishtml).toBe('1');
+    expect(result?.body).toContain('Hi &lt;there&gt;');
+    expect(result?.body).toContain('/open/trk_1');
+    expect(trackedOutgoingBody('Hi', true, undefined).body).toBe('Hi');
+  });
+
+  it('stamps the live compose body when tracking becomes ready', async () => {
+    resetComposeSessionsForTests();
+    const element = document.createElement('div');
+    const body = document.createElement('div');
+    body.innerHTML = '<p>Hi</p>';
+    element.append(body);
+    const view: SdkComposeView = {
+      on() {},
+      getSubject: () => 'Hello',
+      getToRecipients: () => [{ emailAddress: 'a@b.com' }],
+      getBodyElement: () => body,
+      getElement: () => element,
+    };
+
+    const id = attachSdkComposeTracking(view, deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.ready).toBe(true));
+
+    expect(body.innerHTML).toContain('https://track.example/open/trk_1');
+    expect(body.innerHTML).toContain('<p>Hi</p>');
+  });
+
+  it('registers the send modifier again after the draft id appears', () => {
+    resetComposeSessionsForTests();
+    let modifier: unknown = null;
+    let calls = 0;
+    let presend: ((event?: { cancel?: () => void }) => void) | null = null;
+    const view: SdkComposeView = {
+      registerRequestModifier(fn) {
+        calls += 1;
+        if (calls === 1) throw new Error('no draft');
+        modifier = fn;
+      },
+      on(event, cb) {
+        if (event === 'presending') presend = cb as typeof presend;
+      },
+      getSubject: () => 'Hello',
+      getToRecipients: () => [{ emailAddress: 'a@b.com' }],
       getElement: () => document.createElement('div'),
     };
-    attachSdkComposeTracking(view, {
-      ...deps(),
-      createTracked: () => new Promise(() => undefined),
-    });
-    const result = await modifier?.({ body: '<p>Hi</p>' });
-    expect(result?.body).toBe('<p>Hi</p>');
-    expect(planTrackingInjection(undefined)).toBe('send-untracked');
+    attachSdkComposeTracking(view, deps());
+    expect(modifier).toBeNull();
+    presend?.({});
+    expect(modifier).toBeTypeOf('function');
   });
 
   it('injects a preallocated pixel without cancelling send', async () => {
