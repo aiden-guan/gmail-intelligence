@@ -7,9 +7,13 @@ import {
   findMain,
   findNotice,
   findSearchBox,
+  findMessageBodies,
   findThreadRows,
   getThreadIdFromElement,
+  getThreadIdFromRow,
   logSelectorMiss,
+  messageText,
+  threadIdFromLocation,
   queryAll,
   queryFirst,
   readAttr,
@@ -192,12 +196,12 @@ export class DomFallbackAdapter implements GmailAdapter {
     const rows: VisibleThreadRow[] = [];
     for (const el of els) {
       if (el.closest(SELECTORS.injectedUiMark)) continue;
-      const threadId = getThreadIdFromElement(el);
+      const threadId = getThreadIdFromRow(el);
       if (!threadId) continue;
       const subjectEl = queryFirst(el, SELECTORS.threadRowSubject);
       const snippetEl = queryFirst(el, SELECTORS.threadRowSnippet);
       const senderEl = queryFirst(el, SELECTORS.threadRowSender);
-      const email = senderEl?.getAttribute('email');
+      const email = senderEl?.getAttribute('email') || senderEl?.getAttribute('data-hovercard-id') || undefined;
       rows.push({
         threadId,
         subject: subjectEl?.textContent?.trim() || '(no subject)',
@@ -217,19 +221,25 @@ export class DomFallbackAdapter implements GmailAdapter {
     if (!subjectEl) return null;
     const threadId =
       getThreadIdFromElement(subjectEl) ||
+      threadIdFromLocation() ||
       (typeof document !== 'undefined' ? getThreadIdFromElement(document.body) : undefined);
     if (!threadId) return null;
-    const bodies = queryAll(root, SELECTORS.messageBody);
-    const messages: ThreadMessageView[] = bodies.map((body, index) => ({
-      messageId: readAttr(body, SELECTORS.messageIdAttr) || `${threadId}-msg-${index}`,
-      threadId,
-      sender: { email: 'unknown@local' },
-      recipients: [],
-      cc: [],
-      bodyText: body.textContent?.trim() || '',
-      bodyHtml: undefined,
-      attachmentsMetadata: [],
-    }));
+    const bodies = findMessageBodies(root);
+    const messages: ThreadMessageView[] = bodies.map((body, index) => {
+      const container = body.closest('[data-message-id], [data-legacy-message-id], [role="listitem"]') || body;
+      const senderEl = container.querySelector('[email], [data-hovercard-id]');
+      const email = senderEl?.getAttribute('email') || senderEl?.getAttribute('data-hovercard-id') || 'unknown@local';
+      return {
+        messageId: readAttr(body, SELECTORS.messageIdAttr) || readAttr(container, SELECTORS.messageIdAttr) || `${threadId}-msg-${index}`,
+        threadId,
+        sender: { email },
+        recipients: [],
+        cc: [],
+        bodyText: messageText(body),
+        bodyHtml: undefined,
+        attachmentsMetadata: [],
+      };
+    });
     return {
       threadId,
       subject: subjectEl.textContent?.trim() || '',
@@ -294,7 +304,7 @@ export class DomFallbackAdapter implements GmailAdapter {
 
   async openThread(threadId: string) {
     if (typeof document === 'undefined') return fail('openThread', 'no document');
-    const match = findThreadRows(document).find((row) => getThreadIdFromElement(row) === threadId);
+    const match = findThreadRows(document).find((row) => getThreadIdFromRow(row) === threadId);
     if (!match) return fail('openThread', 'row not found', true);
     match.click();
     return { ...ok('openThread', { threadId }), verified: false };

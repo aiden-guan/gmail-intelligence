@@ -1,12 +1,12 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { GmailActionAdapter } from './GmailActionAdapter.js';
 import { validateGmailJsBridgePayload } from './GmailJsCaptureAdapter.js';
 import { CompositeGmailAdapter } from './index.js';
-import { SELECTORS } from './selectors.js';
+import { findThreadRows, isOpenThreadRoute, SELECTORS, threadIdFromLocation } from './selectors.js';
 
 function fixtureInbox(): void {
   document.body.innerHTML = `
@@ -45,6 +45,41 @@ describe('DomFallbackAdapter fixtures', () => {
     expect(res.success).toBe(true);
     expect(res.rows?.map((r) => r.threadId)).toEqual(['thread-1', 'thread-2']);
     expect(res.rows?.[0]?.subject).toMatch(/Hello from Alice/);
+  });
+
+  it('reads a thread id that lives on the subject span', async () => {
+    document.body.innerHTML = `
+      <div role="main">
+        <table>
+          <tr>
+            <td><span email="alice@example.com">Alice</span></td>
+            <td><span data-thread-id="msg-f:1" data-legacy-thread-id="thread-9">Hello from Alice</span></td>
+          </tr>
+        </table>
+      </div>
+    `;
+    const adapter = new DomFallbackAdapter();
+    const res = await adapter.observeInbox();
+    expect(res.rows?.map((row) => row.threadId)).toEqual(['thread-9']);
+    expect(res.rows?.[0]?.subject).toBe('Hello from Alice');
+  });
+
+  it('reads an open message from the page address and the visible text', async () => {
+    location.hash = '#sent/KtbxAbc';
+    document.body.innerHTML = `
+      <div role="main">
+        <h2 class="hP">sfefef</h2>
+        <div data-message-id="msg-1">
+          <span email="me@berkeley.edu">Me</span>
+          <div dir="ltr">sfeefse <span class="gi-track-slot">Opened</span></div>
+        </div>
+      </div>
+    `;
+    const adapter = new DomFallbackAdapter();
+    const res = await adapter.getCurrentThread();
+    expect(res.thread?.threadId).toBe('KtbxAbc');
+    expect(res.thread?.messages[0]?.bodyText).toBe('sfeefse');
+    expect(res.thread?.messages[0]?.sender.email).toBe('me@berkeley.edu');
   });
 
   it('detects compose', async () => {
@@ -123,6 +158,29 @@ describe('adapter fallback + bridge validation', () => {
   it('keeps selectors centralized', () => {
     expect(SELECTORS.threadRow.length).toBeGreaterThan(0);
     expect(SELECTORS.archiveButton.some((s) => s.includes('Archive'))).toBe(true);
+  });
+
+  it('reads a checkbox row and stays quiet while a thread is open', async () => {
+    expect(isOpenThreadRoute('#sent')).toBe(false);
+    expect(isOpenThreadRoute('#sent/KtbxAbc')).toBe(true);
+    expect(threadIdFromLocation('#sent/KtbxAbc')).toBe('KtbxAbc');
+    document.body.innerHTML = `
+      <div role="main">
+        <div role="row">
+          <div role="gridcell"><div role="checkbox"></div></div>
+          <div role="gridcell"><span email="alice@example.com">Alice</span></div>
+          <div role="gridcell"><span>Hello from Alice</span></div>
+        </div>
+      </div>
+    `;
+    expect(findThreadRows(document)).toHaveLength(1);
+    document.body.innerHTML = '<div role="main"><table><tr><td>Message layout</td></tr></table></div>';
+    location.hash = '#sent/KtbxAbc';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const adapter = new DomFallbackAdapter();
+    await adapter.observeInbox();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

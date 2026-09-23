@@ -8,9 +8,18 @@ export type ThreadIntelData = {
   manual?: boolean;
 };
 
+export type ThreadTrackingStatus = {
+  opened: boolean;
+  markLabel: string;
+  headline: string;
+  detail: string;
+  countLabel: string;
+};
+
 export function ThreadIntelCard(props: {
   intel?: ThreadIntelData;
   pending?: string | null;
+  tracking?: ThreadTrackingStatus | null;
   onDraft: () => void;
   onRemind: () => void;
 }) {
@@ -31,9 +40,27 @@ export function ThreadIntelCard(props: {
           </span>
         ) : null}
       </div>
-      <p style={{ margin: '8px 0 0', color: '#3c4043' }}>
-        {summary || props.pending || 'No summary yet.'}
-      </p>
+      <p style={{ margin: '8px 0 0', color: '#3c4043' }}>{summary || props.pending || 'No summary yet.'}</p>
+      {props.tracking ? (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ color: props.tracking.opened ? '#188038' : '#5f6368', fontWeight: 600 }}>{props.tracking.markLabel}</div>
+          <p style={{ margin: '6px 0 0', color: '#202124' }}>{props.tracking.headline}</p>
+          <p style={{ margin: '4px 0 0', color: '#5f6368', fontSize: 12 }}>{props.tracking.detail}</p>
+          <div
+            style={{
+              marginTop: 10,
+              borderRadius: 4,
+              textAlign: 'center',
+              fontWeight: 600,
+              padding: '8px 10px',
+              background: props.tracking.opened ? '#188038' : '#f1f3f4',
+              color: props.tracking.opened ? '#fff' : '#3c4043',
+            }}
+          >
+            {props.tracking.countLabel}
+          </div>
+        </div>
+      ) : null}
       {needsReply ? <div style={{ marginTop: 6, color: '#5f6368' }}>Needs reply</div> : null}
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
         {needsReply ? (

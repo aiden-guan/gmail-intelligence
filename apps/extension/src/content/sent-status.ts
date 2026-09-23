@@ -3,30 +3,49 @@ import {
   matchTrackedEmail,
   type TrackedEmailSummary,
   type TrackingRowQuery,
+  type TrackingStatusCopy,
 } from '@gi/tracking';
+import { findThreadRows, threadIdFromLocation } from '@gi/gmail';
 
 export type SentStatusController = {
   setEmails(emails: TrackedEmailSummary[]): void;
   setTrackerBaseUrl(url: string): void;
+  openThreadStatus(): TrackingStatusCopy | null;
   paint(): void;
   destroy(): void;
 };
 
-const ROW_SELECTOR = 'tr.zA, tr[data-legacy-thread-id], div[role="listitem"][data-legacy-thread-id]';
+function threadRows(root: ParentNode): HTMLElement[] {
+  try {
+    return findThreadRows(root).filter((row) => !row.closest('[data-gi-ui="track-card"]'));
+  } catch {
+    return [];
+  }
+}
 
 export function installSentStatus(opts: {
   emails?: TrackedEmailSummary[];
   trackerBaseUrl?: string;
   onNotify: (trackingId: string, enabled: boolean) => void;
+  onStatus?: () => void;
 }): SentStatusController {
   let emails = opts.emails || [];
   let trackerBaseUrl = opts.trackerBaseUrl || '';
   let observer: MutationObserver | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let statusSignature = '';
   ensureStyles();
   setTrackerBaseAttribute(trackerBaseUrl);
 
-  const paint = () => paintRows(document, emails, trackerBaseUrl, opts.onNotify);
+  const paint = () => {
+    paintRows(document, emails, trackerBaseUrl, opts.onNotify);
+    paintConversation(document, emails, trackerBaseUrl, opts.onNotify);
+    const next = statusSignatureFor(document, emails, trackerBaseUrl);
+    if (next !== statusSignature) {
+      statusSignature = next;
+      opts.onStatus?.();
+    }
+  };
   const schedule = () => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(paint, 120);
@@ -54,6 +73,10 @@ export function installSentStatus(opts: {
       setTrackerBaseAttribute(url);
       paint();
     },
+    openThreadStatus() {
+      const match = matchConversation(document, emails);
+      return match ? describeTrackingStatus(match, { trackerBaseUrl }) : null;
+    },
     paint,
     destroy() {
       observer?.disconnect();
@@ -65,14 +88,13 @@ export function installSentStatus(opts: {
 
 export function readRowQuery(row: Element): TrackingRowQuery {
   const threadIds = collectThreadIds(row);
-  const subject =
-    row.querySelector('.bog')?.textContent?.trim() ||
-    row.querySelector('.y6 span')?.textContent?.trim() ||
-    '';
-  const emails = [...row.querySelectorAll('[email]')]
-    .map((node) => node.getAttribute('email') || '')
-    .filter((email) => email.includes('@'));
-  return { threadIds, subject, emails };
+  const subject = readSubject(row);
+  const emails = new Set<string>();
+  row.querySelectorAll('[email], [data-hovercard-id]').forEach((node) => {
+    const email = node.getAttribute('email') || node.getAttribute('data-hovercard-id') || '';
+    if (email.includes('@')) emails.add(email);
+  });
+  return { threadIds, subject, emails: [...emails] };
 }
 
 export function paintRows(
@@ -82,9 +104,7 @@ export function paintRows(
   onNotify: (trackingId: string, enabled: boolean) => void,
 ): void {
   ensureStyles();
-  const rows = root.querySelectorAll?.(ROW_SELECTOR) || [];
-  rows.forEach((row) => {
-    if (!(row instanceof HTMLElement)) return;
+  threadRows(root).forEach((row) => {
     if (row.closest('[data-gi-ui="track-card"]')) return;
     const match = matchTrackedEmail(readRowQuery(row), emails);
     const existing = row.querySelector('.gi-track-slot');
@@ -94,16 +114,25 @@ export function paintRows(
       return;
     }
     const slot = existing instanceof HTMLElement ? existing : createSlot(row);
-    const copy = describeTrackingStatus(match, { trackerBaseUrl });
-    const signature = `${match.trackingId}:${copy.opened}:${copy.countLabel}:${match.notifyIfNoReply}:${trackerBaseUrl}`;
-    if (slot.dataset.signature === signature && slot.querySelector('.gi-track-btn')) {
-      row.dataset.giTracked = copy.opened ? 'opened' : 'pending';
-      return;
-    }
-    slot.dataset.signature = signature;
-    slot.replaceChildren(renderButton(match, copy, trackerBaseUrl, onNotify));
-    row.dataset.giTracked = copy.opened ? 'opened' : 'pending';
+    renderSlot(slot, match, trackerBaseUrl, onNotify);
+    row.dataset.giTracked = match.openCount > 0 || match.clickCount > 0 ? 'opened' : 'pending';
   });
+}
+
+function readSubject(row: Element): string {
+  const known =
+    row.querySelector('span[data-thread-id]')?.textContent?.trim() ||
+    row.querySelector('.bog')?.textContent?.trim() ||
+    row.querySelector('.y6 span')?.textContent?.trim() ||
+    '';
+  if (known) return known;
+  const sender = row.querySelector('[email], [data-hovercard-id]');
+  for (const cell of row.querySelectorAll('td, [role="gridcell"]')) {
+    if (sender && cell.contains(sender)) continue;
+    const text = (cell.querySelector('span')?.textContent || cell.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text && !text.includes('@')) return text;
+  }
+  return '';
 }
 
 function collectThreadIds(row: Element): string[] {
@@ -122,30 +151,123 @@ function collectThreadIds(row: Element): string[] {
   return [...ids];
 }
 
+export function paintConversation(
+  root: ParentNode,
+  emails: TrackedEmailSummary[],
+  trackerBaseUrl: string,
+  onNotify: (trackingId: string, enabled: boolean) => void,
+): void {
+  const heading = conversationHeading(root);
+  if (!heading) return;
+  const match = matchConversation(root, emails);
+  const next = heading.nextElementSibling;
+  const existing = next instanceof HTMLElement && next.classList.contains('gi-track-slot') ? next : null;
+  if (!match) {
+    existing?.remove();
+    return;
+  }
+  const slot = existing || createSlotAfter(heading);
+  renderSlot(slot, match, trackerBaseUrl, onNotify, true);
+}
+
+export function matchConversation(root: ParentNode, emails: TrackedEmailSummary[]): TrackedEmailSummary | null {
+  const heading = conversationHeading(root);
+  const hashId = threadIdFromLocation();
+  if (!heading) {
+    if (!hashId) return null;
+    return matchTrackedEmail({ threadIds: [hashId], subject: '', emails: [] }, emails);
+  }
+  const query = readRowQuery(conversationScope(heading));
+  const subject = subjectText(heading) || query.subject;
+  const threadIds = hashId ? [...new Set([hashId, ...query.threadIds])] : query.threadIds;
+  return matchTrackedEmail({ threadIds, subject, emails: query.emails }, emails);
+}
+
+function subjectText(heading: HTMLElement): string {
+  const clone = heading.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('.gi-track-slot, .gi-track-btn').forEach((node) => node.remove());
+  return clone.textContent?.replace(/\s+/g, ' ').trim() || '';
+}
+
+function conversationHeading(root: ParentNode): HTMLElement | null {
+  const heading = root.querySelector?.('h2.hP, h2[data-legacy-thread-id], h2[data-thread-perm-id], [role="main"] h2');
+  return heading instanceof HTMLElement ? heading : null;
+}
+
+function conversationScope(heading: HTMLElement): Element {
+  let scope: Element = heading;
+  for (let i = 0; i < 6 && scope.parentElement; i += 1) {
+    if (scope.querySelector('[email], [data-hovercard-id]')) break;
+    scope = scope.parentElement;
+  }
+  return scope;
+}
+
+function statusSignatureFor(root: ParentNode, emails: TrackedEmailSummary[], trackerBaseUrl: string): string {
+  const match = matchConversation(root, emails);
+  if (!match) return '';
+  const copy = describeTrackingStatus(match, { trackerBaseUrl });
+  return `${match.trackingId}:${copy.markLabel}:${copy.countLabel}`;
+}
+
 function createSlot(row: HTMLElement): HTMLElement {
   const slot = document.createElement('span');
   slot.className = 'gi-track-slot';
   slot.setAttribute('data-gi-ui', 'track');
-  const host = row.querySelector('.yW') || row.querySelector('td.yX') || row;
-  host.insertBefore(slot, host.firstChild);
+  const sender = row.querySelector<HTMLElement>('.yW, .zF, [email], [data-hovercard-id]');
+  const cell = sender?.closest('td, [role="gridcell"]');
+  if (cell?.parentElement) cell.parentElement.insertBefore(slot, cell);
+  else if (sender?.parentElement) sender.parentElement.insertBefore(slot, sender);
+  else row.insertBefore(slot, row.firstChild);
   return slot;
+}
+
+function createSlotAfter(anchor: HTMLElement): HTMLElement {
+  const slot = document.createElement('span');
+  slot.className = 'gi-track-slot';
+  slot.setAttribute('data-gi-ui', 'track');
+  anchor.insertAdjacentElement('afterend', slot);
+  return slot;
+}
+
+function renderSlot(
+  slot: HTMLElement,
+  match: TrackedEmailSummary,
+  trackerBaseUrl: string,
+  onNotify: (trackingId: string, enabled: boolean) => void,
+  labeled = false,
+): void {
+  const copy = describeTrackingStatus(match, { trackerBaseUrl });
+  const signature = `${match.trackingId}:${copy.opened}:${copy.countLabel}:${copy.markLabel}:${labeled}:${match.notifyIfNoReply}:${trackerBaseUrl}`;
+  if (slot.dataset.signature === signature && slot.querySelector('.gi-track-btn')) return;
+  slot.dataset.signature = signature;
+  slot.replaceChildren(renderButton(match, copy, trackerBaseUrl, onNotify, labeled));
 }
 
 function renderButton(
   email: TrackedEmailSummary,
-  copy: ReturnType<typeof describeTrackingStatus>,
+  copy: TrackingStatusCopy,
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
-): HTMLButtonElement {
-  const button = document.createElement('button');
-  button.type = 'button';
+  labeled: boolean,
+): HTMLElement {
+  const button = document.createElement('span');
   button.className = 'gi-track-btn';
   button.dataset.state = copy.opened ? 'opened' : 'pending';
   button.dataset.trackingId = email.trackingId;
   button.dataset.trackerBase = trackerBaseUrl;
+  button.setAttribute('role', 'button');
+  button.tabIndex = 0;
   button.setAttribute('aria-label', copy.headline);
-  button.title = copy.countLabel;
+  button.title = copy.headline;
+  button.style.cssText = controlStyle(copy.opened);
   button.innerHTML = copy.opened ? DOUBLE_CHECK : SINGLE_CHECK;
+  if (labeled) {
+    const label = document.createElement('span');
+    label.className = 'gi-track-label';
+    label.textContent = copy.markLabel;
+    button.append(label);
+  }
   if (email.openCount > 1) {
     const count = document.createElement('span');
     count.className = 'gi-track-n';
@@ -169,7 +291,36 @@ function renderButton(
     event.stopPropagation();
     toggleCard(button, email, onNotify);
   });
+  button.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    toggleCard(button, email, onNotify);
+  });
   return button;
+}
+
+function controlStyle(opened: boolean): string {
+  return [
+    'display:inline-flex',
+    'align-items:center',
+    'gap:4px',
+    'width:auto',
+    'height:auto',
+    'margin:0 8px 0 0',
+    'padding:0',
+    'border:0',
+    'background:transparent',
+    'box-shadow:none',
+    `color:${opened ? '#188038' : '#80868b'}`,
+    'cursor:pointer',
+    'font-weight:600',
+    'font-size:13px',
+    'line-height:1',
+    'font-family:"Google Sans",Roboto,Arial,sans-serif',
+    'vertical-align:middle',
+    'white-space:nowrap',
+  ].join(';');
 }
 
 let openCard: HTMLElement | null = null;
@@ -177,7 +328,7 @@ let openBackdrop: HTMLElement | null = null;
 let openTrackingId: string | null = null;
 
 function toggleCard(
-  anchor: HTMLButtonElement,
+  anchor: HTMLElement,
   email: TrackedEmailSummary,
   onNotify: (trackingId: string, enabled: boolean) => void,
 ): void {
@@ -210,7 +361,7 @@ function toggleCard(
 
 function renderCard(
   email: TrackedEmailSummary,
-  anchor: HTMLButtonElement,
+  anchor: HTMLElement,
   onNotify: (trackingId: string, enabled: boolean) => void,
 ): HTMLElement {
   const copy = describeTrackingStatus(email, {
@@ -337,9 +488,11 @@ function ensureStyles(): void {
   style.id = 'gi-track-style';
   style.textContent = `
     .gi-track-slot { display: inline-flex; align-items: center; margin-right: 6px; vertical-align: middle; flex: 0 0 auto; }
-    .gi-track-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: #9aa0a6; cursor: pointer; border-radius: 4px; }
+    .gi-track-btn { display: inline-flex; align-items: center; gap: 4px; width: auto; height: auto; padding: 0; border: 0; background: transparent; cursor: pointer; }
     .gi-track-btn[data-state="opened"] { color: #188038; }
-    .gi-track-btn:hover { background: rgba(128, 134, 139, 0.16); }
+    .gi-track-btn[data-state="pending"] { color: #80868b; }
+    .gi-track-label { font: 600 13px/1 "Google Sans", Roboto, Arial, sans-serif; }
+    .gi-track-n { font: 600 11px/1 "Google Sans", Roboto, Arial, sans-serif; }
     .gi-track-backdrop { position: fixed; inset: 0; z-index: 2147483645; background: transparent; }
     .gi-track-card { position: fixed; z-index: 2147483646; box-sizing: border-box; width: 340px; padding: 16px 16px 12px; background: #fff; color: #202124; border-radius: 8px; box-shadow: 0 8px 28px rgba(32, 33, 36, 0.28); font: 14px/1.4 "Google Sans", Roboto, Arial, sans-serif; }
     .gi-track-headline { margin: 0; color: #202124; }

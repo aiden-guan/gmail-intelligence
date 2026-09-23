@@ -61,10 +61,7 @@ export class AgentLoop {
     const reliable = quality === 'THREAD_COMPLETE';
     const existing = await this.deps.db.thread_classifications.get(input.threadId);
     if (existing?.fingerprint === input.fingerprint) {
-      if (reliable && settings.autoSummarize && settings.aiMode !== 'disabled' && this.deps.ai) {
-        const summary = await this.deps.db.thread_summaries.get(input.threadId);
-        if (!summary) await this.summarizeIfNeeded(input);
-      }
+      if (hasReadableBody(input.messages) && settings.autoSummarize) await this.summarizeIfNeeded(input);
       return;
     }
 
@@ -164,17 +161,15 @@ export class AgentLoop {
     this.deps.onIntel?.(input.threadId, 'THREAD_CLASSIFIED');
     this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
 
+    if (hasReadableBody(input.messages) && settings.autoSummarize) {
+      await this.summarizeIfNeeded(input);
+    }
     if (!reliable) return;
 
-    if (classification.category === 'RESPOND' && settings.autoSummarize) {
-      await this.summarizeIfNeeded(input);
-      if (settings.autoDraft && this.deps.ai && settings.aiMode !== 'disabled') {
-        await this.draftResponse(input, settings.autoInsertDraft);
-      }
+    if (classification.category === 'RESPOND' && settings.autoDraft && this.deps.ai && settings.aiMode !== 'disabled') {
+      await this.draftResponse(input, settings.autoInsertDraft);
     } else if (classification.category === 'WAITING' && settings.autoReminders) {
       await this.trackFollowUp(input);
-    } else if (classification.category === 'FYI' && settings.autoSummarize) {
-      await this.summarizeIfNeeded(input);
     }
 
     if (settings.autoArchive) {
@@ -424,6 +419,10 @@ export class AgentLoop {
       });
     }
   }
+}
+
+function hasReadableBody(messages: Array<{ bodyText: string }>): boolean {
+  return messages.some((message) => message.bodyText.trim().length > 0);
 }
 
 export * from './classify.js';

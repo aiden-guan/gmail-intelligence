@@ -9,6 +9,7 @@ import {
   findThreadRows,
   normalizeOpenedThread,
   normalizeVisibleRow,
+  type NormalizedThread,
   selectorDiagnostics,
   verifyArchive,
   verifyDraftInserted,
@@ -33,6 +34,8 @@ let booted = false;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
 let currentThreadId: string | null = null;
+const summaryNotes = new Map<string, { pending: boolean; reason: string | null }>();
+const summaryKeys = new Map<string, string>();
 
 function runtimeAlive(): boolean {
   try {
@@ -123,7 +126,12 @@ async function boot(): Promise<void> {
     if (event.type === 'THREAD_OPENED' || event.type === 'THREAD_DATA_UPDATED') {
       currentThreadId = event.thread.threadId;
       const thread = normalizeOpenedThread(event.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
-      void send({ type: 'INGEST_THREAD', direction: 'inbound', thread });
+      const bodyKey = `${thread.threadId}:${thread.messages.map((message) => message.bodyText.length).join(',')}`;
+      if (summaryKeys.get(thread.threadId) !== bodyKey) {
+        summaryKeys.set(thread.threadId, bodyKey);
+        summaryNotes.set(thread.threadId, { pending: true, reason: null });
+        void summarizeOpenThread(thread);
+      }
       if (!sdkReady) showDomThreadPanel(event.thread.threadId);
     }
     if (event.type === 'COMPOSE_OPENED') {
@@ -142,6 +150,11 @@ async function boot(): Promise<void> {
       void send<{ emails?: TrackedEmailSummary[] }>({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }).then((res) => {
         if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
       });
+    },
+    onStatus: () => {
+      if (!currentThreadId) return;
+      const panel = document.getElementById('gi-thread-panel');
+      if (panel) void refreshPanel(panel, currentThreadId);
     },
   });
   installDomComposeTracking({ ...trackingDeps(), sdkOwnsCompose: () => sdkOwnsCompose });
@@ -310,14 +323,39 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
     root = createRoot(el);
     panelRoots.set(el, root);
   }
+  const tracking = sentStatus?.openThreadStatus() ?? null;
+  const note = summaryNotes.get(threadId);
+  const pending = intel?.summary
+    ? null
+    : note?.pending
+      ? 'Reading this thread…'
+      : note?.reason || (intel?.classification ? null : 'Reading this thread…');
   root.render(
     createElement(ThreadIntelCard, {
       intel,
-      pending: intel?.summary ? null : 'Reading this thread…',
+      tracking,
+      pending,
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
     }),
   );
+}
+
+async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
+  const direction = thread.route === 'sent' ? 'outbound' : 'inbound';
+  await send({ type: 'INGEST_THREAD', direction, thread });
+  const readable = thread.messages.some((message) => message.bodyText.trim());
+  if (!readable) {
+    summaryNotes.set(thread.threadId, { pending: false, reason: 'The message text is not on screen yet.' });
+    await refreshThread(thread.threadId);
+    return;
+  }
+  const res = await send<{ ok?: boolean; reason?: string }>({ type: 'SUMMARIZE_THREAD', threadId: thread.threadId });
+  summaryNotes.set(thread.threadId, {
+    pending: false,
+    reason: res?.ok ? null : res?.reason || 'Could not summarize this thread.',
+  });
+  await refreshThread(thread.threadId);
 }
 
 function getIntel(threadId: string): Promise<ThreadIntelData | undefined> {

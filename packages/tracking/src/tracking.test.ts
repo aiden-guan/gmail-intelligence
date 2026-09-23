@@ -146,6 +146,12 @@ describe('sent mail status', () => {
     ).toBe('trk_1');
   });
 
+  it('matches one tracked email by subject when the row has no address', () => {
+    expect(
+      matchTrackedEmail({ threadIds: ['other-id'], subject: 'Hello', emails: [] }, [base])?.trackingId,
+    ).toBe('trk_1');
+  });
+
   it('matches an unlinked send by subject and recipient', () => {
     const unlinked = { ...base, gmailThreadId: null };
     expect(
@@ -169,17 +175,19 @@ describe('sent mail status', () => {
       { now: opened + 15_000 },
     );
     expect(copy.opened).toBe(true);
-    expect(copy.headline).toMatch(/a@b.com/);
-    expect(copy.headline).toMatch(/Open detected/);
-    expect(copy.detail).toMatch(/Last detected/);
-    expect(copy.countLabel).toBe('Open detected 2 times');
+    expect(copy.headline).toBe('a@b.com opened your email less than a minute ago.');
+    expect(copy.detail).toBe('First opened less than a minute after you sent.');
+    expect(copy.countLabel).toBe('Opened 2 times');
+    expect(copy.markLabel).toBe('Opened');
   });
 
   it('describes mail that has not been opened', () => {
     const copy = describeTrackingStatus(base, { now: Date.parse(base.sentAt) + 60_000 });
     expect(copy.opened).toBe(false);
-    expect(copy.headline).toMatch(/No open detected/);
-    expect(copy.countLabel).toBe('No open detected');
+    expect(copy.headline).toBe('Not opened yet.');
+    expect(copy.detail).toBe('Tracking is on for this email.');
+    expect(copy.countLabel).toBe('Not opened yet');
+    expect(copy.markLabel).toBe('Not opened');
   });
 
   it('keeps the local reply reminder when remote stats refresh', () => {

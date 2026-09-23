@@ -62,6 +62,47 @@ describe('reactive intelligence', () => {
     });
     expect(host.textContent).toContain('Asked about Thursday.');
     expect(host.textContent).toContain('Draft reply');
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{ classification: { category: 'FYI' } }}
+          pending="Reading this thread…"
+          tracking={{
+            opened: true,
+            markLabel: 'Opened',
+            headline: 'aiden@example.com opened your email a minute ago.',
+            detail: 'First opened less than a minute after you sent.',
+            countLabel: 'Opened once',
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.textContent).toContain('opened your email');
+    expect(host.textContent).toContain('Reading this thread');
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'FYI' },
+            summary: { summary: { oneLine: 'A short note to Dylan.' } },
+          }}
+          tracking={{
+            opened: true,
+            markLabel: 'Opened',
+            headline: 'aiden@example.com opened your email a minute ago.',
+            detail: 'First opened less than a minute after you sent.',
+            countLabel: 'Opened once',
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.textContent).toContain('A short note to Dylan.');
+    expect(host.textContent).toContain('opened your email');
+    expect(host.textContent).not.toContain('Reading this thread');
     root.unmount();
   });
 });

@@ -4,20 +4,32 @@
  * Selectors are ordered by stability preference.
  */
 export const SELECTORS = {
-  /** Thread list rows — prefer role + structure over class hashes */
+  /** Thread list rows. The id often lives on an inner span, not the row class. */
   threadRow: [
     'tr.zA',
+    'tr[data-legacy-thread-id]',
+    'tr:has(span[data-thread-id])',
+    '[role="row"]:has(span[data-thread-id])',
     'div[role="main"] tr[jscontroller]',
     'div[role="listitem"][data-legacy-thread-id]',
-    '[data-thread-id]',
+    'div.zA',
+    '[role="main"] [role="row"]',
   ],
-  threadRowSubject: ['.bog', '.bqe', '[data-legacy-thread-id] span[email]', '.y6 span'],
+  threadRowSubject: ['span[data-thread-id]', '.bog', '.bqe', '[data-legacy-thread-id] span[email]', '.y6 span'],
   threadRowSnippet: ['.y2', '.Zt'],
-  threadRowSender: ['.yW span[email]', '.yP', '.zF', 'span[email]'],
+  threadRowSender: ['.yW span[email]', '.yP', '.zF', 'span[email]', '[data-hovercard-id]'],
   threadIdAttr: ['data-legacy-thread-id', 'data-thread-perm-id', 'data-thread-id'],
   messageIdAttr: ['data-legacy-message-id', 'data-message-id'],
   openThread: ['div[role="main"] h2.hP', 'h2[data-thread-perm-id]', '[data-legacy-thread-id].nH'],
-  messageBody: ['.a3s.aiL', '.a3s', 'div[data-message-id] .a3s', '[role="listitem"] .ii'],
+  messageBody: [
+    '.a3s.aiL',
+    '.a3s',
+    'div[data-message-id] .a3s',
+    '[role="listitem"] .ii',
+    '[data-message-id] div[dir="ltr"]',
+    '[data-legacy-message-id] div[dir="ltr"]',
+    '.ii.gt div[dir]',
+  ],
   composeRoot: [
     'div[role="dialog"][aria-label*="compose" i]',
     '.M9',
@@ -47,13 +59,42 @@ export const SELECTORS = {
 
 export type SelectorKey = keyof typeof SELECTORS;
 
+function safeQuery(root: ParentNode, sel: string): Element | null {
+  try {
+    return root.querySelector(sel);
+  } catch {
+    return null;
+  }
+}
+
+function safeQueryAll(root: ParentNode, sel: string): Element[] {
+  try {
+    return [...root.querySelectorAll(sel)];
+  } catch {
+    return [];
+  }
+}
+
+function shadowRoots(root: ParentNode, depth = 0): ShadowRoot[] {
+  if (depth > 3 || !root.querySelectorAll) return [];
+  const roots: ShadowRoot[] = [];
+  for (const el of root.querySelectorAll('*')) {
+    if (!el.shadowRoot) continue;
+    roots.push(el.shadowRoot);
+    roots.push(...shadowRoots(el.shadowRoot, depth + 1));
+  }
+  return roots;
+}
+
 export function queryFirst(root: ParentNode, keys: readonly string[]): Element | null {
   for (const sel of keys) {
-    try {
-      const el = root.querySelector(sel);
+    const el = safeQuery(root, sel);
+    if (el) return el;
+  }
+  for (const shadow of shadowRoots(root)) {
+    for (const sel of keys) {
+      const el = safeQuery(shadow, sel);
       if (el) return el;
-    } catch {
-      // invalid selector in this environment — continue
     }
   }
   return null;
@@ -61,11 +102,13 @@ export function queryFirst(root: ParentNode, keys: readonly string[]): Element |
 
 export function queryAll(root: ParentNode, keys: readonly string[]): Element[] {
   for (const sel of keys) {
-    try {
-      const list = [...root.querySelectorAll(sel)];
+    const list = safeQueryAll(root, sel);
+    if (list.length) return list;
+  }
+  for (const shadow of shadowRoots(root)) {
+    for (const sel of keys) {
+      const list = safeQueryAll(shadow, sel);
       if (list.length) return list;
-    } catch {
-      // continue
     }
   }
   return [];
@@ -93,7 +136,107 @@ export function findMain(root: ParentNode = document): HTMLElement | null {
 }
 
 export function findThreadRows(root: ParentNode = document): HTMLElement[] {
-  return queryAll(root, SELECTORS.threadRow).filter((el): el is HTMLElement => el instanceof HTMLElement);
+  const found = collectMailRows(root);
+  if (found.length) return found;
+  for (const shadow of shadowRoots(root)) {
+    const nested = collectMailRows(shadow);
+    if (nested.length) return nested;
+  }
+  return checkboxRows(root);
+}
+
+function collectMailRows(root: ParentNode): HTMLElement[] {
+  const found = new Set<HTMLElement>();
+  for (const sel of SELECTORS.threadRow) {
+    for (const el of safeQueryAll(root, sel)) {
+      if (el instanceof HTMLElement && looksLikeMailRow(el)) addRow(found, el);
+    }
+  }
+  return [...found];
+}
+
+/** A list row, not a message header or a toolbar. */
+function looksLikeMailRow(el: HTMLElement): boolean {
+  if (el.closest('[data-gi-ui], .gi-track-card, .gi-track-slot')) return false;
+  if (el.matches('tr.zA, div.zA, [data-legacy-thread-id], [data-thread-perm-id]')) return true;
+  if (el.querySelector('span[data-thread-id], [data-legacy-thread-id], [data-thread-perm-id]')) return true;
+  return Boolean(el.querySelector('[role="checkbox"]') && el.querySelector('[email], [data-hovercard-id]'));
+}
+
+function addRow(found: Set<HTMLElement>, el: HTMLElement): void {
+  for (const existing of found) {
+    if (existing === el || existing.contains(el)) return;
+    if (el.contains(existing)) found.delete(existing);
+  }
+  found.add(el);
+}
+
+function checkboxRows(root: ParentNode): HTMLElement[] {
+  const scope = findMain(root) || root;
+  if (!scope.querySelectorAll) return [];
+  const found = new Set<HTMLElement>();
+  for (const box of scope.querySelectorAll('[role="checkbox"]')) {
+    const row = box.closest('tr, [role="row"]');
+    if (!(row instanceof HTMLElement) || !looksLikeMailRow(row)) continue;
+    addRow(found, row);
+  }
+  return [...found];
+}
+
+const LIST_HEADS = new Set([
+  'inbox',
+  'sent',
+  'drafts',
+  'starred',
+  'snoozed',
+  'spam',
+  'trash',
+  'imp',
+  'all',
+  'chats',
+  'scheduled',
+]);
+
+/** `#sent/id` and `#inbox/id` are conversations. `#sent` is the list. */
+export function isOpenThreadRoute(hash: string): boolean {
+  const parts = hash.replace(/^#/, '').split('?')[0].split('/').filter(Boolean);
+  if (parts.length < 2) return false;
+  const head = parts[0].toLowerCase();
+  if (head === 'search' || head === 'label' || head === 'category' || head === 'advanced-search') {
+    return parts.length >= 3;
+  }
+  if (LIST_HEADS.has(head)) return true;
+  return parts.length >= 2;
+}
+
+export function threadIdFromLocation(hash = typeof location !== 'undefined' ? location.hash : ''): string | undefined {
+  if (!isOpenThreadRoute(hash)) return undefined;
+  const parts = hash.replace(/^#/, '').split('?')[0].split('/').filter(Boolean);
+  const raw = parts[parts.length - 1] || '';
+  try {
+    return decodeURIComponent(raw) || undefined;
+  } catch {
+    return raw || undefined;
+  }
+}
+
+/** Visible message text when Gmail no longer uses the `.a3s` body class. */
+export function findMessageBodies(root: ParentNode = document): HTMLElement[] {
+  const known = queryAll(root, SELECTORS.messageBody).filter((el): el is HTMLElement => el instanceof HTMLElement);
+  const readable = known.filter((el) => Boolean(messageText(el)));
+  if (readable.length) return readable;
+  const scope = findMain(root) || root;
+  if (!scope.querySelectorAll) return [];
+  const blocks = [...scope.querySelectorAll('[data-message-id], [data-legacy-message-id], [role="listitem"]')].filter(
+    (el): el is HTMLElement => el instanceof HTMLElement && Boolean(messageText(el)) && !el.querySelector('h2'),
+  );
+  return blocks;
+}
+
+export function messageText(el: Element): string {
+  const clone = el.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('[data-gi-ui], .gi-track-slot, .gi-track-btn, .gi-cat-chip').forEach((node) => node.remove());
+  return clone.textContent?.replace(/\s+/g, ' ').trim() || '';
 }
 
 export function findComposeRoot(root: ParentNode = document): HTMLElement | null {
@@ -130,6 +273,22 @@ export function getThreadIdFromElement(el: Element | null): string | undefined {
   return readAttr(el, SELECTORS.threadIdAttr);
 }
 
+/** Thread id on the row, or on the subject span inside it. */
+export function getThreadIdFromRow(row: Element): string | undefined {
+  const own = directThreadAttr(row);
+  if (own) return own;
+  const nested = row.querySelector('[data-legacy-thread-id], [data-thread-perm-id], [data-thread-id]');
+  return nested ? directThreadAttr(nested) : undefined;
+}
+
+function directThreadAttr(el: Element): string | undefined {
+  for (const attr of SELECTORS.threadIdAttr) {
+    const value = el.getAttribute(attr);
+    if (value) return value;
+  }
+  return undefined;
+}
+
 export function selectorDiagnostics(root: ParentNode = document): Array<{ key: string; found: boolean }> {
   const checks: Array<[string, () => boolean]> = [
     ['threadRow', () => findThreadRows(root).length > 0],
@@ -143,7 +302,18 @@ export function selectorDiagnostics(root: ParentNode = document): Array<{ key: s
   return checks.map(([key, found]) => ({ key, found: found() }));
 }
 
+const loggedMisses = new Set<string>();
+
 export function logSelectorMiss(capability: string, keys: readonly string[]): void {
-  // Diagnostic only — never crash
-  console.warn(`[gi/gmail] selector miss for ${capability}:`, keys.slice(0, 3).join(', '));
+  const hash = typeof location !== 'undefined' ? location.hash : '';
+  if (isOpenThreadRoute(hash)) return;
+  if (typeof document !== 'undefined' && queryFirst(document, SELECTORS.openThread)) return;
+  const route = hash.split('?')[0];
+  const key = `${capability}:${route}`;
+  if (loggedMisses.has(key)) return;
+  const main = typeof document !== 'undefined' ? document.querySelector('[role="main"]') : null;
+  const listReady = Boolean(main?.querySelector('table, [role="grid"], [role="list"]'));
+  if (!listReady) return;
+  loggedMisses.add(key);
+  console.warn(`[gi/gmail] selector miss for ${capability}:`, keys.slice(0, 4).join(', '));
 }

@@ -3,7 +3,7 @@
  */
 import type { TrackedEmailSummary } from '@gi/tracking';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { paintRows } from './sent-status';
+import { paintConversation, paintRows } from './sent-status';
 
 const opened: TrackedEmailSummary = {
   trackingId: 'trk_open',
@@ -55,8 +55,11 @@ describe('sent mail open status', () => {
     paintRows(document, [opened, waiting], 'https://track.example', () => undefined);
     const buttons = [...document.querySelectorAll<HTMLButtonElement>('.gi-track-btn')];
     expect(buttons.map((button) => button.dataset.state)).toEqual(['opened', 'pending']);
-    expect(buttons[0].getAttribute('aria-label')).toMatch(/Open detected/);
-    expect(buttons[1].getAttribute('aria-label')).toMatch(/No open detected/);
+    expect(buttons[0].getAttribute('aria-label')).toMatch(/opened your email/);
+    expect(buttons[0].textContent).not.toMatch(/Opened/);
+    expect(buttons[1].getAttribute('aria-label')).toBe('Not opened yet.');
+    expect(buttons[0].style.color).toBe('rgb(24, 128, 56)');
+    expect(buttons[1].style.color).toBe('rgb(128, 134, 139)');
     expect(document.querySelector('[data-legacy-thread-id="thread-1"]')?.getAttribute('data-gi-tracked')).toBe('opened');
   });
 
@@ -68,14 +71,51 @@ describe('sent mail open status', () => {
     button?.click();
     const card = document.querySelector('[data-gi-ui="track-card"]');
     expect(card?.textContent).toContain('aiden@example.com');
-    expect(card?.textContent).toContain('Open detected');
-    expect(card?.textContent).toContain('Last detected');
-    expect(card?.textContent).toContain('Open detected 2 times');
+    expect(card?.textContent).toContain('opened your email');
+    expect(card?.textContent).toContain('First opened');
+    expect(card?.textContent).toContain('Opened 2 times');
     expect(card?.textContent).toContain('Notify me if there is no reply');
     card?.querySelector<HTMLButtonElement>('[role="switch"]')?.click();
     expect(onNotify).toHaveBeenCalledWith('trk_open', true);
     card?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(document.querySelector('[data-gi-ui="track-card"]')).toBeNull();
+  });
+
+  it('paints a modern row whose id is on the subject span, and the open conversation', () => {
+    document.body.innerHTML = `
+      <div>
+        <h2 class="hP">Hello</h2>
+        <span email="aiden@example.com">Aiden</span>
+      </div>
+      <table><tbody>
+        <tr>
+          <td><span email="aiden@example.com">To: Aiden</span></td>
+          <td><span data-thread-id="msg-f:1" data-legacy-thread-id="thread-1">Hello</span></td>
+        </tr>
+      </tbody></table>
+    `;
+    paintRows(document, [opened], 'https://track.example', () => undefined);
+    paintConversation(document, [opened], 'https://track.example', () => undefined);
+    const buttons = [...document.querySelectorAll('.gi-track-btn')];
+    expect(buttons.length).toBeGreaterThanOrEqual(1);
+    const labeled = buttons.find((button) => button.textContent?.includes('Opened'));
+    expect(labeled?.getAttribute('aria-label')).toMatch(/opened your email/);
+  });
+
+  it('paints a checkbox row that has no legacy thread class', () => {
+    document.body.innerHTML = `
+      <div role="main">
+        <div role="row">
+          <div role="gridcell"><div role="checkbox" aria-checked="false"></div></div>
+          <div role="gridcell"><span email="aiden@example.com">To: Aiden</span></div>
+          <div role="gridcell"><span>Hello</span></div>
+        </div>
+      </div>
+    `;
+    paintRows(document, [opened], 'https://track.example', () => undefined);
+    const button = document.querySelector('.gi-track-btn');
+    expect(button?.getAttribute('data-state')).toBe('opened');
+    expect(button?.getAttribute('aria-label')).toMatch(/opened your email/);
   });
 
   it('leaves untracked rows alone', () => {

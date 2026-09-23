@@ -92,4 +92,63 @@ describe('manual classification and drafts', () => {
     expect(inserted).toEqual([]);
     expect((await db.draft_suggestions.toArray())[0]?.suggestion.body).toMatch(/Thursday/);
   });
+
+  it('summarizes an opened email even when nobody needs a reply', async () => {
+    const db = getMailboxDb('agent_' + Math.random());
+    await db.threads.put({
+      threadId: 't2',
+      accountId: 'default',
+      subject: 'Receipt',
+      participants: [{ email: 'notifications@shop.test' }],
+      latestTimestamp: '',
+      messageCount: 1,
+      snippet: 'Your order shipped',
+      route: 'inbox',
+      lastIndexedAt: 1,
+      contentFingerprint: 'fp2',
+      archivedLocally: false,
+      requiresResponse: false,
+      awaitingResponse: false,
+      virtualLabels: [],
+    });
+    const ai = {
+      classifyEmail: async () => {
+        throw new Error('classify should not be required');
+      },
+      summarizeThread: async () => ({
+        result: {
+          oneLine: 'The order shipped.',
+          keyPoints: ['Tracking is included'],
+          decisions: [],
+          unansweredQuestions: [],
+          commitments: [],
+          dates: [],
+          actionItems: [],
+        },
+      }),
+      draftReply: async () => ({ result: { mode: 'direct' as const, body: '', placeholders: [] } }),
+    } as unknown as AIProvider;
+    const agent = new AgentLoop({
+      db,
+      ai,
+      queue: new AIJobQueue(),
+      settings: () => ({ ...DEFAULT_SETTINGS, aiMode: 'remote', autoSummarize: true, autoDraft: false, autoReminders: false, autoArchive: false }),
+      archiveViaGmail: async () => ({ success: false }),
+      insertDraftViaGmail: async () => ({ success: true }),
+      log: async () => 'log',
+    });
+    await agent.onNewMessage({
+      threadId: 't2',
+      fingerprint: 'fp2',
+      subject: 'Receipt',
+      snippet: 'Your order shipped',
+      bodyText: 'Your order shipped',
+      latestSenderEmail: 'notifications@shop.test',
+      direction: 'inbound',
+      isNoreply: true,
+      quality: 'THREAD_COMPLETE',
+      messages: [{ sender: 'notifications@shop.test', bodyText: 'Your order shipped', timestamp: '' }],
+    });
+    expect((await db.thread_summaries.get('t2'))?.summary.oneLine).toBe('The order shipped.');
+  });
 });

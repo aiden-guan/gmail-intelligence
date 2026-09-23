@@ -247,15 +247,20 @@ export function matchTrackedEmail(
   }
 
   const subject = normalizeSubject(row.subject);
+  if (!subject) return null;
   const rowEmails = new Set(row.emails.map(normalizeEmail).filter(Boolean));
-  if (!subject || rowEmails.size === 0) return null;
-
-  const candidates = emails.filter((email) => {
-    if (email.gmailThreadId && ids.size > 0 && !ids.has(email.gmailThreadId)) return false;
-    if (normalizeSubject(email.subject) !== subject) return false;
-    return email.recipients.some((recipient) => rowEmails.has(normalizeEmail(recipient)));
-  });
-  return candidates.length > 0 ? mostRecent(candidates) : null;
+  let candidates = emails.filter((email) => normalizeSubject(email.subject) === subject);
+  if (rowEmails.size > 0) {
+    candidates = candidates.filter((email) =>
+      email.recipients.some((recipient) => rowEmails.has(normalizeEmail(recipient))),
+    );
+  }
+  if (candidates.length === 1) return candidates[0];
+  if (rowEmails.size === 0) return null;
+  const sameThread = candidates.filter(
+    (email) => !email.gmailThreadId || ids.size === 0 || ids.has(email.gmailThreadId),
+  );
+  return sameThread.length > 0 ? mostRecent(sameThread) : null;
 }
 
 export function normalizeSubject(subject: string): string {
@@ -305,7 +310,7 @@ export function trackingStatusLine(opts: {
   if (isLoopbackTracker(opts.trackerBaseUrl)) {
     return 'Open tracking is on. This tracker is on your computer, so recipient opens will not show until Settings uses a public URL.';
   }
-  return 'Open tracking is on. A check appears beside sent mail after someone opens it.';
+  return 'Open tracking is on. A check sits beside tracked mail and turns green after someone opens it.';
 }
 
 export type TrackingStatusCopy = {
@@ -315,6 +320,8 @@ export type TrackingStatusCopy = {
   headline: string;
   detail: string;
   countLabel: string;
+  /** Short label beside the subject. The inbox row stays icon-only. */
+  markLabel: string;
   loopbackWarning: string | null;
 };
 
@@ -330,21 +337,24 @@ export function describeTrackingStatus(
   const when = email.lastOpenedAt || email.firstOpenedAt;
   const ago = when ? formatAgo(when, now) : 'recently';
 
-  const emphasis = who;
+  const emphasis = opened || clicked ? who : null;
   const rest = opened
-    ? `Open detected ${ago}.`
+    ? ` opened your email ${ago}.`
     : clicked
-      ? `Link clicked ${ago}.`
-      : 'No open detected.';
-  const headline = emphasis ? `${emphasis}. ${rest}` : rest;
+      ? ` clicked a link ${ago}.`
+      : 'Not opened yet.';
+  const headline = emphasis ? `${emphasis}${rest}` : opened ? `Opened ${ago}.` : rest;
 
-  const detail = opened
-    ? `Last detected ${ago}.`
-    : clicked
-      ? 'A link click was detected. Pixel tracking is probabilistic.'
-      : 'No open detected.';
+  const detail =
+    opened && email.firstOpenedAt
+      ? `First opened ${formatAfterSend(email.sentAt, email.firstOpenedAt)}.`
+      : opened
+        ? `Last opened ${ago}.`
+        : clicked
+          ? 'A link click was detected.'
+          : 'Tracking is on for this email.';
 
-  let countLabel = 'No open detected';
+  let countLabel = 'Not opened yet';
   if (opened && clicked) {
     countLabel = `${openCountLabel(email.openCount)} · ${clickCountLabel(email.clickCount)}`;
   } else if (opened) {
@@ -361,6 +371,7 @@ export function describeTrackingStatus(
     headline,
     detail,
     countLabel,
+    markLabel: opened ? 'Opened' : clicked ? 'Clicked' : 'Not opened',
     loopbackWarning: loopback
       ? 'Gmail loads tracking images from Google’s servers, which cannot reach this computer. Use a public tracker URL in Settings to record recipient opens.'
       : null,
@@ -485,8 +496,8 @@ function formatSpan(delta: number, ago: boolean): string {
   return ago ? `${days} days ago` : `${days} days`;
 }
 function openCountLabel(count: number): string {
-  if (count === 1) return 'Open detected once';
-  return `Open detected ${count} times`;
+  if (count === 1) return 'Opened once';
+  return `Opened ${count} times`;
 }
 function clickCountLabel(count: number): string {
   if (count === 1) return 'Link clicked once';
