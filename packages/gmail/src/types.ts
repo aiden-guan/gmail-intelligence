@@ -21,6 +21,7 @@ export type VisibleThreadRow = {
   unread: boolean;
   starred: boolean;
   labels: string[];
+  messageCount?: number;
 };
 
 export type ThreadMessageView = {
@@ -29,7 +30,8 @@ export type ThreadMessageView = {
   sender: Contact;
   recipients: Contact[];
   cc: Contact[];
-  timestamp: string;
+  /** Present only when Gmail exposed a real timestamp. Never a generated clock reading. */
+  timestamp?: string;
   bodyText: string;
   bodyHtml?: string;
   attachmentsMetadata: { filename: string; mimeType?: string; sizeBytes?: number }[];
@@ -54,13 +56,14 @@ export type ComposeViewState = {
 };
 
 export type MailboxEvent =
-  | { type: 'inbox_observed'; rows: VisibleThreadRow[]; at: number }
-  | { type: 'new_message'; row: VisibleThreadRow; at: number }
-  | { type: 'thread_opened'; thread: CurrentThreadView; at: number }
-  | { type: 'compose_opened'; compose: ComposeViewState; at: number }
-  | { type: 'compose_sent'; compose: ComposeViewState; at: number }
-  | { type: 'route_changed'; route: ThreadRoute; query?: string; at: number }
-  | { type: 'capability_changed'; capabilities: GmailCapabilities; at: number };
+  | { type: 'VISIBLE_ROWS_CHANGED'; rows: VisibleThreadRow[]; at: number }
+  | { type: 'MESSAGE_ARRIVED'; row: VisibleThreadRow; at: number }
+  | { type: 'THREAD_OPENED'; thread: CurrentThreadView; at: number }
+  | { type: 'THREAD_DATA_UPDATED'; thread: CurrentThreadView; at: number }
+  | { type: 'COMPOSE_OPENED'; compose: ComposeViewState; at: number }
+  | { type: 'COMPOSE_SENT'; compose: ComposeViewState; at: number }
+  | { type: 'ROUTE_CHANGED'; route: ThreadRoute; query?: string; at: number }
+  | { type: 'CAPABILITY_CHANGED'; capabilities: GmailCapabilities; at: number };
 
 export type MailboxEventHandler = (event: MailboxEvent) => void;
 

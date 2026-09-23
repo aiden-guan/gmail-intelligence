@@ -6,6 +6,7 @@ import {
   getMailboxDb,
   resetMailboxDbForTests,
   buildIndexQuery,
+  filterSplitThreads,
 } from '@gi/mailbox';
 import { contentFingerprint, hashBody } from '@gi/shared';
 
@@ -118,5 +119,95 @@ describe('IndexedDB mailbox', () => {
     expect(cp.status).toBe('completed');
     expect(calls).toBeLessThanOrEqual(3);
     expect(await db.threads.count()).toBe(1);
+  });
+});
+
+describe('split inbox', () => {
+  it('returns only the requested local category', () => {
+    const threads = [
+      { threadId: 'a', classification: 'RESPOND' as const, priority: 'HIGH' as const },
+      { threadId: 'b', classification: 'WAITING' as const, priority: 'NORMAL' as const },
+      { threadId: 'c', classification: 'FYI' as const, priority: 'LOW' as const },
+    ];
+    expect(filterSplitThreads(threads, 'RESPOND').map((thread) => thread.threadId)).toEqual(['a']);
+    expect(filterSplitThreads(threads, 'WAITING').map((thread) => thread.threadId)).toEqual(['b']);
+    expect(filterSplitThreads(threads, 'FYI').map((thread) => thread.threadId)).toEqual(['c']);
+    expect(filterSplitThreads(threads, 'NOTIFICATIONS')).toEqual([]);
+    expect(filterSplitThreads(threads, 'PRIORITY').map((thread) => thread.threadId)).toEqual(['a']);
+    expect(filterSplitThreads(threads, 'FOLLOW_UPS', ['c']).map((thread) => thread.threadId).sort()).toEqual(['b', 'c']);
+  });
+});
+
+describe('stable fingerprints', () => {
+  it('keeps a ROW_STUB stable when no timestamp exists', async () => {
+    const db = getMailboxDb('test_stub_' + Math.random());
+    const ingestor = new MailboxIngestor(db);
+    const stub = {
+      threadId: 'stub',
+      subject: 'Hello',
+      participants: [{ email: 'a@b.com' }],
+      latestSender: { email: 'a@b.com' },
+      messageCount: 1,
+      snippet: 'Preview text',
+      route: 'inbox',
+      messages: [],
+      quality: 'ROW_STUB' as const,
+      source: 'dom' as const,
+    };
+    const first = await ingestor.ingestThread(stub);
+    const second = await ingestor.ingestThread({ ...stub });
+    expect(second.changed).toBe(false);
+    expect(second.fingerprint).toBe(first.fingerprint);
+    const stored = await db.threads.get('stub');
+    expect(stored?.latestTimestamp).toBe('');
+    expect(await db.messages.count()).toBe(0);
+  });
+
+  it('upgrades a stub to a complete thread and ignores a later stub', async () => {
+    const db = getMailboxDb('test_up_' + Math.random());
+    const ingestor = new MailboxIngestor(db);
+    const stub = {
+      threadId: 't',
+      subject: 'Hello',
+      participants: [{ email: 'a@b.com' }],
+      latestSender: { email: 'a@b.com' },
+      messageCount: 1,
+      snippet: 'Preview',
+      route: 'inbox',
+      messages: [],
+      quality: 'ROW_STUB' as const,
+    };
+    await ingestor.ingestThread(stub);
+    const message = {
+      messageId: 'm1',
+      threadId: 't',
+      sender: { email: 'a@b.com' },
+      recipients: [],
+      cc: [],
+      bodyText: 'Full message',
+      attachmentsMetadata: [],
+    };
+    const upgraded = await ingestor.ingestThread({
+      ...stub,
+      quality: 'THREAD_COMPLETE',
+      messages: [message],
+    });
+    expect(upgraded.changed).toBe(true);
+    expect(upgraded.quality).toBe('THREAD_COMPLETE');
+    const again = await ingestor.ingestThread({ ...stub, quality: 'THREAD_COMPLETE', messages: [message] });
+    expect(again.changed).toBe(false);
+    const downgrade = await ingestor.ingestThread(stub);
+    expect(downgrade.changed).toBe(false);
+    expect(downgrade.quality).toBe('THREAD_COMPLETE');
+    const snippet = await ingestor.ingestThread({ ...stub, threadId: 'other', snippet: 'Changed preview' });
+    const snippet2 = await ingestor.ingestThread({ ...stub, threadId: 'other', snippet: 'Changed again' });
+    expect(snippet2.fingerprint).not.toBe(snippet.fingerprint);
+    const added = await ingestor.ingestThread({
+      ...stub,
+      quality: 'THREAD_COMPLETE',
+      messages: [message, { ...message, messageId: 'm2', bodyText: 'Second message' }],
+    });
+    expect(added.changed).toBe(true);
+    expect(added.fingerprint).not.toBe(upgraded.fingerprint);
   });
 });

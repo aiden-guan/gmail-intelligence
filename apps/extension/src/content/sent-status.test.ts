@@ -55,8 +55,8 @@ describe('sent mail open status', () => {
     paintRows(document, [opened, waiting], 'https://track.example', () => undefined);
     const buttons = [...document.querySelectorAll<HTMLButtonElement>('.gi-track-btn')];
     expect(buttons.map((button) => button.dataset.state)).toEqual(['opened', 'pending']);
-    expect(buttons[0].getAttribute('aria-label')).toMatch(/aiden@example.com opened your email/);
-    expect(buttons[1].getAttribute('aria-label')).toMatch(/sam@example.com has not opened/);
+    expect(buttons[0].getAttribute('aria-label')).toMatch(/Open detected/);
+    expect(buttons[1].getAttribute('aria-label')).toMatch(/No open detected/);
     expect(document.querySelector('[data-legacy-thread-id="thread-1"]')?.getAttribute('data-gi-tracked')).toBe('opened');
   });
 
@@ -68,9 +68,9 @@ describe('sent mail open status', () => {
     button?.click();
     const card = document.querySelector('[data-gi-ui="track-card"]');
     expect(card?.textContent).toContain('aiden@example.com');
-    expect(card?.textContent).toContain('opened your email');
-    expect(card?.textContent).toContain('First opened less than a minute after you sent.');
-    expect(card?.textContent).toContain('Opened 2 times');
+    expect(card?.textContent).toContain('Open detected');
+    expect(card?.textContent).toContain('Last detected');
+    expect(card?.textContent).toContain('Open detected 2 times');
     expect(card?.textContent).toContain('Notify me if there is no reply');
     card?.querySelector<HTMLButtonElement>('[role="switch"]')?.click();
     expect(onNotify).toHaveBeenCalledWith('trk_open', true);

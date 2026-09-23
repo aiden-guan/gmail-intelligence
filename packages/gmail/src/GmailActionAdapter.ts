@@ -111,7 +111,7 @@ export class GmailActionAdapter {
         const result = await withTimeout(this.execute(item.action), item.timeoutMs);
         if (!result.success) {
           if (!result.retryable || item.attempts >= item.maxAttempts) {
-            return { ...result, actionId: item.id, verified: false };
+            return report(result, item, false);
           }
           await sleep(Math.min(2000 * 2 ** (item.attempts - 1), 10_000));
           continue;
@@ -122,16 +122,20 @@ export class GmailActionAdapter {
             await sleep(500 * item.attempts);
             continue;
           }
-          return { ...result, actionId: item.id, verified: true };
+          return report(result, item, true);
         }
-        return { ...result, actionId: item.id };
+        return report(result, item, result.verified);
       } catch (err) {
         if (item.attempts >= item.maxAttempts) {
           return {
             success: false,
             capability: item.action.kind,
+            action: item.action.kind,
+            threadId: 'threadId' in item.action ? item.action.threadId : undefined,
             error: String(err),
+            reason: String(err),
             retryable: false,
+            verified: false,
             actionId: item.id,
           };
         }
@@ -141,8 +145,12 @@ export class GmailActionAdapter {
     return {
       success: false,
       capability: item.action.kind,
+      action: item.action.kind,
+      threadId: 'threadId' in item.action ? item.action.threadId : undefined,
       error: 'max attempts exceeded',
+      reason: 'max attempts exceeded',
       retryable: false,
+      verified: false,
       actionId: item.id,
     };
   }
@@ -219,6 +227,22 @@ export class GmailActionAdapter {
       },
     );
   }
+}
+
+function report(
+  result: GmailActionResult,
+  item: ActionQueueItem,
+  verified: boolean | undefined,
+): ActionQueueResult {
+  const threadId = 'threadId' in item.action ? item.action.threadId : undefined;
+  return {
+    ...result,
+    action: result.action || item.action.kind,
+    threadId: result.threadId || threadId,
+    actionId: item.id,
+    verified: Boolean(verified),
+    reason: result.reason || result.error,
+  };
 }
 
 function sleep(ms: number): Promise<void> {

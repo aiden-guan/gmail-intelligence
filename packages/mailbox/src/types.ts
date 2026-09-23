@@ -1,4 +1,12 @@
-import type { Contact, ThreadCategory, Priority, ThreadSummary, DraftSuggestion } from '@gi/shared';
+import type {
+  Contact,
+  DraftSuggestion,
+  Priority,
+  ThreadCategory,
+  ThreadDataQuality,
+  ThreadDataSource,
+  ThreadSummary,
+} from '@gi/shared';
 
 /**
  * MailboxSource seam — V1 is GmailWebSource.
@@ -15,11 +23,13 @@ export type IngestThread = {
   subject: string;
   participants: Contact[];
   latestSender?: Contact;
-  latestTimestamp: string;
+  latestTimestamp?: string;
   messageCount: number;
   snippet: string;
   route: string;
   messages: IngestMessage[];
+  quality?: ThreadDataQuality;
+  source?: ThreadDataSource;
 };
 
 export type IngestMessage = {
@@ -28,7 +38,7 @@ export type IngestMessage = {
   sender: Contact;
   recipients: Contact[];
   cc: Contact[];
-  timestamp: string;
+  timestamp?: string;
   bodyText: string;
   bodyHtml?: string;
   attachmentsMetadata: { filename: string; mimeType?: string; sizeBytes?: number }[];
@@ -51,6 +61,9 @@ export type ThreadRow = {
   messageCount: number;
   snippet: string;
   route: string;
+  quality?: ThreadDataQuality;
+  source?: ThreadDataSource;
+  manualCategory?: ThreadCategory;
   lastIndexedAt: number;
   contentFingerprint: string;
   classification?: ThreadCategory;
@@ -94,7 +107,7 @@ export type ClassificationRow = {
   archiveRecommendation: boolean;
   reason: string;
   deadline?: string | null;
-  source: 'rule' | 'heuristic' | 'ai';
+  source: 'rule' | 'heuristic' | 'ai' | 'override';
   fingerprint: string;
   createdAt: number;
 };
@@ -165,6 +178,7 @@ export type SearchDocumentRow = {
   labels: string;
   timestamp: string;
   fingerprint: string;
+  quality?: ThreadDataQuality;
 };
 
 export type EmbeddingRow = {
@@ -186,6 +200,22 @@ export type StyleExampleRow = {
   sample: string;
   createdAt: number;
 };
+
+export type ThreadOverrideRow = {
+  threadId: string;
+  category: ThreadCategory;
+  createdAt: number;
+};
+
+export type SplitView =
+  | 'PRIORITY'
+  | 'RESPOND'
+  | 'WAITING'
+  | 'FYI'
+  | 'NOTIFICATIONS'
+  | 'PROMOTIONS'
+  | 'NEWS'
+  | 'FOLLOW_UPS';
 
 export type SettingsRow = {
   key: string;

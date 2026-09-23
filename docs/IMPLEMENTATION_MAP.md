@@ -20,7 +20,7 @@ N/A (greenfield).
 See README repo map: `apps/extension`, `packages/*`, `workers/tracker`, `supabase/migrations`, docs.
 
 ### 6. Architectural risks
-- Gmail DOM / InboxSDK / Gmail.js fragility → capability detection + DOM fallback
+- Gmail DOM / InboxSDK fragility → InboxSDK is bound before start; DOM fallback is the only other runtime path. Gmail.js is not initialized.
 - Native Gmail label mutation unreliable → virtual labels only (`persistentNativeLabelMutationAvailable: false`)
 - No live Gmail verification in agent environment
 - Custom tracker domains need optional host permission beyond `*.workers.dev`
@@ -29,5 +29,5 @@ See README repo map: `apps/extension`, `packages/*`, `workers/tracker`, `supabas
 None (no prior schema).
 
 ## Research notes
-- `@inboxsdk/core` ~2.2.x: MV3 requires local `pageWorld.js` + background injection via `chrome.scripting`
-- `gmail-js` ~1.1.16: MAIN world only; optional capture, not sole source of truth
+- `@inboxsdk/core` 2.2.x: MV3 requires local `pageWorld.js` + background injection via `chrome.scripting`
+- Gmail.js is not a runtime dependency

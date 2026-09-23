@@ -169,16 +169,17 @@ describe('sent mail status', () => {
       { now: opened + 15_000 },
     );
     expect(copy.opened).toBe(true);
-    expect(copy.headline).toBe('a@b.com opened your email less than a minute ago.');
-    expect(copy.detail).toBe('First opened less than a minute after you sent.');
-    expect(copy.countLabel).toBe('Opened 2 times');
+    expect(copy.headline).toMatch(/a@b.com/);
+    expect(copy.headline).toMatch(/Open detected/);
+    expect(copy.detail).toMatch(/Last detected/);
+    expect(copy.countLabel).toBe('Open detected 2 times');
   });
 
   it('describes mail that has not been opened', () => {
     const copy = describeTrackingStatus(base, { now: Date.parse(base.sentAt) + 60_000 });
     expect(copy.opened).toBe(false);
-    expect(copy.headline).toBe('a@b.com has not opened this email.');
-    expect(copy.countLabel).toBe('Not opened yet');
+    expect(copy.headline).toMatch(/No open detected/);
+    expect(copy.countLabel).toBe('No open detected');
   });
 
   it('keeps the local reply reminder when remote stats refresh', () => {

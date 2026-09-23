@@ -1,7 +1,7 @@
 import {
-  contentFingerprint,
-  hashBody,
+  stableThreadFingerprint,
   stripHtml,
+  type ThreadDataQuality,
 } from '@gi/shared';
 import { getMailboxDb, type MailboxDatabase } from './db.js';
 import type {
@@ -10,6 +10,7 @@ import type {
   IngestThread,
   MailboxSource,
   MessageRow,
+  SplitView,
   ThreadRow,
 } from './types.js';
 
@@ -55,24 +56,36 @@ export class MailboxIngestor {
     changed: boolean;
     fingerprint: string;
     threadId: string;
+    quality: ThreadDataQuality;
   }> {
-    const latest = thread.messages[thread.messages.length - 1] || {
-      messageId: `${thread.threadId}-unknown`,
-      timestamp: thread.latestTimestamp,
-      bodyText: thread.snippet,
-    };
-    const bodyText = stripHtml(latest.bodyText || thread.snippet || '');
-    const bodyHash = await hashBody(bodyText);
-    const fingerprint = await contentFingerprint({
-      gmailThreadId: thread.threadId,
-      latestMessageId: latest.messageId,
-      latestTimestamp: latest.timestamp || thread.latestTimestamp,
-      normalizedBodyHash: bodyHash,
+    const quality = inferQuality(thread);
+    const existing = await this.db.threads.get(thread.threadId);
+    if (existing?.quality === 'THREAD_COMPLETE' && quality !== 'THREAD_COMPLETE') {
+      return {
+        changed: false,
+        fingerprint: existing.contentFingerprint,
+        threadId: thread.threadId,
+        quality: 'THREAD_COMPLETE',
+      };
+    }
+
+    const messages = quality === 'ROW_STUB' ? [] : thread.messages;
+    const fingerprint = await stableThreadFingerprint({
+      quality,
+      threadId: thread.threadId,
+      subject: thread.subject,
+      sender: thread.latestSender?.email || thread.participants[0]?.email || '',
+      snippet: thread.snippet,
+      messageCount: thread.messageCount || messages.length || undefined,
+      stableId: messages.at(-1)?.messageId,
+      messages: messages.map((message) => ({
+        messageId: message.messageId,
+        bodyText: stripHtml(message.bodyText || ''),
+      })),
     });
 
-    const existing = await this.db.threads.get(thread.threadId);
     if (existing?.contentFingerprint === fingerprint) {
-      return { changed: false, fingerprint, threadId: thread.threadId };
+      return { changed: false, fingerprint, threadId: thread.threadId, quality };
     }
 
     const threadRow: ThreadRow = {
@@ -81,10 +94,13 @@ export class MailboxIngestor {
       subject: thread.subject,
       participants: thread.participants,
       latestSender: thread.latestSender,
-      latestTimestamp: thread.latestTimestamp,
-      messageCount: thread.messageCount || thread.messages.length,
+      latestTimestamp: thread.latestTimestamp || existing?.latestTimestamp || '',
+      messageCount: thread.messageCount || messages.length,
       snippet: thread.snippet,
       route: thread.route,
+      quality,
+      source: thread.source,
+      manualCategory: existing?.manualCategory,
       lastIndexedAt: Date.now(),
       contentFingerprint: fingerprint,
       classification: existing?.classification,
@@ -97,26 +113,27 @@ export class MailboxIngestor {
     };
 
     const messageRows: MessageRow[] = [];
-    for (const m of thread.messages) {
-      const text = stripHtml(m.bodyText || '');
-      const fp = await contentFingerprint({
-        gmailThreadId: m.threadId,
-        latestMessageId: m.messageId,
-        latestTimestamp: m.timestamp,
-        normalizedBodyHash: await hashBody(text),
+    for (const message of messages) {
+      const text = stripHtml(message.bodyText || '');
+      const fp = await stableThreadFingerprint({
+        quality: 'THREAD_COMPLETE',
+        threadId: message.threadId,
+        subject: thread.subject,
+        sender: message.sender.email,
+        snippet: '',
+        messages: [{ messageId: message.messageId, bodyText: text }],
       });
       messageRows.push({
-        messageId: m.messageId,
-        threadId: m.threadId,
+        messageId: message.messageId,
+        threadId: message.threadId,
         accountId: this.accountId,
-        sender: m.sender,
-        recipients: m.recipients,
-        cc: m.cc,
-        timestamp: m.timestamp,
+        sender: message.sender,
+        recipients: message.recipients,
+        cc: message.cc,
+        timestamp: message.timestamp || '',
         bodyText: text,
-        // Do not persist arbitrary HTML for React rendering; optional raw kept stripped-use only
         bodyHtml: undefined,
-        attachmentsMetadata: m.attachmentsMetadata || [],
+        attachmentsMetadata: message.attachmentsMetadata || [],
         fingerprint: fp,
       });
     }
@@ -146,12 +163,13 @@ export class MailboxIngestor {
         senders: thread.participants.map((p) => p.email).join(' '),
         recipients: messageRows.flatMap((m) => m.recipients.map((r) => r.email)).join(' '),
         labels: (threadRow.virtualLabels || []).join(' '),
-        timestamp: thread.latestTimestamp,
+        timestamp: thread.latestTimestamp || existing?.latestTimestamp || '',
         fingerprint,
+        quality,
       });
     });
 
-    return { changed: true, fingerprint, threadId: thread.threadId };
+    return { changed: true, fingerprint, threadId: thread.threadId, quality };
   }
 
   async getCoverage(): Promise<IndexCoverage> {
@@ -369,6 +387,31 @@ export function buildIndexQuery(
     default:
       return 'in:inbox';
   }
+}
+
+const STUB_MESSAGE_ID = /-(row|visible|unknown)$/;
+
+export function inferQuality(thread: IngestThread): ThreadDataQuality {
+  if (thread.quality) return thread.quality;
+  const usable = thread.messages.filter(
+    (message) => message.bodyText.trim().length > 0 && !STUB_MESSAGE_ID.test(message.messageId),
+  );
+  if (thread.messages.length > 0 && usable.length === thread.messages.length) return 'THREAD_COMPLETE';
+  if (usable.length > 0) return 'THREAD_PARTIAL';
+  return 'ROW_STUB';
+}
+
+export function filterSplitThreads<T extends Pick<ThreadRow, 'threadId' | 'classification' | 'priority'>>(
+  threads: T[],
+  category: SplitView,
+  followUpIds: string[] = [],
+): T[] {
+  if (category === 'PRIORITY') return threads.filter((thread) => thread.priority === 'HIGH');
+  if (category === 'FOLLOW_UPS') {
+    const ids = new Set(followUpIds);
+    return threads.filter((thread) => thread.classification === 'WAITING' || ids.has(thread.threadId));
+  }
+  return threads.filter((thread) => thread.classification === category);
 }
 
 function sleep(ms: number): Promise<void> {

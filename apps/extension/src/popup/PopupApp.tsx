@@ -1,176 +1,51 @@
 import { useEffect, useState } from 'react';
-import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
-import { describeTrackingStatus, type TrackedEmailSummary } from '@gi/tracking';
-import { getLocalModel } from '@gi/ai';
-import { listDownloadedModelIds } from '../local-model/cache';
-import {
-  getOnDeviceAvailability,
-  type OnDeviceAvailability,
-} from '../local-model/chrome-model';
 
-type ChatGptStatus = {
-  signedIn: boolean;
-  email: string | null;
-  planType: string | null;
-  lastError: string | null;
+type Diagnostics = {
+  gmailTab?: string;
+  ai?: { status?: string; provider?: string };
+  tracking?: string;
 };
 
 export function PopupApp() {
-  const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_SETTINGS);
-  const [account, setAccount] = useState<ChatGptStatus | null>(null);
-  const [availability, setAvailability] = useState<OnDeviceAvailability | 'checking'>('checking');
-  const [downloadedIds, setDownloadedIds] = useState<string[]>([]);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [tracked, setTracked] = useState<TrackedEmailSummary[]>([]);
-
-  function refresh(): void {
-    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (response?: { settings?: ExtensionSettings }) => {
-      if (response?.settings) setSettings({ ...DEFAULT_SETTINGS, ...response.settings });
-    });
-    chrome.runtime.sendMessage({ type: 'GET_TRACKED_EMAILS' }, (response?: { emails?: TrackedEmailSummary[] }) => {
-      if (Array.isArray(response?.emails)) setTracked(response.emails);
-    });
-    chrome.runtime.sendMessage({ type: 'CHATGPT_STATUS' }, (response?: ChatGptStatus) => {
-      if (!chrome.runtime.lastError && response) setAccount(response);
-    });
-    void getOnDeviceAvailability().then(setAvailability);
-    void listDownloadedModelIds().then(setDownloadedIds);
-  }
+  const [diag, setDiag] = useState<Diagnostics | null>(null);
 
   useEffect(() => {
-    refresh();
-    const onFinished = (message: { type?: string; ok?: boolean; email?: string | null; error?: string }) => {
-      if (message?.type !== 'CHATGPT_LOGIN_FINISHED') return;
-      setNotice(
-        message.ok
-          ? message.email
-            ? `Signed in as ${message.email}.`
-            : 'Signed in with ChatGPT.'
-          : message.error || 'ChatGPT sign-in did not finish.',
-      );
-      refresh();
-    };
-    if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
-    chrome.runtime.onMessage.addListener(onFinished);
-    return () => chrome.runtime.onMessage.removeListener(onFinished);
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+    chrome.runtime.sendMessage({ type: 'RUN_DIAGNOSTICS' }, (response?: Diagnostics) => {
+      if (response) setDiag(response);
+    });
   }, []);
 
-  const usingChatGpt = settings.aiMode !== 'disabled' && settings.aiProvider === 'chatgpt' && account?.signedIn;
-  const usingDevice =
-    (settings.aiMode === 'local' && settings.aiProvider === 'chrome' && availability === 'available') ||
-    (settings.aiMode === 'local' &&
-      settings.aiProvider === 'local' &&
-      downloadedIds.includes(settings.aiModel));
+  const ai = diag?.ai?.status === 'ready' ? 'AI ready' : diag?.ai?.status === 'disabled' ? 'AI off' : 'AI needs setup';
+  const tracking = diag?.tracking === 'healthy' ? 'Tracker connected' : diag?.tracking === 'not_configured' ? 'Tracking not set up' : 'Tracker unavailable';
 
   return (
-    <div className="w-[320px] bg-white p-4 font-sans text-[#141b22]">
-      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5b6b7c]">
-        Gmail Intelligence
-      </div>
-      <p className="mt-2 text-sm text-[#141b22]">
-        {usingChatGpt
-          ? accountLabel(account)
-          : usingDevice
-            ? deviceLabel(settings.aiProvider, settings.aiModel)
-            : 'Sign in with ChatGPT, or download a model that stays on this computer.'}
-      </p>
-      {notice ? <p className="mt-2 text-xs text-[#5b6b7c]">{notice}</p> : null}
-      {account?.lastError && usingChatGpt ? (
-        <p className="mt-2 text-xs text-red-700">{account.lastError}</p>
-      ) : null}
-
-      {tracked.length > 0 ? (
-        <div className="mt-4">
-          <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5b6b7c]">Recent tracked mail</div>
-          <ul className="mt-2 flex flex-col gap-2">
-            {tracked
-              .slice()
-              .sort((a, b) => (a.sentAt < b.sentAt ? 1 : -1))
-              .slice(0, 5)
-              .map((email) => {
-                const status = describeTrackingStatus(email, { trackerBaseUrl: settings.trackerBaseUrl });
-                return (
-                  <li key={email.trackingId} className="text-xs leading-snug text-[#141b22]">
-                    <span className={status.opened ? 'text-[#188038]' : 'text-[#5b6b7c]'}>
-                      {status.opened ? 'Opened' : 'Not opened'}
-                    </span>
-                    {' · '}
-                    {email.subject || '(no subject)'}
-                  </li>
-                );
-              })}
-          </ul>
-        </div>
-      ) : null}
-
+    <div className="w-[280px] bg-white p-4 text-[#202124]">
+      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5f6368]">Gmail Intelligence</div>
+      <ul className="mt-3 space-y-1 text-[13px]">
+        <li>{diag?.gmailTab === 'connected' ? '✓ Gmail connected' : 'Gmail not connected'}</li>
+        <li>{diag?.ai?.status === 'ready' || diag?.ai?.status === 'disabled' ? `✓ ${ai}` : ai}</li>
+        <li>{diag?.tracking === 'healthy' ? `✓ ${tracking}` : tracking}</li>
+      </ul>
       <div className="mt-4 flex flex-col gap-2">
-        {usingChatGpt ? null : (
-          <button className="rounded bg-[#1a73e8] px-3 py-2 text-left text-sm font-medium text-white" onClick={signIn}>
-            Sign in with ChatGPT
-          </button>
-        )}
-        <button className="rounded border border-[#d3dae2] px-3 py-2 text-left text-sm hover:bg-[#f6f7f8]" onClick={openSetup}>
-          {usingDevice
-            ? 'Change model'
-            : downloadedIds.length > 0 || availability === 'available'
-              ? 'Choose a model'
-              : 'Download a model'}
-        </button>
-        <button className="rounded border border-[#d3dae2] px-3 py-2 text-left text-sm hover:bg-[#f6f7f8]" onClick={openAsk}>
-          Open Ask Inbox
-        </button>
-        <button
-          className="rounded border border-[#d3dae2] px-3 py-2 text-left text-sm hover:bg-[#f6f7f8]"
-          onClick={() => chrome.tabs.create({ url: 'https://mail.google.com/' })}
-        >
+        <button className="rounded border border-[#dadce0] px-3 py-2 text-left text-[13px]" onClick={() => chrome.tabs.create({ url: 'https://mail.google.com/' })}>
           Open Gmail
+        </button>
+        <button className="rounded border border-[#dadce0] px-3 py-2 text-left text-[13px]" onClick={() => void openInbox()}>
+          Open Inbox Intelligence
+        </button>
+        <button className="rounded border border-[#dadce0] px-3 py-2 text-left text-[13px]" onClick={() => chrome.runtime.openOptionsPage()}>
+          Settings
         </button>
       </div>
     </div>
   );
-
-  function signIn() {
-    setNotice(null);
-    chrome.runtime.sendMessage(
-      { type: 'CHATGPT_LOGIN' },
-      (response?: { ok?: boolean; error?: string; alreadySignedIn?: boolean; email?: string | null }) => {
-        if (chrome.runtime.lastError || !response?.ok) {
-          setNotice(response?.error || 'Could not start ChatGPT sign-in.');
-        } else if (response.alreadySignedIn) {
-          setNotice(response.email ? `Signed in as ${response.email}.` : 'Signed in with ChatGPT.');
-        } else {
-          setNotice('Continue in the ChatGPT tab.');
-        }
-      },
-    );
-  }
-
-  function openSetup() {
-    void chrome.tabs.create({ url: chrome.runtime.getURL('src/settings/index.html#ai-setup') });
-  }
-
-  function openAsk() {
-    void chrome.sidePanel.open({ windowId: undefined as unknown as number }).catch(async () => {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.windowId != null) await chrome.sidePanel.open({ windowId: tab.windowId });
-    });
-  }
 }
 
-function deviceLabel(provider: ExtensionSettings['aiProvider'], modelId: string): string {
-  if (provider === 'local') {
-    const model = getLocalModel(modelId);
-    return model ? `${model.label} is ready on this computer.` : 'A downloaded model is ready.';
+async function openInbox(): Promise<void> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.windowId != null) {
+    await chrome.runtime.sendMessage({ type: 'FOCUS_SIDEPANEL', mode: 'inbox' });
+    await chrome.sidePanel.open({ windowId: tab.windowId });
   }
-  return 'Chrome’s built-in model is ready.';
-}
-
-function accountLabel(account: ChatGptStatus | null): string {
-  if (!account?.signedIn) return 'ChatGPT is ready.';
-  const plan = account.planType
-    ? account.planType.charAt(0).toUpperCase() + account.planType.slice(1)
-    : null;
-  if (account.email && plan) return `${account.email} · ${plan}`;
-  return account.email || 'Signed in with ChatGPT.';
 }

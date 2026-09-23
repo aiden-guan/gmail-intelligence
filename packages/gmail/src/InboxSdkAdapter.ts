@@ -1,6 +1,8 @@
 import type { GmailActionResult, GmailCapabilities } from '@gi/shared';
 import { EMPTY_CAPABILITIES } from './capabilities.js';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
+import { queryFirst, SELECTORS } from './selectors.js';
+import { resolveThreadId, type ThreadIdView } from './thread-id.js';
 import type {
   ComposeViewState,
   CurrentThreadView,
@@ -11,48 +13,54 @@ import type {
 
 /**
  * InboxSDK primary adapter.
- * Requires @inboxsdk/core loaded in the extension content script + pageWorld injection.
- * Degrades gracefully when SDK is unavailable (returns capability false).
+ * Handlers register once per start. stop() invalidates them so a later start cannot double-fire.
  */
 export class InboxSdkAdapter implements GmailAdapter {
   readonly name = 'inboxsdk';
   private sdk: InboxSdkLike | null = null;
   private handler: MailboxEventHandler | null = null;
-  private fallback = new DomFallbackAdapter();
-  private unsubs: Array<() => void> = [];
+  private readonly fallback = new DomFallbackAdapter();
+  private generation = 0;
+  private started = false;
+  private rowTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingRows = new Map<string, VisibleThreadRow>();
 
-  constructor(private readonly appId: string) {}
+  constructor(
+    private readonly appId: string,
+    private readonly opts: { rowDebounceMs?: number } = {},
+  ) {}
+
+  isBound(): boolean {
+    return this.sdk != null;
+  }
 
   async detectCapabilities(): Promise<GmailCapabilities> {
-    const available = Boolean(this.sdk) || (await this.tryDetectGlobal());
     return {
       ...EMPTY_CAPABILITIES,
-      inboxSdkAvailable: available,
-      // Native Gmail label mutation via InboxSDK Labels is optional and often flaky;
-      // we keep virtual labels as the default and do not claim native mutation.
+      inboxSdkAvailable: this.isBound(),
       persistentNativeLabelMutationAvailable: false,
       domFallbackAvailable: true,
     };
   }
 
-  private async tryDetectGlobal(): Promise<boolean> {
-    const w = typeof window !== 'undefined' ? (window as unknown as { InboxSDK?: unknown }) : null;
-    return Boolean(w?.InboxSDK);
-  }
-
-  /**
-   * Bind an already-loaded InboxSDK instance (from content script after InboxSDK.load).
-   */
   bindSdk(sdk: InboxSdkLike): void {
     this.sdk = sdk;
   }
 
   async start(handler: MailboxEventHandler): Promise<void> {
+    if (this.started) return;
     this.handler = handler;
+    this.started = true;
+    const generation = ++this.generation;
+    const emit: MailboxEventHandler = (event) => {
+      if (generation !== this.generation || !this.handler) return;
+      this.handler(event);
+    };
+
     if (!this.sdk) {
-      await this.fallback.start(handler);
-      handler({
-        type: 'capability_changed',
+      await this.fallback.start(emit);
+      emit({
+        type: 'CAPABILITY_CHANGED',
         capabilities: await this.detectCapabilities(),
         at: Date.now(),
       });
@@ -62,20 +70,21 @@ export class InboxSdkAdapter implements GmailAdapter {
     const sdk = this.sdk;
     try {
       sdk.Router.handleAllRoutes((routeView) => {
-        handler({
-          type: 'route_changed',
+        emit({
+          type: 'ROUTE_CHANGED',
           route: mapRoute(routeView.getRouteType?.() || 'unknown'),
           at: Date.now(),
         });
       });
     } catch {
-      // degrade
+      /* degrade */
     }
 
     try {
       sdk.Conversations.registerThreadViewHandler((threadView) => {
-        const thread = mapThreadView(threadView);
-        if (thread) handler({ type: 'thread_opened', thread, at: Date.now() });
+        void mapThreadView(threadView).then((thread) => {
+          if (thread) emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
+        });
       });
     } catch {
       /* ignore */
@@ -83,10 +92,11 @@ export class InboxSdkAdapter implements GmailAdapter {
 
     try {
       sdk.Compose.registerComposeViewHandler((composeView) => {
-        const compose = mapCompose(composeView);
-        handler({ type: 'compose_opened', compose, at: Date.now() });
-        composeView.on?.('sent', () => {
-          handler({ type: 'compose_sent', compose, at: Date.now() });
+        void mapCompose(composeView).then((compose) => {
+          emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
+          composeView.on?.('sent', () => {
+            emit({ type: 'COMPOSE_SENT', compose, at: Date.now() });
+          });
         });
       });
     } catch {
@@ -95,25 +105,40 @@ export class InboxSdkAdapter implements GmailAdapter {
 
     try {
       sdk.Lists.registerThreadRowViewHandler((rowView) => {
-        const row = mapRow(rowView);
-        if (row) handler({ type: 'new_message', row, at: Date.now() });
+        void mapRow(rowView).then((row) => {
+          if (!row || generation !== this.generation) return;
+          this.pendingRows.set(row.threadId, row);
+          if (this.rowTimer) clearTimeout(this.rowTimer);
+          this.rowTimer = setTimeout(() => {
+            const rows = [...this.pendingRows.values()];
+            this.pendingRows.clear();
+            emit({ type: 'VISIBLE_ROWS_CHANGED', rows, at: Date.now() });
+          }, this.opts.rowDebounceMs ?? 200);
+        });
       });
     } catch {
       /* ignore */
     }
 
-    handler({
-      type: 'capability_changed',
+    emit({
+      type: 'CAPABILITY_CHANGED',
       capabilities: await this.detectCapabilities(),
       at: Date.now(),
     });
   }
 
   async stop(): Promise<void> {
-    for (const u of this.unsubs) u();
-    this.unsubs = [];
+    this.generation += 1;
+    if (this.rowTimer) clearTimeout(this.rowTimer);
+    this.rowTimer = null;
+    this.pendingRows.clear();
+    this.started = false;
     await this.fallback.stop();
     this.handler = null;
+  }
+
+  isStarted(): boolean {
+    return this.started;
   }
 
   async observeInbox() {
@@ -142,18 +167,15 @@ export class InboxSdkAdapter implements GmailAdapter {
     if (!this.sdk) return this.fallback.openThread(threadId);
     try {
       this.sdk.Router.goto?.(`#inbox/${threadId}`);
-      return ok('openThread');
-    } catch (e) {
-      return fail('openThread', String(e));
+      return { ...ok('openThread'), threadId, verified: false };
+    } catch (error) {
+      return fail('openThread', String(error));
     }
   }
 
   async archiveThread(threadId: string) {
-    // Prefer toolbars via DOM verification path in GmailActionAdapter;
-    // InboxSDK ThreadView.addButton paths vary — use fallback click.
     return this.fallback.archiveThread(threadId);
   }
-
   async markRead(threadId: string) {
     return this.fallback.markRead(threadId);
   }
@@ -192,8 +214,11 @@ export class InboxSdkAdapter implements GmailAdapter {
     return this.fallback.navigateToInbox();
   }
 
-  /** Add a virtual category chip on a thread row when InboxSDK is available. */
-  addRowLabel(rowView: { addLabel?: (desc: { title: string; foregroundColor?: string; backgroundColor?: string }) => void }, title: string, colors: { fg: string; bg: string }): boolean {
+  addRowLabel(
+    rowView: { addLabel?: (desc: { title: string; foregroundColor?: string; backgroundColor?: string }) => void },
+    title: string,
+    colors: { fg: string; bg: string },
+  ): boolean {
     if (!rowView.addLabel) return false;
     try {
       rowView.addLabel({ title, foregroundColor: colors.fg, backgroundColor: colors.bg });
@@ -205,72 +230,94 @@ export class InboxSdkAdapter implements GmailAdapter {
 }
 
 function ok(capability: string): GmailActionResult {
-  return { success: true, capability };
+  return { success: true, capability, action: capability, verified: false };
 }
 function fail(capability: string, error: string, retryable = true): GmailActionResult {
-  return { success: false, capability, error, retryable };
+  return { success: false, capability, action: capability, error, reason: error, retryable, verified: false };
 }
 
-function mapRoute(t: string): CurrentThreadView['route'] {
-  const s = t.toLowerCase();
-  if (s.includes('inbox')) return 'inbox';
-  if (s.includes('sent')) return 'sent';
-  if (s.includes('draft')) return 'drafts';
-  if (s.includes('search')) return 'search';
-  if (s.includes('star')) return 'starred';
+function mapRoute(value: string): CurrentThreadView['route'] {
+  const route = value.toLowerCase();
+  if (route.includes('inbox')) return 'inbox';
+  if (route.includes('sent')) return 'sent';
+  if (route.includes('draft')) return 'drafts';
+  if (route.includes('search')) return 'search';
+  if (route.includes('star')) return 'starred';
   return 'unknown';
 }
 
-function mapRow(rowView: ThreadRowViewLike): VisibleThreadRow | null {
-  const threadId = rowView.getThreadID?.() || rowView.getThreadIDAsync?.();
-  if (!threadId || typeof threadId !== 'string') return null;
+async function mapRow(rowView: ThreadRowViewLike): Promise<VisibleThreadRow | null> {
+  const threadId = await resolveThreadId(rowView);
+  if (!threadId) return null;
+  const element = rowView.getElement?.() || null;
+  const subjectEl = element ? queryFirst(element, SELECTORS.threadRowSubject) : null;
+  const snippetEl = element ? queryFirst(element, SELECTORS.threadRowSnippet) : null;
+  const senderEl = element ? queryFirst(element, SELECTORS.threadRowSender) : null;
+  const contact = rowView.getContacts?.()?.find((item) => item.emailAddress);
+  const email = senderEl?.getAttribute('email') || contact?.emailAddress;
+  const sender = email
+    ? { email, name: senderEl?.textContent?.trim() || contact?.name }
+    : undefined;
+  if (element) element.setAttribute('data-gi-thread-id', threadId);
   return {
     threadId,
-    subject: rowView.getSubject?.() || '',
-    snippet: '',
-    participants: [],
-    unread: Boolean(rowView.isSelected?.() === false && rowView.getElement?.()),
-    starred: false,
+    subject: rowView.getSubject?.() || subjectEl?.textContent?.trim() || '',
+    snippet: snippetEl?.textContent?.trim() || '',
+    participants: sender ? [sender] : [],
+    latestSender: sender,
+    unread: Boolean(element?.classList.contains('zE')),
+    starred: Boolean(element?.querySelector('[aria-label="Starred"]')),
     labels: [],
   };
 }
 
-function mapThreadView(tv: ThreadViewLike): CurrentThreadView | null {
-  const threadId = tv.getThreadID?.() || tv.getThreadIDAsync?.();
-  if (!threadId || typeof threadId !== 'string') return null;
-  const subject = tv.getSubject?.() || '';
-  const messageViews = tv.getMessageViewsAll?.() || tv.getMessageViews?.() || [];
+async function mapThreadView(view: ThreadViewLike): Promise<CurrentThreadView | null> {
+  const threadId = await resolveThreadId(view);
+  if (!threadId) return null;
+  const subject = view.getSubject?.() || '';
+  const messageViews = view.getMessageViewsAll?.() || view.getMessageViews?.() || [];
   return {
     threadId,
     subject,
     route: 'unknown',
-    messages: messageViews.map((mv, i) => ({
-      messageId: mv.getMessageID?.() || `${threadId}-${i}`,
+    messages: messageViews.map((message, index) => ({
+      messageId: message.getMessageID?.() || `${threadId}-msg-${index}`,
       threadId,
-      sender: { email: mv.getSender?.()?.emailAddress || 'unknown@local', name: mv.getSender?.()?.name },
-      recipients: (mv.getRecipientEmailAddresses?.() || []).map((e) => ({ email: e })),
+      sender: {
+        email: message.getSender?.()?.emailAddress || 'unknown@local',
+        name: message.getSender?.()?.name,
+      },
+      recipients: (message.getRecipientEmailAddresses?.() || []).map((email) => ({ email })),
       cc: [],
-      timestamp: new Date().toISOString(),
-      bodyText: mv.getBodyElement?.()?.textContent?.trim() || '',
+      bodyText: message.getBodyElement?.()?.textContent?.trim() || '',
       attachmentsMetadata: [],
     })),
   };
 }
 
-function mapCompose(cv: ComposeViewLike): ComposeViewState {
+async function mapCompose(view: ComposeViewLike): Promise<ComposeViewState> {
+  const threadId = await resolveThreadId(view as ThreadIdView);
   return {
-    composeId: cv.getThreadID?.() || `compose-${Date.now()}`,
-    to: (cv.getToRecipients?.() || []).map((r) => ({ email: r.emailAddress, name: r.name })),
-    cc: (cv.getCcRecipients?.() || []).map((r) => ({ email: r.emailAddress, name: r.name })),
-    bcc: (cv.getBccRecipients?.() || []).map((r) => ({ email: r.emailAddress, name: r.name })),
-    subject: cv.getSubject?.() || '',
-    bodyText: cv.getBodyElement?.()?.textContent || '',
-    isReply: Boolean(cv.getThreadID?.()),
-    threadId: cv.getThreadID?.() || undefined,
+    composeId: threadId || view.getElement?.()?.id || `compose-${Math.random().toString(36).slice(2, 8)}`,
+    to: (view.getToRecipients?.() || []).map((recipient) => ({
+      email: recipient.emailAddress,
+      name: recipient.name,
+    })),
+    cc: (view.getCcRecipients?.() || []).map((recipient) => ({
+      email: recipient.emailAddress,
+      name: recipient.name,
+    })),
+    bcc: (view.getBccRecipients?.() || []).map((recipient) => ({
+      email: recipient.emailAddress,
+      name: recipient.name,
+    })),
+    subject: view.getSubject?.() || '',
+    bodyText: view.getBodyElement?.()?.textContent || '',
+    isReply: Boolean(threadId),
+    threadId: threadId || undefined,
   };
 }
 
-/** Minimal structural types — avoid hard dependency on InboxSDK types at compile time. */
 export type InboxSdkLike = {
   Router: {
     handleAllRoutes: (cb: (rv: { getRouteType?: () => string }) => void) => void;
@@ -290,21 +337,19 @@ export type InboxSdkLike = {
   };
 };
 
-type ThreadRowViewLike = {
-  getThreadID?: () => string;
-  getThreadIDAsync?: () => string | Promise<string>;
+type ThreadRowViewLike = ThreadIdView & {
   getSubject?: () => string;
   isSelected?: () => boolean;
   getElement?: () => HTMLElement;
+  getContacts?: () => Array<{ emailAddress?: string; name?: string }>;
   addLabel?: (d: { title: string; foregroundColor?: string; backgroundColor?: string }) => void;
 };
 
-type ThreadViewLike = {
-  getThreadID?: () => string;
-  getThreadIDAsync?: () => string | Promise<string>;
+type ThreadViewLike = ThreadIdView & {
   getSubject?: () => string;
   getMessageViews?: () => MessageViewLike[];
   getMessageViewsAll?: () => MessageViewLike[];
+  addSidebarContentPanel?: (desc: unknown) => { remove?: () => void };
 };
 
 type MessageViewLike = {
@@ -314,13 +359,13 @@ type MessageViewLike = {
   getBodyElement?: () => HTMLElement | null;
 };
 
-type ComposeViewLike = {
-  getThreadID?: () => string | null;
+type ComposeViewLike = ThreadIdView & {
   getToRecipients?: () => { emailAddress: string; name?: string }[];
   getCcRecipients?: () => { emailAddress: string; name?: string }[];
   getBccRecipients?: () => { emailAddress: string; name?: string }[];
   getSubject?: () => string;
   getBodyElement?: () => HTMLElement | null;
+  getElement?: () => HTMLElement;
   on?: (event: string, cb: () => void) => void;
   insertTextIntoBodyAtCursor?: (text: string) => void;
 };

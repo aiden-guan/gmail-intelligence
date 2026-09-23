@@ -45,7 +45,7 @@ export class GmailJsCaptureAdapter implements GmailAdapter {
         sender: { email: event.senderEmail || 'unknown@local' },
         recipients: (event.recipients || []).map((e) => ({ email: e })),
         cc: [],
-        timestamp: event.timestamp || new Date().toISOString(),
+        timestamp: event.timestamp,
         bodyText: event.bodyText || '',
         attachmentsMetadata: [],
       };
@@ -55,7 +55,7 @@ export class GmailJsCaptureAdapter implements GmailAdapter {
         this.cachedMessages.set(event.threadId, list);
       }
       this.handler({
-        type: 'thread_opened',
+        type: 'THREAD_OPENED',
         thread: {
           threadId: event.threadId,
           subject: event.subject || '',
@@ -86,7 +86,7 @@ export class GmailJsCaptureAdapter implements GmailAdapter {
       await this.fallback.start(handler);
     }
     handler({
-      type: 'capability_changed',
+      type: 'CAPABILITY_CHANGED',
       capabilities: await this.detectCapabilities(),
       at: Date.now(),
     });

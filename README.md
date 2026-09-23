@@ -6,7 +6,7 @@ Personal **Gmail** Chrome extension: local AI inbox intelligence + Mailsuite-sty
 
 ## Features
 
-- Category chips & split views (Respond / Waiting / FYI / Notifications / Promotions / News / Follow-ups)
+- Category chips and a side-panel Split Inbox backed by the local index (Respond / Waiting / FYI / Notifications / Promotions / News / Follow-ups / Priority)
 - Deterministic + optional AI classification, summaries, needs-reply, auto-drafts (**never auto-send**)
 - Auto-archive with confidence thresholds, always/never lists, short-lived Undo
 - Reminders via `chrome.alarms` (no Gmail API)
@@ -19,7 +19,7 @@ Personal **Gmail** Chrome extension: local AI inbox intelligence + Mailsuite-sty
 
 ```
 Gmail web app
-  → Gmail Integration Layer (InboxSDK primary, Gmail.js optional capture, DOM fallback)
+  → Gmail Integration Layer (InboxSDK primary, DOM fallback)
   → Mailbox event bus → IndexedDB cache + Action engine (Gmail UI)
   → AI agent engine → Side panel / Ask Inbox
 
@@ -44,27 +44,73 @@ Mailbox contents are **never** sent to the tracking backend. AI keys stay in ext
 | `workers/tracker` | Cloudflare Worker |
 | `supabase/migrations` | Tracking tables |
 
-## Setup
+## Install
+
+You need [Node.js 20 or newer](https://nodejs.org). npm is included.
 
 ```bash
-cd /Users/aidenguan/Documents/Projects/EmailApp
-cp .env.example .env   # fill tracker/Supabase secrets for worker only
-npm install
-npm test
-npm run typecheck
-npm run lint
-npm run build
+git clone https://github.com/aiden-guan/gmail-intelligence.git
+cd gmail-intelligence
+npm run setup
 ```
 
-Extension build output: `apps/extension/dist`.
+That installs dependencies, writes a gitignored `.env` and tracker token, and builds the extension to `apps/extension/dist`.
 
-## Supabase
+Inbox features do not need a Gmail API key, a Cloudflare account, or a Supabase project.
+
+### Load the extension
+
+```bash
+npm run setup -- --open
+```
+
+That opens the `dist` folder and your browser’s extensions page. If you use more than one Chrome profile, add a gitignored `.local/chrome.json` so it opens the right one:
+
+```json
+{ "profileDirectory": "Profile 1", "gmailAccount": "you@school.edu" }
+```
+
+`profileDirectory` is that profile’s folder name (`Default`, `Profile 1`, …). By hand:
+
+1. Chrome, Edge, or Brave → `chrome://extensions`
+2. Turn on **Developer mode**
+3. **Load unpacked** → select `apps/extension/dist` (the folder that contains `manifest.json`)
+4. Pin **Gmail Intelligence**, then open [Gmail](https://mail.google.com) while you are signed in
+5. Click the extension icon for status, or open Gmail directly. Category labels still work if you skip AI
+6. Open a thread. You should see a category label and a summary sidebar
+7. If Gmail looks unchanged, open the extension’s Settings and click **Run diagnostics**
+
+A short onboarding page opens on a fresh install. After you change code, run `npm run dev`, then click **Reload** on `chrome://extensions`.
+
+### Try tracking on this computer
+
+```bash
+npm run tracker
+```
+
+Leave that process running. In the extension, open **Settings → Tracking**, paste the URL and token from `.local/tracker.txt`, and click **Save settings**. Compose in Gmail with tracking on, send the message, and open it. A notification says “Open detected”. Image blockers and Apple Mail Privacy can hide or fake that signal.
+
+Events stay in memory until you stop `npm run tracker`. Mailbox text is never sent to the tracker.
+
+Check it:
+
+```bash
+curl -s http://127.0.0.1:8787/health
+```
+
+You want `{"ok":true,"store":"memory"}`.
+
+### Deploy tracking (optional)
+
+Use this when the tracker should keep a public URL after your computer is off.
+
+**Supabase**
 
 1. Create a project.
 2. Run `supabase/migrations/20260322000000_tracking.sql` in the SQL editor.
-3. Copy project URL + **service role** key (worker only — never in the extension).
+3. Copy the project URL and **service role** key into `.env` and `workers/tracker/.dev.vars`. The service role key stays on the worker. Never put it in the extension.
 
-## Cloudflare Worker
+**Cloudflare Worker**
 
 ```bash
 cd workers/tracker
@@ -75,31 +121,16 @@ npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler deploy
 ```
 
-Local:
-
-```bash
-cd workers/tracker
-# set .dev.vars with the same keys
-npx wrangler dev --port 8787
-```
+Put the deployed URL and the same personal token in extension Settings. For a custom domain, grant that host permission when Chrome asks.
 
 Routes: `POST /api/emails`, `GET /api/emails/:id`, `GET /api/emails/:id/events`, `GET /api/events/recent` (Bearer token). Public: `GET /open/:trackingId`, `GET /c/:clickId`.
-
-## Load unpacked in Chrome
-
-1. `npm run build`
-2. Chrome → `chrome://extensions` → Developer mode → **Load unpacked**
-3. Select `apps/extension/dist`
-4. Open Gmail (`https://mail.google.com`)
-5. Extension **Settings** opens on a fresh install. Sign in with ChatGPT, or download a model
-6. Optional: set the tracker URL and token, and grant host permission for a custom tracker domain
 
 ## AI configuration
 
 Settings → AI:
 
-- **ChatGPT account** — sign in on chatgpt.com with your own account. Requests use that plan’s message allowance. Inbox text is sent as a temporary chat, and the session stays in extension storage. It never goes to the tracker.
 - **On this computer** — Qwen2.5 0.5B (about 750 MB) and Qwen3 0.6B (about 880 MB) are listed for download. Nothing is stored until you download one, and Remove deletes those files. Chrome’s built-in Gemini Nano is a larger optional download for desktop Chrome 138+ with about 16 GB of memory and 22 GB of free disk.
+- **ChatGPT account** — experimental. It reads a chatgpt.com session and can stop working when that site changes. It is not required.
 - **Off** — tracking and local heuristics still work
 - **API key or Ollama** — optional. Ollama uses `http://127.0.0.1:11434/v1`
 
@@ -119,25 +150,27 @@ Anthropic and Gemini API adapters are typed interfaces; use an OpenAI-compatible
 
 Gmail’s DOM changes. Adapters use capability detection:
 
-- InboxSDK (primary UI)
-- Gmail.js capture (optional MAIN-world observation)
+- InboxSDK (primary), loaded before observation starts
 - DOM fallback (centralized selectors in `packages/gmail/src/selectors.ts`)
+
+Gmail.js is not part of the running extension. `packages/gmail/src/GmailJsCaptureAdapter.ts` remains only as unused experimental source.
 
 Native Gmail label mutation is **not** claimed (`persistentNativeLabelMutationAvailable: false`). Virtual labels always work.
 
-**Live Gmail E2E was not verified in this environment.** Use Settings → Run diagnostics on a real Gmail tab.
+Live Gmail still has to be checked in a signed-in browser. Use Settings → Advanced → Run diagnostics on a real Gmail tab. The checks below are the manual pass.
 
 ## Indexing
 
 - Incremental from visible/loaded mail — no giant scrape on startup
-- Fingerprint: `SHA-256(threadId + latestMessageId + latestTimestamp + bodyHash)`
-- Unchanged fingerprint → skip re-summarize / re-classify / re-embed / re-draft
+- A visible row is a `ROW_STUB` (thread id, subject, sender, snippet). It does not invent a timestamp.
+- Opening a thread upgrades it to `THREAD_COMPLETE` using real message text.
+- Unchanged fingerprint → skip re-summarize / re-classify / re-draft
 - Ask Inbox states coverage explicitly (never pretends to search unindexed mail)
 
 ## Limitations
 
 - DOM/InboxSDK breakage when Gmail updates
-- Background automation needs Gmail/browser open; worker tab is optional reuse
+- Background automation uses one inactive worker tab. It does not take over the Gmail tab you are reading
 - Local index may be incomplete
 - Open tracking is imperfect (Apple Mail Privacy, image blocking, proxies) — UI says “Open detected”, not “Definitely read”
 - Group sends / list-id edge cases
@@ -146,11 +179,11 @@ Native Gmail label mutation is **not** claimed (`persistentNativeLabelMutationAv
 
 ## First end-to-end test (manual)
 
-1. Deploy tracker + migration; put URL + token in Settings.
-2. Compose in Gmail with tracking on → send via Gmail → open pixel URL (or the email) → confirm event in Worker/Supabase and optional Chrome notification (“Open detected”).
-3. Enable AI (or rely on heuristics) → open an inbox thread → confirm category chip / sidebar summary.
-4. Side panel → Ask Inbox “what needs a response?” → confirm citations + coverage note.
-5. Settings → Index recent 7d (with Gmail open) → confirm coverage counts increase.
+1. `npm run setup`, load `apps/extension/dist`, open Gmail.
+2. Open a thread → category label and sidebar summary (heuristics work with AI off).
+3. Extension icon → **Open Inbox Intelligence**. Respond shows locally classified threads, not a Gmail search.
+4. Open a thread that needs a reply → **Draft reply** inserts into Gmail’s composer and does not send.
+5. Optional: `npm run tracker`, paste `.local/tracker.txt` into Settings, save, send yourself a tracked message, open it → “Open detected”.
 
 ## License
 

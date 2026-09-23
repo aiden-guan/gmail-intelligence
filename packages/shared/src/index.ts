@@ -83,9 +83,18 @@ export type AttachmentMeta = z.infer<typeof AttachmentMetaSchema>;
 export type GmailActionResult = {
   success: boolean;
   capability: string;
+  action?: string;
+  threadId?: string;
+  verified?: boolean;
   error?: string;
+  reason?: string;
   retryable?: boolean;
 };
+
+/** How complete a locally stored Gmail thread is. Never invent missing fields. */
+export type ThreadDataQuality = 'ROW_STUB' | 'THREAD_PARTIAL' | 'THREAD_COMPLETE';
+
+export type ThreadDataSource = 'inboxsdk' | 'dom' | 'hydrated' | 'compose';
 
 export type GmailCapabilities = {
   inboxSdkAvailable: boolean;
@@ -155,6 +164,39 @@ export async function contentFingerprint(parts: {
 export async function hashBody(text: string): Promise<string> {
   const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
   return sha256Hex(normalized);
+}
+
+/**
+ * Identity for mail that already exists in Gmail.
+ * ROW_STUB never includes a clock reading. THREAD_COMPLETE uses message ids and body text.
+ */
+export async function stableThreadFingerprint(input: {
+  quality: ThreadDataQuality;
+  threadId: string;
+  subject: string;
+  sender: string;
+  snippet: string;
+  messageCount?: number;
+  stableId?: string;
+  messages?: Array<{ messageId: string; bodyText: string }>;
+}): Promise<string> {
+  if (input.quality === 'THREAD_COMPLETE' && input.messages && input.messages.length > 0) {
+    const ids = [...input.messages].map((message) => message.messageId).sort().join(',');
+    const bodyHash = await hashBody(input.messages.map((message) => message.bodyText).join('\n'));
+    return sha256Hex(`${input.threadId}|complete|${ids}|${bodyHash}`);
+  }
+  const snippetHash = await hashBody(input.snippet || '');
+  return sha256Hex(
+    [
+      input.threadId,
+      input.subject.trim(),
+      input.sender.trim().toLowerCase(),
+      snippetHash,
+      String(input.messageCount ?? ''),
+      input.stableId || '',
+      input.quality,
+    ].join('|'),
+  );
 }
 
 export const BridgeMessageSchema = z.object({
@@ -239,6 +281,8 @@ export type ExtensionSettings = {
   autoClassify: boolean;
   autoSummarize: boolean;
   autoDraft: boolean;
+  /** When true, generated drafts are inserted into Gmail. Default off. */
+  autoInsertDraft: boolean;
   autoReminders: boolean;
   autoArchive: boolean;
   archiveCategories: ThreadCategory[];
@@ -264,6 +308,9 @@ export type VoiceProfile = {
   schedulingPreference: string;
   personalInstructions: string;
 };
+
+/** Registered InboxSDK app id. A blank setting still uses this so Gmail does not show the unregistered-app warning. */
+export const INBOX_SDK_APP_ID = 'sdk_Intelligence_c698f940a0';
 
 export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
   greeting: 'Hi',
@@ -292,6 +339,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   autoClassify: true,
   autoSummarize: true,
   autoDraft: false,
+  autoInsertDraft: false,
   autoReminders: true,
   autoArchive: false,
   archiveCategories: ['NOTIFICATIONS', 'PROMOTIONS', 'NEWS'],
@@ -302,7 +350,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   reminderBusinessDays: 3,
   commandPaletteEnabled: true,
   commandPaletteOverrideGmail: false,
-  inboxSdkAppId: '',
+  inboxSdkAppId: INBOX_SDK_APP_ID,
   voiceProfile: DEFAULT_VOICE_PROFILE,
   learnFromSent: false,
 };

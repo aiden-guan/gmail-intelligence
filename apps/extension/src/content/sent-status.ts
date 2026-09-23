@@ -146,6 +146,18 @@ function renderButton(
   button.setAttribute('aria-label', copy.headline);
   button.title = copy.countLabel;
   button.innerHTML = copy.opened ? DOUBLE_CHECK : SINGLE_CHECK;
+  if (email.openCount > 1) {
+    const count = document.createElement('span');
+    count.className = 'gi-track-n';
+    count.textContent = String(email.openCount);
+    button.append(count);
+  }
+  if (email.clickCount > 0) {
+    const link = document.createElement('span');
+    link.className = 'gi-track-link';
+    link.textContent = '↗';
+    button.append(link);
+  }
   button.addEventListener('pointerdown', (event) => {
     event.stopPropagation();
   });

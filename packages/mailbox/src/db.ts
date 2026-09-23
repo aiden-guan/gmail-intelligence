@@ -15,6 +15,7 @@ import type {
   StyleExampleRow,
   SummaryRow,
   SyncStateRow,
+  ThreadOverrideRow,
   ThreadRow,
 } from './types.js';
 
@@ -40,6 +41,7 @@ export class MailboxDatabase extends Dexie {
   style_examples!: Table<StyleExampleRow, string>;
   settings!: Table<SettingsRow, string>;
   sync_state!: Table<SyncStateRow, string>;
+  thread_overrides!: Table<ThreadOverrideRow, string>;
 
   constructor(name = 'gi_mailbox_v1') {
     super(name);
@@ -60,6 +62,25 @@ export class MailboxDatabase extends Dexie {
       style_examples: 'id, createdAt',
       settings: 'key',
       sync_state: 'key',
+    });
+    this.version(2).stores({
+      accounts: 'id, email',
+      threads: 'threadId, accountId, latestTimestamp, classification, contentFingerprint, requiresResponse, awaitingResponse',
+      messages: 'messageId, threadId, accountId, timestamp, fingerprint',
+      contacts: '[accountId+email], email, lastSeenAt',
+      thread_classifications: 'threadId, category, fingerprint, createdAt',
+      thread_summaries: 'threadId, fingerprint, createdAt',
+      draft_suggestions: 'id, threadId, fingerprint, createdAt',
+      reminders: 'id, threadId, status, dueAt',
+      agent_actions: 'id, threadId, createdAt, type',
+      agent_rules: 'id, enabled, createdAt',
+      search_documents: 'id, threadId, fingerprint, timestamp',
+      embeddings: 'fingerprint, model, createdAt',
+      model_cache: 'key, createdAt',
+      style_examples: 'id, createdAt',
+      settings: 'key',
+      sync_state: 'key',
+      thread_overrides: 'threadId, category, createdAt',
     });
   }
 }

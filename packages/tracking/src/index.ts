@@ -330,28 +330,21 @@ export function describeTrackingStatus(
   const when = email.lastOpenedAt || email.firstOpenedAt;
   const ago = when ? formatAgo(when, now) : 'recently';
 
-  let emphasis: string | null = who;
-  let rest: string;
-  if (opened && who) rest = ` opened your email ${ago}.`;
-  else if (opened) rest = `Someone opened your email ${ago}.`;
-  else if (clicked && who) rest = ` clicked a link ${ago}.`;
-  else if (clicked) rest = `Someone clicked a link ${ago}.`;
-  else if (who) rest = ' has not opened this email.';
-  else {
-    emphasis = null;
-    rest = 'No one has opened this email yet.';
-  }
-  if (!emphasis) rest = rest.replace(/^\s*/, '');
-  const headline = `${emphasis || ''}${rest}`.trim();
+  const emphasis = who;
+  const rest = opened
+    ? `Open detected ${ago}.`
+    : clicked
+      ? `Link clicked ${ago}.`
+      : 'No open detected.';
+  const headline = emphasis ? `${emphasis}. ${rest}` : rest;
 
-  let detail = 'No open detected yet.';
-  if (opened && email.firstOpenedAt) {
-    detail = `First opened ${formatAfterSend(email.sentAt, email.firstOpenedAt)}.`;
-  } else if (clicked) {
-    detail = 'A link click was detected, which usually means the message was opened.';
-  }
+  const detail = opened
+    ? `Last detected ${ago}.`
+    : clicked
+      ? 'A link click was detected. Pixel tracking is probabilistic.'
+      : 'No open detected.';
 
-  let countLabel = 'Not opened yet';
+  let countLabel = 'No open detected';
   if (opened && clicked) {
     countLabel = `${openCountLabel(email.openCount)} · ${clickCountLabel(email.clickCount)}`;
   } else if (opened) {
@@ -492,10 +485,10 @@ function formatSpan(delta: number, ago: boolean): string {
   return ago ? `${days} days ago` : `${days} days`;
 }
 function openCountLabel(count: number): string {
-  if (count === 1) return 'Opened once';
-  return `Opened ${count} times`;
+  if (count === 1) return 'Open detected once';
+  return `Open detected ${count} times`;
 }
 function clickCountLabel(count: number): string {
-  if (count === 1) return '1 link click';
-  return `${count} link clicks`;
+  if (count === 1) return 'Link clicked once';
+  return `Link clicked ${count} times`;
 }

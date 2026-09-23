@@ -1,56 +1,69 @@
 import type { GmailCapabilities } from '@gi/shared';
-import { mergeCapabilities } from './capabilities.js';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { MailboxEventBus } from './events.js';
 import { GmailActionAdapter } from './GmailActionAdapter.js';
-import { GmailJsCaptureAdapter } from './GmailJsCaptureAdapter.js';
 import { InboxSdkAdapter, type InboxSdkLike } from './InboxSdkAdapter.js';
-import type {
-  GmailAdapter,
-  MailboxEventHandler,
-  QueuedGmailAction,
-} from './types.js';
+import type { GmailAdapter, MailboxEventHandler, QueuedGmailAction } from './types.js';
 
 export type CompositeGmailOptions = {
   inboxSdkAppId?: string;
-  preferInboxSdk?: boolean;
+  debounceMs?: number;
 };
 
+export type ActiveIntegration = 'inboxsdk' | 'dom';
+
 /**
- * Facade: InboxSDK primary → Gmail.js capture secondary → DOM fallback.
- * Application code talks only to this adapter / action queue.
+ * InboxSDK when it was bound before start, otherwise the DOM adapter.
+ * The active integration is chosen once, at start, and is not swapped later.
  */
 export class CompositeGmailAdapter implements GmailAdapter {
   readonly name = 'composite';
   readonly bus = new MailboxEventBus();
   readonly inboxSdk: InboxSdkAdapter;
-  readonly gmailJs: GmailJsCaptureAdapter;
   readonly dom: DomFallbackAdapter;
   readonly actions: GmailActionAdapter;
 
   private primary: GmailAdapter;
+  private active: ActiveIntegration | null = null;
+  private started = false;
   private caps: GmailCapabilities | null = null;
 
   constructor(opts: CompositeGmailOptions = {}) {
     this.inboxSdk = new InboxSdkAdapter(opts.inboxSdkAppId || '');
-    this.gmailJs = new GmailJsCaptureAdapter();
-    this.dom = new DomFallbackAdapter();
+    this.dom = new DomFallbackAdapter({ debounceMs: opts.debounceMs });
     this.primary = this.dom;
     this.actions = new GmailActionAdapter(this);
   }
 
-  bindInboxSdk(sdk: InboxSdkLike): void {
+  /**
+   * Must be called before start. Binding later does not retarget a running adapter.
+   */
+  bindInboxSdk(sdk: InboxSdkLike): boolean {
+    if (this.started) return false;
     this.inboxSdk.bindSdk(sdk);
-    this.primary = this.inboxSdk;
+    return true;
+  }
+
+  getActiveIntegration(): ActiveIntegration | null {
+    return this.active;
+  }
+
+  isStarted(): boolean {
+    return this.started;
   }
 
   async detectCapabilities(): Promise<GmailCapabilities> {
-    const [a, b, c] = await Promise.all([
+    const [inbox, dom] = await Promise.all([
       this.inboxSdk.detectCapabilities(),
-      this.gmailJs.detectCapabilities(),
       this.dom.detectCapabilities(),
     ]);
-    this.caps = mergeCapabilities(c, b, a);
+    this.caps = {
+      inboxSdkAvailable: Boolean(inbox.inboxSdkAvailable),
+      gmailJsCaptureAvailable: false,
+      backgroundWorkerTabAvailable: false,
+      persistentNativeLabelMutationAvailable: false,
+      domFallbackAvailable: Boolean(dom.domFallbackAvailable),
+    };
     return this.caps;
   }
 
@@ -59,29 +72,35 @@ export class CompositeGmailAdapter implements GmailAdapter {
   }
 
   async start(handler: MailboxEventHandler): Promise<void> {
-    const wrapped: MailboxEventHandler = (e) => {
-      this.bus.emit(e);
-      handler(e);
+    if (this.started) return;
+    this.started = true;
+    const wrapped: MailboxEventHandler = (event) => {
+      this.bus.emit(event);
+      handler(event);
     };
-    await this.detectCapabilities();
-    if (this.caps?.inboxSdkAvailable) {
-      this.primary = this.inboxSdk;
-      await this.inboxSdk.start(wrapped);
-    } else if (this.caps?.gmailJsCaptureAvailable) {
-      this.primary = this.gmailJs;
-      await this.gmailJs.start(wrapped);
-    } else {
-      this.primary = this.dom;
-      await this.dom.start(wrapped);
+    try {
+      await this.detectCapabilities();
+      if (this.inboxSdk.isBound()) {
+        this.active = 'inboxsdk';
+        this.primary = this.inboxSdk;
+        await this.inboxSdk.start(wrapped);
+      } else {
+        this.active = 'dom';
+        this.primary = this.dom;
+        await this.dom.start(wrapped);
+      }
+    } catch (error) {
+      this.started = false;
+      this.active = null;
+      throw error;
     }
   }
 
   async stop(): Promise<void> {
-    await Promise.all([
-      this.inboxSdk.stop(),
-      this.gmailJs.stop(),
-      this.dom.stop(),
-    ]);
+    await Promise.all([this.inboxSdk.stop(), this.dom.stop()]);
+    this.started = false;
+    this.active = null;
+    this.primary = this.dom;
   }
 
   enqueue(action: QueuedGmailAction): string {
@@ -142,6 +161,10 @@ export * from './types.js';
 export * from './capabilities.js';
 export * from './events.js';
 export * from './selectors.js';
+export * from './thread-id.js';
+export * from './normalize.js';
+export * from './verify.js';
+export * from './tab-selection.js';
 export * from './DomFallbackAdapter.js';
 export * from './InboxSdkAdapter.js';
 export * from './GmailJsCaptureAdapter.js';

@@ -1,11 +1,20 @@
 import type { Contact, GmailActionResult, GmailCapabilities } from '@gi/shared';
 import { EMPTY_CAPABILITIES } from './capabilities.js';
 import {
+  findArchiveButton,
+  findComposeBody,
+  findComposeRoot,
+  findMain,
+  findNotice,
+  findSearchBox,
+  findThreadRows,
+  getThreadIdFromElement,
   logSelectorMiss,
   queryAll,
   queryFirst,
   readAttr,
   SELECTORS,
+  selectorDiagnostics,
 } from './selectors.js';
 import type {
   ComposeViewState,
@@ -13,15 +22,16 @@ import type {
   GmailAdapter,
   MailboxEventHandler,
   ThreadMessageView,
+  ThreadRoute,
   VisibleThreadRow,
 } from './types.js';
 
-function ok(capability: string): GmailActionResult {
-  return { success: true, capability };
+function ok(capability: string, extra: Partial<GmailActionResult> = {}): GmailActionResult {
+  return { success: true, capability, action: capability, verified: false, ...extra };
 }
 
 function fail(capability: string, error: string, retryable = true): GmailActionResult {
-  return { success: false, capability, error, retryable };
+  return { success: false, capability, action: capability, error, reason: error, retryable, verified: false };
 }
 
 function parseContact(text: string, emailAttr?: string | null): Contact {
@@ -30,9 +40,29 @@ function parseContact(text: string, emailAttr?: string | null): Contact {
   return { email, name: name !== email ? name : undefined };
 }
 
+function routeFromLocation(): ThreadRoute {
+  const hash = typeof location !== 'undefined' ? location.hash.toLowerCase() : '';
+  if (hash.includes('sent')) return 'sent';
+  if (hash.includes('draft')) return 'drafts';
+  if (hash.includes('search')) return 'search';
+  if (hash.includes('star')) return 'starred';
+  if (hash.includes('spam')) return 'spam';
+  if (hash.includes('trash')) return 'trash';
+  if (hash.includes('inbox') || hash === '' || hash === '#') return 'inbox';
+  return 'unknown';
+}
+
+function stableComposeId(el: HTMLElement): string {
+  const existing = el.getAttribute('data-gi-compose-id');
+  if (existing) return existing;
+  const id = el.id || `compose-${Math.random().toString(36).slice(2, 10)}`;
+  el.setAttribute('data-gi-compose-id', id);
+  return id;
+}
+
 /**
- * DOM fallback adapter — centralized, debounced observers.
- * Application code must not import selectors directly.
+ * DOM fallback adapter — one debounced observer, centralized selectors.
+ * Row-list changes are VISIBLE_ROWS_CHANGED. They are not new mail.
  */
 export class DomFallbackAdapter implements GmailAdapter {
   readonly name = 'dom-fallback';
@@ -40,30 +70,45 @@ export class DomFallbackAdapter implements GmailAdapter {
   private observer: MutationObserver | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastRowFingerprint = '';
+  private lastThreadKey = '';
+  private lastThreadId = '';
+  private lastComposeId = '';
+  private lastRoute = '';
   private started = false;
+
+  constructor(private readonly opts: { debounceMs?: number } = {}) {}
 
   async detectCapabilities(): Promise<GmailCapabilities> {
     const hasDoc = typeof document !== 'undefined';
+    const diagnostics = hasDoc ? selectorDiagnostics(document) : [];
+    const listExpected = typeof location !== 'undefined' && /#(inbox|search|sent|starred)/i.test(location.hash);
+    const rowsFound = diagnostics.find((item) => item.key === 'threadRow')?.found;
+    const domHealthy = !hasDoc || !listExpected || Boolean(rowsFound) || Boolean(diagnostics.find((item) => item.key === 'openThread')?.found);
     return {
       ...EMPTY_CAPABILITIES,
-      domFallbackAvailable: hasDoc,
-      // Native label mutation via DOM is unreliable; never claim it.
+      domFallbackAvailable: hasDoc && domHealthy,
       persistentNativeLabelMutationAvailable: false,
     };
   }
 
   async start(handler: MailboxEventHandler): Promise<void> {
+    if (this.started) return;
     this.handler = handler;
-    if (typeof document === 'undefined' || this.started) return;
+    if (typeof document === 'undefined') return;
     this.started = true;
-    this.observer = new MutationObserver(() => this.scheduleScan());
-    this.observer.observe(document.body ?? document.documentElement, {
-      childList: true,
-      subtree: true,
+    this.observer = new MutationObserver((mutations) => {
+      const external = mutations.some((mutation) => {
+        const node = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
+        return !node?.closest?.('[data-gi-ui], .gi-track-slot, .gi-cat-chip, #gi-thread-panel, #gi-track-style');
+      });
+      if (external) this.scheduleScan();
     });
+    const root = document.body ?? document.documentElement;
+    this.observer.observe(root, { childList: true, subtree: true });
     this.scheduleScan();
+    this.emitRoute();
     handler({
-      type: 'capability_changed',
+      type: 'CAPABILITY_CHANGED',
       capabilities: await this.detectCapabilities(),
       at: Date.now(),
     });
@@ -73,48 +118,81 @@ export class DomFallbackAdapter implements GmailAdapter {
     this.observer?.disconnect();
     this.observer = null;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = null;
     this.started = false;
     this.handler = null;
+    this.lastRowFingerprint = '';
+    this.lastThreadKey = '';
+    this.lastThreadId = '';
+    this.lastComposeId = '';
+    this.lastRoute = '';
+  }
+
+  isStarted(): boolean {
+    return this.started;
   }
 
   private scheduleScan(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.scanVisible(), 250);
+    this.debounceTimer = setTimeout(() => this.scanVisible(), this.opts.debounceMs ?? 250);
+  }
+
+  private emit(event: Parameters<MailboxEventHandler>[0]): void {
+    this.handler?.(event);
+  }
+
+  private emitRoute(): void {
+    const route = routeFromLocation();
+    const query = typeof location !== 'undefined' ? location.hash : '';
+    if (route === this.lastRoute && this.lastRoute) return;
+    this.lastRoute = route;
+    this.emit({ type: 'ROUTE_CHANGED', route, query, at: Date.now() });
   }
 
   private scanVisible(): void {
     if (!this.handler || typeof document === 'undefined') return;
-    const rows = this.extractRows(document);
-    const fp = rows.map((r) => `${r.threadId}:${r.unread}:${r.subject}`).join('|');
-    if (fp && fp !== this.lastRowFingerprint) {
-      const isNew = this.lastRowFingerprint !== '';
+    this.emitRoute();
+    const scope = findMain(document) || document;
+    const rows = this.extractRows(scope);
+    const fp = rows
+      .map((row) => `${row.threadId}:${row.unread}:${row.subject}:${row.snippet}:${row.latestSender?.email || ''}`)
+      .join('|');
+    if (fp !== this.lastRowFingerprint) {
       this.lastRowFingerprint = fp;
-      this.handler({ type: 'inbox_observed', rows, at: Date.now() });
-      if (isNew && rows[0]) {
-        this.handler({ type: 'new_message', row: rows[0], at: Date.now() });
-      }
+      this.emit({ type: 'VISIBLE_ROWS_CHANGED', rows, at: Date.now() });
     }
     const thread = this.extractCurrentThread(document);
     if (thread) {
-      this.handler({ type: 'thread_opened', thread, at: Date.now() });
+      const key = `${thread.threadId}|${thread.messages.map((message) => `${message.messageId}:${message.bodyText.length}`).join(',')}`;
+      if (key !== this.lastThreadKey) {
+        const updated = this.lastThreadId === thread.threadId && this.lastThreadKey !== '';
+        this.lastThreadKey = key;
+        this.lastThreadId = thread.threadId;
+        this.emit({
+          type: updated ? 'THREAD_DATA_UPDATED' : 'THREAD_OPENED',
+          thread,
+          at: Date.now(),
+        });
+      }
     }
     const compose = this.extractCompose(document);
-    if (compose) {
-      this.handler({ type: 'compose_opened', compose, at: Date.now() });
+    if (compose && compose.composeId !== this.lastComposeId) {
+      this.lastComposeId = compose.composeId;
+      this.emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
     }
+    if (!compose) this.lastComposeId = '';
   }
 
   extractRows(root: ParentNode): VisibleThreadRow[] {
-    const els = queryAll(root, SELECTORS.threadRow);
+    const els = findThreadRows(root);
     if (!els.length) {
       logSelectorMiss('observeInbox.rows', SELECTORS.threadRow);
       return [];
     }
     const rows: VisibleThreadRow[] = [];
     for (const el of els) {
-      // Skip our injected UI
       if (el.closest(SELECTORS.injectedUiMark)) continue;
-      const threadId = readAttr(el, SELECTORS.threadIdAttr);
+      const threadId = getThreadIdFromElement(el);
       if (!threadId) continue;
       const subjectEl = queryFirst(el, SELECTORS.threadRowSubject);
       const snippetEl = queryFirst(el, SELECTORS.threadRowSnippet);
@@ -124,13 +202,9 @@ export class DomFallbackAdapter implements GmailAdapter {
         threadId,
         subject: subjectEl?.textContent?.trim() || '(no subject)',
         snippet: snippetEl?.textContent?.trim() || '',
-        participants: senderEl
-          ? [parseContact(senderEl.textContent || '', email)]
-          : [],
-        latestSender: senderEl
-          ? parseContact(senderEl.textContent || '', email)
-          : undefined,
-        unread: el.classList.contains('zE') || el.getAttribute('aria-checked') === 'false',
+        participants: senderEl ? [parseContact(senderEl.textContent || '', email)] : [],
+        latestSender: senderEl ? parseContact(senderEl.textContent || '', email) : undefined,
+        unread: el.classList.contains('zE'),
         starred: Boolean(el.querySelector('[aria-label="Starred"]')),
         labels: [],
       });
@@ -142,18 +216,17 @@ export class DomFallbackAdapter implements GmailAdapter {
     const subjectEl = queryFirst(root, SELECTORS.openThread);
     if (!subjectEl) return null;
     const threadId =
-      readAttr(subjectEl, SELECTORS.threadIdAttr) ||
-      readAttr(document.body, SELECTORS.threadIdAttr);
+      getThreadIdFromElement(subjectEl) ||
+      (typeof document !== 'undefined' ? getThreadIdFromElement(document.body) : undefined);
     if (!threadId) return null;
     const bodies = queryAll(root, SELECTORS.messageBody);
-    const messages: ThreadMessageView[] = bodies.map((b, i) => ({
-      messageId: readAttr(b, SELECTORS.messageIdAttr) || `${threadId}-msg-${i}`,
+    const messages: ThreadMessageView[] = bodies.map((body, index) => ({
+      messageId: readAttr(body, SELECTORS.messageIdAttr) || `${threadId}-msg-${index}`,
       threadId,
       sender: { email: 'unknown@local' },
       recipients: [],
       cc: [],
-      timestamp: new Date().toISOString(),
-      bodyText: b.textContent?.trim() || '',
+      bodyText: body.textContent?.trim() || '',
       bodyHtml: undefined,
       attachmentsMetadata: [],
     }));
@@ -161,32 +234,31 @@ export class DomFallbackAdapter implements GmailAdapter {
       threadId,
       subject: subjectEl.textContent?.trim() || '',
       messages,
-      route: 'unknown',
+      route: routeFromLocation(),
     };
   }
 
   extractCompose(root: ParentNode): ComposeViewState | null {
-    const rootEl = queryFirst(root, SELECTORS.composeRoot);
+    const rootEl = findComposeRoot(root);
     if (!rootEl) return null;
-    const body = queryFirst(rootEl, SELECTORS.composeBody);
+    const body = findComposeBody(rootEl);
     const subject = queryFirst(rootEl, SELECTORS.composeSubject) as HTMLInputElement | null;
     const to = queryFirst(rootEl, SELECTORS.composeTo) as HTMLInputElement | null;
+    const label = (rootEl.getAttribute('aria-label') || '').toLowerCase();
     return {
-      composeId: rootEl.getAttribute('id') || `compose-${Date.now()}`,
+      composeId: stableComposeId(rootEl),
       to: to?.value ? [{ email: to.value }] : [],
       cc: [],
       bcc: [],
       subject: subject?.value || '',
       bodyText: body?.textContent || '',
-      isReply: Boolean(rootEl.querySelector('[aria-label*="Reply" i]')),
+      isReply: label.includes('reply') || label.includes('forward'),
     };
   }
 
   async observeInbox() {
-    if (typeof document === 'undefined') {
-      return { ...fail('observeInbox', 'no document'), rows: [] };
-    }
-    const rows = this.extractRows(document);
+    if (typeof document === 'undefined') return { ...fail('observeInbox', 'no document'), rows: [] };
+    const rows = this.extractRows(findMain(document) || document);
     return { ...ok('observeInbox'), rows };
   }
 
@@ -207,18 +279,14 @@ export class DomFallbackAdapter implements GmailAdapter {
   }
 
   async getCurrentThread() {
-    if (typeof document === 'undefined') {
-      return fail('getCurrentThread', 'no document');
-    }
+    if (typeof document === 'undefined') return fail('getCurrentThread', 'no document');
     const thread = this.extractCurrentThread(document);
     if (!thread) return fail('getCurrentThread', 'thread not visible', false);
     return { ...ok('getCurrentThread'), thread };
   }
 
   async getCurrentCompose() {
-    if (typeof document === 'undefined') {
-      return fail('getCurrentCompose', 'no document');
-    }
+    if (typeof document === 'undefined') return fail('getCurrentCompose', 'no document');
     const compose = this.extractCompose(document);
     if (!compose) return fail('getCurrentCompose', 'compose not open', false);
     return { ...ok('getCurrentCompose'), compose };
@@ -226,55 +294,58 @@ export class DomFallbackAdapter implements GmailAdapter {
 
   async openThread(threadId: string) {
     if (typeof document === 'undefined') return fail('openThread', 'no document');
-    const rows = queryAll(document, SELECTORS.threadRow);
-    const match = rows.find((r) => readAttr(r, SELECTORS.threadIdAttr) === threadId);
+    const match = findThreadRows(document).find((row) => getThreadIdFromElement(row) === threadId);
     if (!match) return fail('openThread', 'row not found', true);
-    (match as HTMLElement).click();
-    return ok('openThread');
+    match.click();
+    return { ...ok('openThread', { threadId }), verified: false };
   }
 
-  async archiveThread(_threadId: string) {
-    return this.clickToolbar(SELECTORS.archiveButton, 'archiveThread');
+  async archiveThread(threadId: string) {
+    const result = this.clickToolbar(SELECTORS.archiveButton, 'archiveThread');
+    return { ...result, threadId };
   }
 
-  async markRead(_threadId: string) {
-    return this.clickToolbar(SELECTORS.markReadButton, 'markRead');
+  async markRead(threadId: string) {
+    return { ...this.clickToolbar(SELECTORS.markReadButton, 'markRead'), threadId };
   }
 
-  async markUnread(_threadId: string) {
-    return this.clickToolbar(SELECTORS.markUnreadButton, 'markUnread');
+  async markUnread(threadId: string) {
+    return { ...this.clickToolbar(SELECTORS.markUnreadButton, 'markUnread'), threadId };
   }
 
-  async starThread(_threadId: string) {
-    return this.clickToolbar(SELECTORS.starButton, 'starThread');
+  async starThread(threadId: string) {
+    return { ...this.clickToolbar(SELECTORS.starButton, 'starThread'), threadId };
   }
 
-  async createReplyDraft(_threadId: string) {
-    return this.clickToolbar(SELECTORS.replyButton, 'createReplyDraft');
+  async createReplyDraft(threadId: string) {
+    return { ...this.clickToolbar(SELECTORS.replyButton, 'createReplyDraft'), threadId };
   }
 
   async insertComposeBody(text: string) {
     if (typeof document === 'undefined') return fail('insertComposeBody', 'no document');
-    const body = queryFirst(document, SELECTORS.composeBody) as HTMLElement | null;
+    const body = findComposeBody(document);
     if (!body) {
       logSelectorMiss('insertComposeBody', SELECTORS.composeBody);
       return fail('insertComposeBody', 'compose body not found', true);
     }
     body.focus();
-    // Prefer execCommand for Gmail editable; fall back to textContent
     const inserted = document.execCommand?.('insertText', false, text);
     if (!inserted) {
       body.textContent = (body.textContent || '') + text;
       body.dispatchEvent(new InputEvent('input', { bubbles: true }));
     }
-    return ok('insertComposeBody');
+    const verified = (body.textContent || '').includes(text.slice(0, 80));
+    return {
+      ...ok('insertComposeBody'),
+      verified,
+      reason: verified ? 'Compose body contains the text' : 'Text was not found after insert',
+    };
   }
 
   async navigateToSearch(query: string) {
     if (typeof document === 'undefined') return fail('navigateToSearch', 'no document');
-    const box = queryFirst(document, SELECTORS.searchBox) as HTMLInputElement | null;
+    const box = findSearchBox(document);
     if (!box) {
-      // URL hash fallback — still Gmail web UI, not private RPC
       location.hash = `#search/${encodeURIComponent(query)}`;
       return ok('navigateToSearch');
     }
@@ -298,9 +369,14 @@ export class DomFallbackAdapter implements GmailAdapter {
     return ok('navigateToInbox');
   }
 
+  readNotice(): string | null {
+    if (typeof document === 'undefined') return null;
+    return findNotice(document);
+  }
+
   private clickToolbar(sels: readonly string[], capability: string): GmailActionResult {
     if (typeof document === 'undefined') return fail(capability, 'no document');
-    const btn = queryFirst(document, sels) as HTMLElement | null;
+    const btn = (capability === 'archiveThread' ? findArchiveButton(document) : queryFirst(document, sels)) as HTMLElement | null;
     if (!btn) {
       logSelectorMiss(capability, sels);
       return fail(capability, 'control not found', true);

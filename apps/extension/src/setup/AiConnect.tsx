@@ -237,14 +237,15 @@ export function AiConnect({
   return (
     <div id="ai-setup" className="space-y-3">
       <p className="text-sm text-[#5b6b7c]">
-        Use your ChatGPT account, or download a model that stays on this computer. Mail never goes to the tracker.
+        Use a model on this computer, or an API key. Mail never goes to the tracker.
       </p>
 
       <div className={cardClass(chatgptActive)}>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-sm font-medium">ChatGPT account</div>
+            <div className="text-sm font-medium">ChatGPT account · Experimental</div>
             <p className="mt-1 text-xs text-[#5b6b7c]">
+              May stop working when ChatGPT web internals change.{' '}
               {status.signedIn
                 ? accountLabel
                 : 'Sign in with the ChatGPT account you already use. Requests use that plan’s message allowance. Inbox text is sent as a temporary chat.'}

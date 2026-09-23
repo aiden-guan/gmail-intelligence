@@ -32,6 +32,7 @@ export type AgentLoopDeps = {
     tier: number;
     expiresAt?: number;
   }) => Promise<string>;
+  onIntel?: (threadId: string, kind: 'THREAD_CLASSIFIED' | 'THREAD_SUMMARY_READY' | 'THREAD_DRAFT_READY' | 'THREAD_INTELLIGENCE_UPDATED') => void;
 };
 
 /**
@@ -52,29 +53,52 @@ export class AgentLoop {
     threadId: string;
     fingerprint: string;
     subject: string;
+    quality?: 'ROW_STUB' | 'THREAD_PARTIAL' | 'THREAD_COMPLETE';
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
   }): Promise<void> {
     const settings = this.deps.settings();
+    const quality = input.quality || 'THREAD_PARTIAL';
+    const reliable = quality === 'THREAD_COMPLETE';
     const existing = await this.deps.db.thread_classifications.get(input.threadId);
     if (existing?.fingerprint === input.fingerprint) {
-      return; // unchanged — do not re-classify
+      if (reliable && settings.autoSummarize && settings.aiMode !== 'disabled' && this.deps.ai) {
+        const summary = await this.deps.db.thread_summaries.get(input.threadId);
+        if (!summary) await this.summarizeIfNeeded(input);
+      }
+      return;
     }
 
-    // NORMALIZE + RULE ENGINE + CLASSIFY
+    const override = await this.deps.db.thread_overrides.get(input.threadId);
     const rules = (await this.deps.db.agent_rules.filter((r) => r.enabled).toArray()).map(
       (r) => r.structured,
     );
-    let classification: ClassificationResult | null = applyRules(input, rules);
-    let source: 'rule' | 'heuristic' | 'ai' = 'rule';
+    let classification: ClassificationResult | null = override
+      ? null
+      : applyRules(input, rules);
+    let source: 'rule' | 'heuristic' | 'ai' | 'override' = override ? 'override' : 'rule';
 
-    if (!classification) {
+    if (override) {
+      const base = classifyHeuristic(input);
+      classification = {
+        category: override.category,
+        confidence: 1,
+        priority: base?.priority || 'NORMAL',
+        needsReply: override.category === 'RESPOND',
+        waitingOnReply: override.category === 'WAITING',
+        archiveRecommendation: false,
+        reason: 'You set this category',
+        deadline: null,
+      };
+    } else if (!classification) {
       classification = classifyHeuristic(input);
       source = 'heuristic';
     }
 
     if (
-      !classification ||
-      (classification.confidence < 0.7 && settings.aiMode !== 'disabled' && this.deps.ai && settings.autoClassify)
+      !override &&
+      reliable &&
+      (!classification ||
+        (classification.confidence < 0.7 && settings.aiMode !== 'disabled' && this.deps.ai && settings.autoClassify))
     ) {
       try {
         const aiResult = await this.deps.queue.enqueue('classify', input.fingerprint, () =>
@@ -88,7 +112,6 @@ export class AgentLoop {
             hasListUnsubscribe: input.hasListUnsubscribe,
           }),
         );
-        // AI must not override explicit user rules
         if (!applyRules(input, rules)) {
           classification = aiResult.result;
           source = 'ai';
@@ -129,6 +152,7 @@ export class AgentLoop {
       requiresResponse: classification.needsReply,
       awaitingResponse: classification.waitingOnReply,
       virtualLabels: [classification.category],
+      manualCategory: override ? override.category : undefined,
     });
 
     await this.deps.log({
@@ -137,12 +161,15 @@ export class AgentLoop {
       detail: `${classification.category} (${source}, ${classification.confidence.toFixed(2)}): ${classification.reason}`,
       tier: AgentSafetyTier.READ_ONLY,
     });
+    this.deps.onIntel?.(input.threadId, 'THREAD_CLASSIFIED');
+    this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
 
-    // Branch by category
+    if (!reliable) return;
+
     if (classification.category === 'RESPOND' && settings.autoSummarize) {
       await this.summarizeIfNeeded(input);
       if (settings.autoDraft && this.deps.ai && settings.aiMode !== 'disabled') {
-        await this.draftResponse(input);
+        await this.draftResponse(input, settings.autoInsertDraft);
       }
     } else if (classification.category === 'WAITING' && settings.autoReminders) {
       await this.trackFollowUp(input);
@@ -239,9 +266,48 @@ export class AgentLoop {
         detail: result.oneLine,
         tier: AgentSafetyTier.READ_ONLY,
       });
+      this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
+      this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
     } catch {
       /* non-blocking */
     }
+  }
+
+  async requestSummary(input: {
+    threadId: string;
+    fingerprint: string;
+    subject: string;
+    messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
+  }): Promise<{ ok: boolean; oneLine?: string; reason?: string }> {
+    if (!this.deps.ai || this.deps.settings().aiMode === 'disabled') {
+      return { ok: false, reason: 'Turn on AI in Settings to summarize.' };
+    }
+    if (!input.messages.some((message) => message.bodyText.trim())) {
+      return { ok: false, reason: 'Open the thread so the message can be read.' };
+    }
+    await this.summarizeIfNeeded(input);
+    const summary = await this.deps.db.thread_summaries.get(input.threadId);
+    if (!summary) return { ok: false, reason: 'Could not summarize this thread.' };
+    return { ok: true, oneLine: summary.summary.oneLine };
+  }
+
+  async requestDraft(input: {
+    threadId: string;
+    fingerprint: string;
+    subject: string;
+    messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
+  }): Promise<{ ok: boolean; body?: string; reason?: string }> {
+    if (!this.deps.ai || this.deps.settings().aiMode === 'disabled') {
+      return { ok: false, reason: 'Turn on AI in Settings to draft a reply.' };
+    }
+    if (!input.messages.some((message) => message.bodyText.trim())) {
+      return { ok: false, reason: 'Open the thread so a reply can be drafted.' };
+    }
+    await this.draftResponse(input, false);
+    const drafts = await this.deps.db.draft_suggestions.where('threadId').equals(input.threadId).toArray();
+    const draft = drafts.sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!draft?.suggestion.body) return { ok: false, reason: 'Could not draft a reply.' };
+    return { ok: true, body: draft.suggestion.body };
   }
 
   private async draftResponse(input: {
@@ -249,7 +315,7 @@ export class AgentLoop {
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
-  }): Promise<void> {
+  }, insertIntoGmail = false): Promise<void> {
     const existing = await this.deps.db.draft_suggestions
       .where('threadId')
       .equals(input.threadId)
@@ -278,20 +344,21 @@ export class AgentLoop {
         createdAt: Date.now(),
       });
 
-      const inserted = await this.deps.insertDraftViaGmail(input.threadId, suggestion.body);
-      if (inserted.success) {
-        await this.deps.db.draft_suggestions.update(id, { insertedIntoGmail: true });
+      let inserted = false;
+      if (insertIntoGmail) {
+        const result = await this.deps.insertDraftViaGmail(input.threadId, suggestion.body);
+        inserted = result.success;
+        if (inserted) await this.deps.db.draft_suggestions.update(id, { insertedIntoGmail: true });
       }
-      // If Gmail draft creation unreliable, local draft retained — never silently lost
       await this.deps.log({
         type: 'draft',
         threadId: input.threadId,
-        detail: inserted.success
-          ? 'Draft inserted into Gmail'
-          : 'Draft saved locally (Insert Draft available)',
+        detail: inserted ? 'Draft inserted into Gmail' : 'Draft saved locally',
         tier: AgentSafetyTier.DRAFT_WRITE,
         undoable: true,
       });
+      this.deps.onIntel?.(input.threadId, 'THREAD_DRAFT_READY');
+      this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
     } catch {
       /* non-blocking */
     }

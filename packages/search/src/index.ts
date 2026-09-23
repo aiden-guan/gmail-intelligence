@@ -10,6 +10,7 @@ export type SearchDoc = {
   labels: string;
   timestamp: string;
   fingerprint: string;
+  quality?: 'ROW_STUB' | 'THREAD_PARTIAL' | 'THREAD_COMPLETE';
 };
 
 export type SearchHit = {
@@ -18,6 +19,7 @@ export type SearchHit = {
   score: number;
   source: 'lexical' | 'semantic' | 'hybrid';
   snippet?: string;
+  quality?: 'ROW_STUB' | 'THREAD_PARTIAL' | 'THREAD_COMPLETE';
 };
 
 export type CoverageInfo = {
@@ -28,13 +30,13 @@ export type CoverageInfo = {
 };
 
 export function formatCoverageWarning(c: CoverageInfo): string {
-  const oldest = c.oldestIndexedDate
-    ? new Date(c.oldestIndexedDate).toLocaleDateString()
-    : 'unknown';
-  const newest = c.newestIndexedDate
-    ? new Date(c.newestIndexedDate).toLocaleDateString()
-    : 'present';
-  return `Searching ${c.totalIndexedThreads.toLocaleString()} indexed threads / Coverage: ${oldest} → ${newest}`;
+  if (!c.totalIndexedThreads) {
+    return 'No mail indexed yet. Coverage grows as you read Gmail.';
+  }
+  const since = c.oldestIndexedDate
+    ? new Date(c.oldestIndexedDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    : 'recently';
+  return `Based on ${c.totalIndexedThreads.toLocaleString()} locally indexed threads since ${since}.`;
 }
 
 export class LexicalSearchIndex {
@@ -44,7 +46,7 @@ export class LexicalSearchIndex {
   constructor() {
     this.mini = new MiniSearch({
       fields: ['subject', 'text', 'senders', 'recipients', 'labels'],
-      storeFields: ['threadId', 'subject', 'timestamp', 'fingerprint'],
+      storeFields: ['threadId', 'subject', 'timestamp', 'fingerprint', 'quality'],
       searchOptions: { boost: { subject: 3, senders: 2, recipients: 1.5 }, fuzzy: 0.15 },
     });
   }
@@ -72,12 +74,17 @@ export class LexicalSearchIndex {
   search(query: string, limit = 20): SearchHit[] {
     if (!query.trim()) return [];
     const results = this.mini.search(query, { prefix: true });
-    return results.slice(0, limit).map((r) => ({
-      threadId: String(r.threadId),
-      subject: String(r.subject),
-      score: r.score,
-      source: 'lexical' as const,
-    }));
+    return results.slice(0, limit).map((r) => {
+      const quality = r.quality as SearchHit['quality'];
+      const stub = quality === 'ROW_STUB';
+      return {
+        threadId: String(r.threadId),
+        subject: String(r.subject),
+        score: stub ? r.score * 0.25 : r.score,
+        source: 'lexical' as const,
+        quality,
+      };
+    });
   }
 
   size(): number {
@@ -196,13 +203,17 @@ export class AskInboxEngine {
     const hits = this.retriever.retrieve({ query, queryEmbedding, limit: 8 });
     if (!hits.length) {
       return {
-        answer: `No matching threads in the local index. ${coverageNote}. The local index may be incomplete.`,
+        answer: `No matching threads in the local index. ${coverageNote}`,
         citations: [] as Array<{ threadId: string; subject: string }>,
         incompleteIndex: true,
         coverageNote,
       };
     }
+    const stubsOnly = hits.every((hit) => hit.quality === 'ROW_STUB');
     const result = await this.answerFn({ query, chunks: hits, coverageNote });
-    return { ...result, coverageNote };
+    const answer = stubsOnly
+      ? `${result.answer}\n\nThese matches use inbox previews, not full messages.`
+      : result.answer;
+    return { ...result, answer, coverageNote };
   }
 }

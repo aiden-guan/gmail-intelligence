@@ -1,63 +1,39 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { DEFAULT_SETTINGS, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
 import { trackerPermissionOrigin } from '@gi/tracking';
 import { AiConnect } from '../setup/AiConnect';
 
-const CATEGORIES: ThreadCategory[] = [
-  'RESPOND',
-  'WAITING',
-  'FYI',
-  'NOTIFICATIONS',
-  'PROMOTIONS',
-  'NEWS',
-];
+const CATEGORIES: ThreadCategory[] = ['RESPOND', 'WAITING', 'FYI', 'NOTIFICATIONS', 'PROMOTIONS', 'NEWS'];
 
 export function SettingsApp() {
   const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const [changeAi, setChangeAi] = useState(false);
   const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
-  const [activity, setActivity] = useState<Array<{ id: string; type: string; detail: string; createdAt: number }>>([]);
-  const [coverage, setCoverage] = useState('');
+  const [rules, setRules] = useState('');
 
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res) => {
+    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res?: { settings?: ExtensionSettings }) => {
       if (res?.settings) setSettings({ ...DEFAULT_SETTINGS, ...res.settings });
-    });
-    chrome.runtime.sendMessage({ type: 'GET_ACTIVITY_LOG' }, (res) => {
-      if (res?.actions) setActivity(res.actions);
-    });
-    chrome.runtime.sendMessage({ type: 'RUN_DIAGNOSTICS' }, (d) => {
-      if (d?.coverage) setCoverage(String(d.coverage));
     });
   }, []);
 
   function update<K extends keyof ExtensionSettings>(key: K, value: ExtensionSettings[K]) {
-    setSettings((s) => ({ ...s, [key]: value }));
+    setSettings((current) => ({ ...current, [key]: value }));
     setSaved(false);
   }
 
   const patchSettings = useCallback((partial: Partial<ExtensionSettings>) => {
     setSettings((current) => ({ ...current, ...partial }));
-    chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings: partial }, () => {
-      setSaved(true);
-    });
-  }, []);
-
-  const applySignedIn = useCallback((partial: Partial<ExtensionSettings>) => {
-    setSettings((current) => ({ ...current, ...partial }));
-    setSaved(true);
-  }, []);
-
-  useEffect(() => {
-    if (location.hash !== '#ai-setup') return;
-    document.getElementById('ai-setup')?.scrollIntoView({ block: 'start' });
+    chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings: partial }, () => setSaved(true));
   }, []);
 
   function save() {
     const origin = trackerPermissionOrigin(settings.trackerBaseUrl);
     const persist = () => {
-      chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings }, (res) => {
+      chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings }, (res?: { settings?: ExtensionSettings }) => {
         if (res?.settings) {
           setSettings(res.settings);
           setSaved(true);
@@ -71,378 +47,177 @@ export function SettingsApp() {
     persist();
   }
 
-  function runDiag() {
-    chrome.runtime.sendMessage({ type: 'RUN_DIAGNOSTICS' }, (d) => setDiag(d));
-  }
+  const provider = settings.aiMode === 'disabled'
+    ? 'Off'
+    : settings.aiProvider === 'chatgpt'
+      ? 'ChatGPT (experimental)'
+      : settings.aiProvider === 'chrome'
+        ? 'On this computer'
+        : settings.aiProvider === 'local'
+          ? 'Downloaded model'
+          : settings.aiProvider;
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
-      <header className="mb-8">
-        <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5b6b7c]">
-          Gmail Intelligence
-        </div>
-        <h1 className="mt-1 text-2xl font-semibold">Settings</h1>
-        <p className="mt-2 text-sm text-[#5b6b7c]">
-          Sign in with ChatGPT or download a model. Mailbox contents never go to the tracker.
-        </p>
+    <div className="mx-auto max-w-xl px-6 py-8 text-[#202124]">
+      <header className="mb-6">
+        <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#5f6368]">Gmail Intelligence</div>
+        <h1 className="mt-1 text-xl font-medium">Settings</h1>
       </header>
 
+      <Section title="General">
+        <Toggle label="AI Inbox" checked={settings.aiMode !== 'disabled' && settings.autoClassify} onChange={(on) => update('autoClassify', on)} />
+        <Toggle label="Email tracking" checked={settings.trackingEnabled} onChange={(on) => update('trackingEnabled', on)} />
+        <Toggle label="Desktop alerts" checked={settings.desktopNotifications} onChange={(on) => update('desktopNotifications', on)} />
+      </Section>
+
+      <Section title="Agent">
+        <Toggle label="Organize inbox automatically" checked={settings.autoClassify} onChange={(on) => update('autoClassify', on)} />
+        <Toggle label="Generate reply drafts" checked={settings.autoDraft} onChange={(on) => update('autoDraft', on)} />
+        <Toggle label="Follow-up reminders" checked={settings.autoReminders} onChange={(on) => update('autoReminders', on)} />
+        <Toggle label="Auto archive low-priority mail" checked={settings.autoArchive} onChange={(on) => update('autoArchive', on)} />
+        <p className="text-xs text-[#5f6368]">Drafts stay local until you click Draft reply. Nothing is sent automatically.</p>
+      </Section>
+
       <Section title="AI">
-        <AiConnect settings={settings} onPatch={patchSettings} onSignedIn={applySignedIn} />
+        <p className="text-sm">{provider}{settings.aiModel ? ` · ${settings.aiModel}` : ''}</p>
+        <button className="mt-2 text-sm text-[#1a73e8]" onClick={() => setChangeAi((open) => !open)}>
+          {changeAi ? 'Hide AI setup' : 'Change AI'}
+        </button>
+        {changeAi ? <div className="mt-3"><AiConnect settings={settings} onPatch={patchSettings} onSignedIn={patchSettings} /></div> : null}
       </Section>
 
-      <Section title="Tracking">
-        <p className="text-xs text-[#5b6b7c]">
-          Sent mail gets a check beside each tracked message. Gray means it has not been opened.
-          Green means an open was detected. Click the check to see who opened it and when.
+      <Section title="Email tracking">
+        <Toggle label="Track opens" checked={settings.trackOpens} onChange={(on) => update('trackOpens', on)} />
+        <Toggle label="Track links" checked={settings.trackLinks} onChange={(on) => update('trackLinks', on)} />
+        <p className="text-xs text-[#5f6368]">
+          Connection: {settings.trackerBaseUrl && settings.personalApiToken ? 'Configured' : 'Needs setup'}
         </p>
-        <p className="text-xs text-[#5b6b7c]">
-          The tracker URL has to be public. Gmail loads the tracking image from Google’s servers, so
-          a localhost URL cannot record recipient opens. For a local trial, run npm run tracker and
-          paste the URL and token from .local/tracker.txt, then Save settings.
-        </p>
-        <Toggle
-          label="Enable open/click tracking"
-          checked={settings.trackingEnabled}
-          onChange={(v) => update('trackingEnabled', v)}
-        />
-        <Toggle label="Track opens" checked={settings.trackOpens} onChange={(v) => update('trackOpens', v)} />
-        <Toggle label="Track links" checked={settings.trackLinks} onChange={(v) => update('trackLinks', v)} />
-        <Toggle
-          label="Desktop notifications"
-          checked={settings.desktopNotifications}
-          onChange={(v) => update('desktopNotifications', v)}
-        />
-        <Toggle
-          label="Hide suspected self-opens"
-          checked={settings.hideSuspectedSelfOpens}
-          onChange={(v) => update('hideSuspectedSelfOpens', v)}
-        />
-        <Field label="Tracker base URL">
-          <input
-            className="field"
-            value={settings.trackerBaseUrl}
-            placeholder="https://your-tracker.example.workers.dev"
-            onChange={(e) => update('trackerBaseUrl', e.target.value)}
-          />
-        </Field>
-        <Field label="Personal API token">
-          <input
-            className="field"
-            type="password"
-            value={settings.personalApiToken}
-            onChange={(e) => update('personalApiToken', e.target.value)}
-          />
-        </Field>
-      </Section>
-
-      <Section title="Inbox Agent">
-        <Toggle label="Auto classify" checked={settings.autoClassify} onChange={(v) => update('autoClassify', v)} />
-        <Toggle label="Auto summarize" checked={settings.autoSummarize} onChange={(v) => update('autoSummarize', v)} />
-        <Toggle
-          label="Auto drafts (draft only, never auto-send)"
-          checked={settings.autoDraft}
-          onChange={(v) => update('autoDraft', v)}
-        />
-        <Toggle label="Auto reminders" checked={settings.autoReminders} onChange={(v) => update('autoReminders', v)} />
-        <Toggle label="Auto archive" checked={settings.autoArchive} onChange={(v) => update('autoArchive', v)} />
-        <Field label="Reminder mode">
-          <select
-            className="field"
-            value={settings.reminderMode}
-            onChange={(e) =>
-              update('reminderMode', e.target.value as ExtensionSettings['reminderMode'])
-            }
-          >
-            <option value="ai_needed">Only when follow-up likely needed</option>
-            <option value="every_external">Every external outbound</option>
-            <option value="disabled">Disabled</option>
-          </select>
-        </Field>
-        <Field label="Reminder delay (business days)">
-          <input
-            className="field"
-            type="number"
-            min={1}
-            max={30}
-            value={settings.reminderBusinessDays}
-            onChange={(e) => update('reminderBusinessDays', Number(e.target.value))}
-          />
-        </Field>
-        <Field label="InboxSDK App ID (optional)">
-          <input
-            className="field"
-            value={settings.inboxSdkAppId}
-            onChange={(e) => update('inboxSdkAppId', e.target.value)}
-          />
-        </Field>
-      </Section>
-
-      <Section title="Auto Archive">
-        <p className="mb-2 text-xs text-[#5b6b7c]">
-          Default eligible: NOTIFICATIONS, PROMOTIONS, NEWS. Never default-archive RESPOND, WAITING, FYI.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {CATEGORIES.map((c) => (
-            <label key={c} className="flex items-center gap-1 text-sm">
-              <input
-                type="checkbox"
-                checked={settings.archiveCategories.includes(c)}
-                disabled={c === 'RESPOND' || c === 'WAITING' || c === 'FYI'}
-                onChange={(e) => {
-                  const next = e.target.checked
-                    ? [...settings.archiveCategories, c]
-                    : settings.archiveCategories.filter((x) => x !== c);
-                  update('archiveCategories', next);
-                }}
-              />
-              {c}
-            </label>
-          ))}
-        </div>
-        <Field label="Confidence threshold">
-          <input
-            className="field"
-            type="number"
-            min={0}
-            max={1}
-            step={0.01}
-            value={settings.archiveConfidenceThreshold}
-            onChange={(e) => update('archiveConfidenceThreshold', Number(e.target.value))}
-          />
-        </Field>
-        <Field label="Always archive senders/domains (comma-separated)">
-          <input
-            className="field"
-            value={settings.alwaysArchiveSenders.join(', ')}
-            onChange={(e) =>
-              update(
-                'alwaysArchiveSenders',
-                e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-              )
-            }
-          />
-        </Field>
-        <Field label="Never archive senders/domains (comma-separated)">
-          <input
-            className="field"
-            value={settings.neverArchiveSenders.join(', ')}
-            onChange={(e) =>
-              update(
-                'neverArchiveSenders',
-                e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-              )
-            }
-          />
-        </Field>
       </Section>
 
       <Section title="Personalization">
         <Field label="Greeting">
-          <input
-            className="field"
-            value={settings.voiceProfile.greeting}
-            onChange={(e) =>
-              update('voiceProfile', { ...settings.voiceProfile, greeting: e.target.value })
-            }
-          />
+          <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.voiceProfile.greeting} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, greeting: event.target.value })} />
         </Field>
-        <Field label="Sign-off">
-          <input
-            className="field"
-            value={settings.voiceProfile.signoff}
-            onChange={(e) =>
-              update('voiceProfile', { ...settings.voiceProfile, signoff: e.target.value })
-            }
-          />
+        <Field label="Signoff">
+          <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.voiceProfile.signoff} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, signoff: event.target.value })} />
+        </Field>
+        <Field label="Concision">
+          <select className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.voiceProfile.concision} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, concision: event.target.value as ExtensionSettings['voiceProfile']['concision'] })}>
+            <option value="short">Short</option>
+            <option value="medium">Medium</option>
+            <option value="long">Long</option>
+          </select>
         </Field>
         <Field label="Formality">
-          <select
-            className="field"
-            value={settings.voiceProfile.formality}
-            onChange={(e) =>
-              update('voiceProfile', {
-                ...settings.voiceProfile,
-                formality: e.target.value as 'casual' | 'neutral' | 'formal',
-              })
-            }
-          >
+          <select className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.voiceProfile.formality} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, formality: event.target.value as ExtensionSettings['voiceProfile']['formality'] })}>
             <option value="casual">Casual</option>
             <option value="neutral">Neutral</option>
             <option value="formal">Formal</option>
           </select>
         </Field>
-        <Field label="Personal instructions">
-          <textarea
-            className="field min-h-[80px]"
-            value={settings.voiceProfile.personalInstructions}
-            onChange={(e) =>
-              update('voiceProfile', {
-                ...settings.voiceProfile,
-                personalInstructions: e.target.value,
-              })
-            }
-          />
+        <Field label="Custom instructions">
+          <textarea className="min-h-[5rem] w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.voiceProfile.personalInstructions} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, personalInstructions: event.target.value })} />
         </Field>
-        <Toggle
-          label="Learn style from sampled sent mail (not continuous full mailbox)"
-          checked={settings.learnFromSent}
-          onChange={(v) => update('learnFromSent', v)}
-        />
       </Section>
 
-      <Section title="Index">
-        <p className="mb-2 text-sm text-[#5b6b7c]">{coverage || 'Coverage unknown'}</p>
-        <div className="flex flex-wrap gap-2">
-          {(['7d', '30d', '90d', '1y', 'sent_sample'] as const).map((mode) => (
-            <button
-              key={mode}
-              className="rounded border border-[#d3dae2] bg-white px-3 py-1.5 text-sm"
-              onClick={() => chrome.runtime.sendMessage({ type: 'INDEX_INBOX', mode })}
-            >
-              Index {mode}
-            </button>
-          ))}
+      <button className="rounded bg-[#1a73e8] px-3 py-2 text-sm text-white" onClick={save}>
+        {saved ? 'Saved' : 'Save'}
+      </button>
+
+      <button className="ml-3 text-sm text-[#1a73e8]" onClick={() => setAdvanced((open) => !open)}>
+        {advanced ? 'Hide advanced' : 'Advanced'}
+      </button>
+
+      {advanced ? (
+        <Section title="Advanced">
+          <p className="text-xs text-[#5f6368]">
+            Provider endpoints, tokens, index controls, and diagnostics. For a local tracker, run npm run tracker and paste the URL and token from .local/tracker.txt.
+          </p>
+          <Field label="Tracker base URL">
+            <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.trackerBaseUrl} placeholder="https://your-tracker.example" onChange={(event) => update('trackerBaseUrl', event.target.value)} />
+          </Field>
+          <Field label="Personal API token">
+            <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" type="password" value={settings.personalApiToken} onChange={(event) => update('personalApiToken', event.target.value)} />
+          </Field>
+          <Field label="AI endpoint">
+            <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.aiEndpoint} onChange={(event) => update('aiEndpoint', event.target.value)} />
+          </Field>
+          <Field label="AI API key">
+            <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" type="password" value={settings.aiApiKey} onChange={(event) => update('aiApiKey', event.target.value)} />
+          </Field>
+          <Field label="InboxSDK app ID">
+            <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={settings.inboxSdkAppId} onChange={(event) => update('inboxSdkAppId', event.target.value)} />
+          </Field>
+          <Field label="Archive confidence">
+            <input className="w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" type="number" min={0} max={1} step={0.01} value={settings.archiveConfidenceThreshold} onChange={(event) => update('archiveConfidenceThreshold', Number(event.target.value))} />
+          </Field>
+          <Toggle label="Insert generated drafts into Gmail automatically" checked={settings.autoInsertDraft} onChange={(on) => update('autoInsertDraft', on)} />
+          <Toggle label="Command palette" checked={settings.commandPaletteEnabled} onChange={(on) => update('commandPaletteEnabled', on)} />
+          <Toggle label="Command palette overrides Gmail shortcuts" checked={settings.commandPaletteOverrideGmail} onChange={(on) => update('commandPaletteOverrideGmail', on)} />
+          <div className="text-xs text-[#5f6368]">Archive categories</div>
+          <div className="flex flex-wrap gap-2">
+            {CATEGORIES.map((category) => (
+              <label key={category} className="text-xs">
+                <input
+                  type="checkbox"
+                  checked={settings.archiveCategories.includes(category)}
+                  onChange={(event) => {
+                    const next = event.target.checked
+                      ? [...settings.archiveCategories, category]
+                      : settings.archiveCategories.filter((item) => item !== category);
+                    update('archiveCategories', next);
+                  }}
+                />{' '}
+                {category}
+              </label>
+            ))}
+          </div>
+          <Field label="Agent rules, one per line">
+            <textarea className="min-h-[5rem] w-full rounded border border-[#dadce0] px-2 py-1 text-sm text-[#202124]" value={rules} onChange={(event) => setRules(event.target.value)} />
+          </Field>
           <button
-            className="rounded border border-[#d3dae2] bg-white px-3 py-1.5 text-sm"
-            onClick={() => chrome.runtime.sendMessage({ type: 'PAUSE_INDEX' })}
+            className="text-sm text-[#1a73e8]"
+            onClick={() => chrome.runtime.sendMessage({ type: 'SAVE_AGENT_RULES', lines: rules.split('\n').map((line) => line.trim()).filter(Boolean) })}
           >
-            Pause
+            Save rules
           </button>
-          <button
-            className="rounded border border-[#d3dae2] bg-white px-3 py-1.5 text-sm"
-            onClick={() => chrome.runtime.sendMessage({ type: 'RESUME_INDEX' })}
-          >
-            Resume
-          </button>
-          <button
-            className="rounded border border-red-200 bg-white px-3 py-1.5 text-sm text-red-700"
-            onClick={() => {
-              if (confirm('Clear local mailbox index?')) {
-                chrome.runtime.sendMessage({ type: 'CLEAR_INDEX' });
-              }
-            }}
-          >
-            Clear index
-          </button>
-        </div>
-      </Section>
-
-      <Section title="Privacy">
-        <button
-          className="rounded border border-[#d3dae2] bg-white px-3 py-1.5 text-sm"
-          onClick={() => chrome.runtime.sendMessage({ type: 'CLEAR_AI_CACHE' })}
-        >
-          Clear AI cache
-        </button>
-        <button
-          className="ml-2 rounded border border-[#d3dae2] bg-white px-3 py-1.5 text-sm"
-          onClick={() => {
-            update('voiceProfile', DEFAULT_SETTINGS.voiceProfile);
-          }}
-        >
-          Reset style profile
-        </button>
-      </Section>
-
-      <Section title="Agent rules">
-        <p className="mb-2 text-xs text-[#5b6b7c]">
-          Examples: &quot;never archive berkeley.edu&quot;, &quot;always treat ycombinator.com as important&quot;.
-          Explicit rules override AI.
-        </p>
-        <textarea
-          className="field min-h-[100px]"
-          id="gi-rules"
-          placeholder={'never archive berkeley.edu\nalways archive newsletters.example.com'}
-          defaultValue=""
-        />
-        <button
-          className="mt-2 rounded border border-[#d3dae2] bg-white px-3 py-1.5 text-sm"
-          onClick={() => {
-            const el = document.getElementById('gi-rules') as HTMLTextAreaElement | null;
-            const lines = (el?.value || '')
-              .split('\n')
-              .map((s) => s.trim())
-              .filter(Boolean);
-            chrome.runtime.sendMessage({ type: 'SAVE_AGENT_RULES', lines }, () => {
-              setSaved(true);
-            });
-          }}
-        >
-          Save rules
-        </button>
-      </Section>
-
-      <Section title="Diagnostics">
-        <button className="rounded bg-[#1a73e8] px-3 py-1.5 text-sm text-white" onClick={runDiag}>
-          Run diagnostics
-        </button>
-        {diag ? (
-          <pre className="mt-3 overflow-auto rounded border border-[#d3dae2] bg-white p-3 text-xs">
-            {JSON.stringify(diag, null, 2)}
-          </pre>
-        ) : null}
-      </Section>
-
-      <Section title="Agent activity">
-        <ul className="max-h-64 space-y-2 overflow-auto text-sm">
-          {activity.map((a) => (
-            <li key={a.id} className="rounded border border-[#d3dae2] bg-white px-3 py-2">
-              <div className="text-[11px] text-[#5b6b7c]">
-                {new Date(a.createdAt).toLocaleString()} · {a.type}
-              </div>
-              <div>{a.detail}</div>
-            </li>
-          ))}
-          {!activity.length ? <li className="text-[#5b6b7c]">No actions yet.</li> : null}
-        </ul>
-      </Section>
-
-      <div className="sticky bottom-4 mt-6 flex items-center gap-3">
-        <button className="rounded bg-[#1a73e8] px-4 py-2 text-sm font-medium text-white" onClick={save}>
-          Save settings
-        </button>
-        {saved ? <span className="text-sm text-green-700">Saved</span> : null}
-      </div>
-
-      <style>{`
-        .field { width: 100%; border: 1px solid #d3dae2; border-radius: 6px; padding: 8px 10px; font: inherit; background: #fff; }
-      `}</style>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button className="rounded border border-[#dadce0] px-2 py-1 text-xs" onClick={() => chrome.runtime.sendMessage({ type: 'INDEX_INBOX', mode: '30d' })}>Index older messages</button>
+            <button className="rounded border border-[#dadce0] px-2 py-1 text-xs" onClick={() => chrome.runtime.sendMessage({ type: 'PAUSE_INDEX' })}>Pause</button>
+            <button className="rounded border border-[#dadce0] px-2 py-1 text-xs" onClick={() => chrome.runtime.sendMessage({ type: 'CLEAR_INDEX' })}>Clear local mail index</button>
+            <button className="rounded border border-[#dadce0] px-2 py-1 text-xs" onClick={() => chrome.runtime.sendMessage({ type: 'RUN_DIAGNOSTICS' }, (next) => setDiag(next))}>Run diagnostics</button>
+          </div>
+          {diag ? <pre className="mt-3 overflow-auto rounded bg-[#f6f7f8] p-2 text-[11px]">{JSON.stringify(diag, null, 2)}</pre> : null}
+          <p className="text-xs text-[#5f6368]">ChatGPT web sign-in is experimental and may stop working when ChatGPT’s website changes.</p>
+        </Section>
+      ) : null}
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section(props: { title: string; children: ReactNode }) {
   return (
-    <section className="mb-8 rounded-lg border border-[#d3dae2] bg-white p-5">
-      <h2 className="mb-3 text-base font-semibold">{title}</h2>
-      <div className="space-y-3">{children}</div>
+    <section className="mb-6 border-b border-[#e8eaed] pb-4">
+      <h2 className="mb-2 text-sm font-medium">{props.title}</h2>
+      <div className="space-y-2">{props.children}</div>
     </section>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Toggle(props: { label: string; checked: boolean; onChange: (on: boolean) => void }) {
   return (
-    <label className="block text-sm">
-      <span className="mb-1 block text-[#5b6b7c]">{label}</span>
-      {children}
+    <label className="flex items-center justify-between gap-3 text-sm">
+      <span>{props.label}</span>
+      <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
     </label>
   );
 }
 
-function Toggle({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
+function Field(props: { label: string; children: ReactNode }) {
   return (
-    <label className="flex items-center gap-2 text-sm">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      {label}
+    <label className="block text-xs text-[#5f6368]">
+      {props.label}
+      <div className="mt-1">{props.children}</div>
     </label>
   );
 }

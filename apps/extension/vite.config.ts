@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 
@@ -14,7 +15,7 @@ function keepSingleOnnxWasm(): Plugin {
   };
 }
 
-/** Extension pages reject CORS module loads (`crossorigin`) and absolute `/assets` URLs. */
+/** Extension pages reject CORS module loads (`crossorigin`). */
 function extensionPages(): Plugin {
   return {
     name: 'extension-pages',
@@ -27,11 +28,49 @@ function extensionPages(): Plugin {
   };
 }
 
-export default defineConfig({
+/**
+ * Chrome refuses extension URLs that contain `..`. Nested HTML such as
+ * `src/settings/index.html` otherwise points its module script at
+ * `../../assets/...`, which Chrome replaces with an error page and then
+ * parses as a classic script.
+ */
+function flattenExtensionHtml(): Plugin {
+  return {
+    name: 'flatten-extension-html',
+    apply: 'build',
+    enforce: 'post',
+    async writeBundle(output) {
+      const outDir = output.dir;
+      if (!outDir) return;
+      const pages: Array<[string, string]> = [
+        ['src/settings/index.html', 'settings.html'],
+        ['src/onboarding/index.html', 'onboarding.html'],
+        ['src/popup/index.html', 'popup.html'],
+        ['src/sidepanel/index.html', 'sidepanel.html'],
+      ];
+      for (const [from, to] of pages) {
+        const sourcePath = resolve(outDir, from);
+        let html: string;
+        try {
+          html = await readFile(sourcePath, 'utf8');
+        } catch {
+          continue;
+        }
+        const rootHtml = html.replace(/(src|href)="(?:\.\.\/)+/g, '$1="./');
+        const legacyHtml = html.replace(/(src|href)="(?:\.\.\/)+assets\//g, '$1="/assets/');
+        await writeFile(resolve(outDir, to), rootHtml);
+        await writeFile(sourcePath, legacyHtml);
+      }
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [
     react(),
     extensionPages(),
+    flattenExtensionHtml(),
     keepSingleOnnxWasm(),
     viteStaticCopy({
       targets: [
@@ -69,6 +108,7 @@ export default defineConfig({
         sidepanel: resolve(__dirname, 'src/sidepanel/index.html'),
         popup: resolve(__dirname, 'src/popup/index.html'),
         settings: resolve(__dirname, 'src/settings/index.html'),
+        onboarding: resolve(__dirname, 'src/onboarding/index.html'),
         offscreen: resolve(__dirname, 'offscreen.html'),
       },
       output: {
@@ -94,4 +134,21 @@ export default defineConfig({
       '@gi/tracking': resolve(__dirname, '../../packages/tracking/src'),
     },
   },
-});
+  ...(mode === 'content'
+    ? {
+        build: {
+          outDir: 'dist',
+          emptyOutDir: false,
+          sourcemap: true,
+          rollupOptions: {
+            input: resolve(__dirname, 'src/content/index.ts'),
+            output: {
+              format: 'iife' as const,
+              inlineDynamicImports: true,
+              entryFileNames: 'content.js',
+            },
+          },
+        },
+      }
+    : {}),
+}));

@@ -76,8 +76,8 @@ describe('hybrid retrieval + citations', () => {
       newestIndexedDate: '2026-09-01T00:00:00Z',
       state: 'partial',
     });
-    expect(note).toMatch(/1,842 indexed threads/);
-    expect(note).toMatch(/Coverage:/);
+    expect(note).toMatch(/1,842 locally indexed threads/);
+    expect(note).toMatch(/since/);
   });
 });
 

@@ -6,10 +6,9 @@ import {
   createAIProvider,
   createPromptBackedProvider,
   isChatGptModel,
-  requestChatGptText,
 } from '@gi/ai';
-import { WorkerTabController } from '@gi/gmail';
-import { getMailboxDb, MailboxIngestor, IndexJobRunner } from '@gi/mailbox';
+import { selectGmailTab, WorkerTabController } from '@gi/gmail';
+import { filterSplitThreads, getMailboxDb, IndexJobRunner, MailboxIngestor, type IngestThread, type SplitView } from '@gi/mailbox';
 import {
   AskInboxEngine,
   formatCoverageWarning,
@@ -31,8 +30,8 @@ import {
 import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
 import {
   forceRefreshChatGpt,
-  getChatGptAccess,
   getChatGptPublicStatus,
+  sendChatGptConversation,
   installChatGptLoginListeners,
   logoutChatGpt,
   rememberChatGptError,
@@ -103,16 +102,12 @@ function getAI() {
 }
 
 async function completeChatGpt(model: string, system: string, user: string) {
-  const attempt = async () => {
-    const access = await getChatGptAccess();
-    return requestChatGptText({
-      accessToken: access.accessToken,
-      accountId: access.accountId,
+  const attempt = () =>
+    sendChatGptConversation({
       model,
       instructions: system,
       input: user,
     });
-  };
   try {
     const result = await attempt();
     await rememberChatGptError(null);
@@ -143,34 +138,36 @@ function rebuildAgent(): void {
     queue,
     settings: () => settings,
     archiveViaGmail: async (threadId) => {
-      // Ask content script / worker tab to archive via Gmail UI
-      const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-      const tab = tabs[0];
-      if (!tab?.id) return { success: false, error: 'no gmail tab' };
       try {
-        const res = (await chrome.tabs.sendMessage(tab.id, {
-          type: 'PERFORM_ACTION',
-          action: { kind: 'ARCHIVE_THREAD', threadId },
-        })) as { success?: boolean; error?: string };
-        return { success: Boolean(res?.success), error: res?.error };
-      } catch (e) {
-        return { success: false, error: String(e) };
+        const res = (await workerTabs.runExclusive((tabId) =>
+          sendToTab(tabId, {
+            type: 'PERFORM_ACTION',
+            context: 'background',
+            action: { kind: 'ARCHIVE_THREAD', threadId },
+          }),
+        )) as { success?: boolean; verified?: boolean; error?: string; reason?: string };
+        const verified = Boolean(res?.success && res.verified);
+        return { success: verified, error: verified ? undefined : res?.reason || res?.error || 'Archive was not confirmed' };
+      } catch (error) {
+        return { success: false, error: String(error) };
       }
     },
     insertDraftViaGmail: async (threadId, body) => {
-      const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-      const tab = tabs[0];
-      if (!tab?.id) return { success: false, localOnly: true, error: 'no gmail tab' };
       try {
-        const res = (await chrome.tabs.sendMessage(tab.id, {
-          type: 'PERFORM_ACTION',
-          action: { kind: 'CREATE_REPLY_DRAFT', threadId },
-          insertText: body,
-        })) as { success?: boolean; error?: string };
-        if (!res?.success) return { success: false, localOnly: true, error: res?.error };
+        const res = (await workerTabs.runExclusive((tabId) =>
+          sendToTab(tabId, {
+            type: 'PERFORM_ACTION',
+            context: 'background',
+            action: { kind: 'CREATE_REPLY_DRAFT', threadId },
+            insertText: body,
+          }),
+        )) as { success?: boolean; verified?: boolean; error?: string; reason?: string };
+        if (!res?.success || res.verified === false) {
+          return { success: false, localOnly: true, error: res?.reason || res?.error || 'Draft was not confirmed' };
+        }
         return { success: true };
-      } catch (e) {
-        return { success: false, localOnly: true, error: String(e) };
+      } catch (error) {
+        return { success: false, localOnly: true, error: String(error) };
       }
     },
     log: async (entry) => {
@@ -187,6 +184,9 @@ function rebuildAgent(): void {
         expiresAt: entry.expiresAt,
       });
       return id;
+    },
+    onIntel: (threadId, kind) => {
+      void publishIntel(threadId, kind);
     },
   });
 }
@@ -205,6 +205,7 @@ async function rebuildSearchIndex(): Promise<void> {
       labels: d.labels,
       timestamp: d.timestamp,
       fingerprint: d.fingerprint,
+      quality: d.quality,
     });
   }
 }
@@ -280,22 +281,126 @@ async function handleAskInbox(query: string) {
   return engine.ask(query);
 }
 
+type GmailRuntimeReport = {
+  connected?: boolean;
+  integration?: string;
+  inboxSdk?: string;
+  domFallback?: string;
+  lastEvent?: { type: string; at: number } | null;
+  currentThreadId?: string | null;
+  lastAction?: { success: boolean; action: string; reason?: string; at: number } | null;
+};
+
 async function runDiagnostics() {
   const coverage = await ingestor.getCoverage();
+  const stored = await chrome.storage.session.get('gmailRuntime');
+  const runtime = (stored.gmailRuntime || null) as GmailRuntimeReport | null;
+  let indexedThreads = 0;
+  let mailboxDb: 'healthy' | 'error' = 'healthy';
+  try {
+    indexedThreads = await db.threads.count();
+  } catch {
+    mailboxDb = 'error';
+  }
+  let tracking: 'not_configured' | 'healthy' | 'unreachable' = 'not_configured';
+  if (settings.trackerBaseUrl && settings.personalApiToken) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      const res = await fetch(`${settings.trackerBaseUrl.replace(/\/$/, '')}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      tracking = res.ok ? 'healthy' : 'unreachable';
+    } catch {
+      tracking = 'unreachable';
+    }
+  }
+  const aiStatus = settings.aiMode === 'disabled' ? 'disabled' : getAI() ? 'ready' : 'error';
+  let workerTab: 'ready' | 'inactive' | 'unavailable' = 'inactive';
+  const workerId = workerTabs.getTabId();
+  if (workerId != null) {
+    try {
+      const tab = await chrome.tabs.get(workerId);
+      workerTab = tab.url?.includes('mail.google.com') ? 'ready' : 'unavailable';
+    } catch {
+      workerTab = 'unavailable';
+    }
+  }
   return {
-    inboxSdk: 'check content script',
-    gmailJsCapture: 'check content script',
-    domAdapter: true,
-    workerTab: workerTabs.getTabId() != null,
-    indexedDb: true,
-    aiProvider: settings.aiMode === 'disabled' ? 'disabled' : settings.aiProvider,
-    chatgpt: await getChatGptPublicStatus(),
-    trackingBackend: Boolean(settings.trackerBaseUrl && settings.personalApiToken),
-    lastGmailEvent: null as string | null,
+    gmailTab: runtime?.connected ? 'connected' : 'unavailable',
+    integration: runtime?.integration || 'unavailable',
+    inboxSdk: runtime?.inboxSdk || 'failed',
+    domFallback: runtime?.domFallback || 'unknown',
+    lastGmailEvent: runtime?.lastEvent || null,
+    mailboxDb,
+    indexedThreads,
+    currentThreadId: runtime?.currentThreadId || null,
+    ai: { provider: settings.aiProvider, mode: settings.aiMode, status: aiStatus },
+    tracking,
+    workerTab,
+    lastAction: runtime?.lastAction || null,
     lastClassifierRun: agent?.getLastClassifierRun() ?? null,
     coverage: formatCoverageWarning(coverage),
     usageToday: queue.usageToday,
   };
+}
+
+async function publishIntel(threadId: string, kind: string): Promise<void> {
+  await chrome.storage.session.set({ intelPulse: { threadId, kind, at: Date.now() } });
+  const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
+  await Promise.all(
+    tabs.map((tab) =>
+      tab.id == null
+        ? undefined
+        : chrome.tabs.sendMessage(tab.id, { type: 'THREAD_INTELLIGENCE_UPDATED', threadId, kind }).catch(() => undefined),
+    ),
+  );
+}
+
+async function sendToTab(tabId: number, message: unknown, attempts = 8): Promise<unknown> {
+  let last = 'Gmail tab did not respond';
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+  return { success: false, verified: false, reason: last };
+}
+
+async function openSidePanel(mode: 'inbox' | 'ask', splitCategory?: string): Promise<void> {
+  const stored = await chrome.storage.session.get('panelState');
+  const current = (stored.panelState || {}) as { mode?: string; splitCategory?: string };
+  await chrome.storage.session.set({
+    panelState: {
+      mode,
+      splitCategory: splitCategory || current.splitCategory || 'RESPOND',
+    },
+  });
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.windowId != null) await chrome.sidePanel.open({ windowId: tab.windowId });
+}
+
+async function classifyIngested(thread: IngestThread, fingerprint: string, quality: IngestThread['quality'], direction: string): Promise<void> {
+  if (!agent) return;
+  const latest = thread.messages?.[thread.messages.length - 1];
+  if (direction === 'inbound') await agent.resolveReminderOnInbound(thread.threadId);
+  await agent.onNewMessage({
+    threadId: thread.threadId,
+    fingerprint,
+    subject: thread.subject,
+    snippet: thread.snippet || '',
+    bodyText: latest?.bodyText || '',
+    latestSenderEmail: latest?.sender?.email || thread.latestSender?.email || 'unknown',
+    direction: direction === 'outbound' ? 'outbound' : 'inbound',
+    quality: quality || 'ROW_STUB',
+    messages: (thread.messages || []).map((message) => ({
+      sender: message.sender.email,
+      bodyText: message.bodyText,
+      timestamp: message.timestamp || '',
+    })),
+  });
 }
 
 async function pollTracking(): Promise<void> {
@@ -373,7 +478,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await loadSettings();
   rebuildAgent();
   if (details.reason === 'install') {
-    await chrome.runtime.openOptionsPage();
+    const stored = await chrome.storage.local.get('onboardingComplete');
+    if (!stored.onboardingComplete) {
+      await chrome.tabs.create({ url: chrome.runtime.getURL('onboarding.html') });
+    }
   }
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
   chrome.alarms.create('tracking_poll', { periodInMinutes: 0.5 });
@@ -409,31 +517,109 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const parsed = RuntimeMessageSchema.safeParse(message);
     if (!parsed.success) {
       // Allow internal content-script messages
-      if (message?.type === 'INGEST_THREAD') {
-        const result = await ingestor.ingestThread(message.thread);
-        if (result.changed && agent) {
-          const t = message.thread;
-          const latest = t.messages?.[t.messages.length - 1];
-          const direction = message.direction || 'inbound';
-          if (direction === 'inbound') {
-            await agent.resolveReminderOnInbound(t.threadId);
-          }
-          await agent.onNewMessage({
-            threadId: t.threadId,
-            fingerprint: result.fingerprint,
-            subject: t.subject,
-            snippet: t.snippet || '',
-            bodyText: latest?.bodyText || t.snippet || '',
-            latestSenderEmail: latest?.sender?.email || t.latestSender?.email || 'unknown',
-            direction,
-            messages: (t.messages || []).map((m: { sender: { email: string }; bodyText: string; timestamp: string }) => ({
-              sender: m.sender.email,
-              bodyText: m.bodyText,
-              timestamp: m.timestamp,
-            })),
+      if (message?.type === 'INGEST_THREAD' || message?.type === 'INGEST_THREADS') {
+        const threads = (message.type === 'INGEST_THREADS' ? message.threads : [message.thread]) as IngestThread[];
+        const direction = message.direction || 'inbound';
+        const results = [];
+        for (const thread of threads || []) {
+          if (!thread?.threadId) continue;
+          const result = await ingestor.ingestThread(thread);
+          results.push(result);
+          if (result.changed) await classifyIngested(thread, result.fingerprint, result.quality, direction);
+        }
+        sendResponse({ ok: true, results });
+        return;
+      }
+      if (message?.type === 'REPORT_RUNTIME') {
+        await chrome.storage.session.set({ gmailRuntime: message.runtime });
+        sendResponse({ ok: true });
+        return;
+      }
+      if (message?.type === 'LIST_SPLIT') {
+        const category = String(message.category || 'RESPOND') as SplitView;
+        const threads = await db.threads.toArray();
+        const followUps =
+          category === 'FOLLOW_UPS'
+            ? (await db.reminders.where('status').equals('pending').toArray()).map((row) => row.threadId)
+            : [];
+        const matched = filterSplitThreads(threads, category, followUps);
+        const rows = [];
+        for (const thread of matched) {
+          const summary = await db.thread_summaries.get(thread.threadId);
+          rows.push({
+            threadId: thread.threadId,
+            subject: thread.subject,
+            sender: thread.latestSender?.name || thread.latestSender?.email || 'Unknown',
+            snippet: summary?.summary.oneLine || thread.snippet,
+            timestamp: thread.latestTimestamp,
+            priority: thread.priority,
+            manual: Boolean(thread.manualCategory),
+            category: thread.classification,
           });
         }
-        sendResponse({ ok: true, ...result });
+        rows.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+        sendResponse({ threads: rows, count: rows.length });
+        return;
+      }
+      if (message?.type === 'SET_CATEGORY') {
+        const threadId = String(message.threadId || '');
+        const category = String(message.category || '');
+        if (!threadId || !['RESPOND', 'WAITING', 'FYI'].includes(category)) {
+          sendResponse({ ok: false, reason: 'Choose Respond, Waiting, or FYI.' });
+          return;
+        }
+        await db.thread_overrides.put({
+          threadId,
+          category: category as 'RESPOND' | 'WAITING' | 'FYI',
+          createdAt: Date.now(),
+        });
+        const thread = await db.threads.get(threadId);
+        await db.thread_classifications.put({
+          threadId,
+          category: category as 'RESPOND' | 'WAITING' | 'FYI',
+          confidence: 1,
+          priority: thread?.priority || 'NORMAL',
+          needsReply: category === 'RESPOND',
+          waitingOnReply: category === 'WAITING',
+          archiveRecommendation: false,
+          reason: 'You set this category',
+          source: 'override',
+          fingerprint: thread?.contentFingerprint || 'manual',
+          createdAt: Date.now(),
+        });
+        if (thread) {
+          await db.threads.update(threadId, {
+            classification: category as 'RESPOND' | 'WAITING' | 'FYI',
+            manualCategory: category as 'RESPOND' | 'WAITING' | 'FYI',
+            requiresResponse: category === 'RESPOND',
+            awaitingResponse: category === 'WAITING',
+            virtualLabels: [category],
+          });
+        }
+        await publishIntel(threadId, 'THREAD_CLASSIFIED');
+        sendResponse({ ok: true, category });
+        return;
+      }
+      if (message?.type === 'SUMMARIZE_THREAD' || message?.type === 'DRAFT_REPLY') {
+        const threadId = String(message.threadId || '');
+        const thread = threadId ? await db.threads.get(threadId) : null;
+        const messages = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
+        if (!thread || !agent) {
+          sendResponse({ ok: false, reason: 'Open the thread first.' });
+          return;
+        }
+        const input = {
+          threadId,
+          fingerprint: thread.contentFingerprint,
+          subject: thread.subject,
+          messages: messages.map((row) => ({
+            sender: row.sender.email,
+            bodyText: row.bodyText,
+            timestamp: row.timestamp,
+          })),
+        };
+        const result = message.type === 'SUMMARIZE_THREAD' ? await agent.requestSummary(input) : await agent.requestDraft(input);
+        sendResponse(result);
         return;
       }
       if (message?.type === 'OUTGOING_COMPOSE') {
@@ -545,51 +731,50 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           status: 'pending',
           reason: 'Manual remind',
         });
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, dueAt: due });
         return;
       }
       if (message?.type === 'FOCUS_SIDEPANEL') {
         try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tab?.windowId != null) {
-            await chrome.sidePanel.open({ windowId: tab.windowId });
-          }
+          await openSidePanel(message.mode === 'inbox' ? 'inbox' : 'ask', message.category);
           sendResponse({ ok: true });
-        } catch (e) {
-          sendResponse({ ok: false, error: String(e) });
+        } catch (error) {
+          sendResponse({ ok: false, reason: String(error) });
         }
         return;
       }
       if (message?.type === 'OPEN_SPLIT') {
-        await chrome.storage.session.set({ splitCategory: message.category || null });
         try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tab?.windowId != null) {
-            await chrome.sidePanel.open({ windowId: tab.windowId });
-          }
-        } catch {
-          /* side panel may need user gesture */
+          await openSidePanel('inbox', String(message.category || 'RESPOND'));
+          sendResponse({ ok: true, category: message.category });
+        } catch (error) {
+          sendResponse({ ok: false, reason: String(error) });
         }
-        sendResponse({ ok: true });
         return;
       }
       if (message?.type === 'COMMAND') {
         const id = String(message.id || '');
-        if (id === 'ask' || id === 'summarize') {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tab?.windowId != null) {
-            await chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => undefined);
-          }
+        const known = ['ask', 'summarize', 'draft', 'remind', 'archive', 'settings', 'mark_respond', 'mark_waiting', 'mark_fyi'];
+        if (!known.includes(id)) {
+          sendResponse({ ok: false, reason: 'That command is not available.' });
+          return;
         }
-        sendResponse({ ok: true, id });
+        sendResponse({ ok: false, reason: 'Run this command from Gmail.' });
         return;
       }
-      if (message?.type === 'GET_THREAD_INTEL') {
-        const threadId = message.threadId as string;
-        const classification = await db.thread_classifications.get(threadId);
-        const summary = await db.thread_summaries.get(threadId);
-        const draft = await db.draft_suggestions.where('threadId').equals(threadId).first();
-        sendResponse({ classification, summary, draft });
+      if (message?.type === 'GET_THREAD_INTEL' || message?.type === 'GET_THREAD_INTEL_MANY') {
+        const ids = (message.type === 'GET_THREAD_INTEL_MANY' ? message.threadIds : [message.threadId]) as string[];
+        const intel: Record<string, unknown> = {};
+        for (const threadId of (ids || []).filter((id) => typeof id === 'string').slice(0, 40)) {
+          const [classification, summary, draft, override] = await Promise.all([
+            db.thread_classifications.get(threadId),
+            db.thread_summaries.get(threadId),
+            db.draft_suggestions.where('threadId').equals(threadId).first(),
+            db.thread_overrides.get(threadId),
+          ]);
+          intel[threadId] = { classification, summary, draft, manual: Boolean(override) };
+        }
+        sendResponse(message.type === 'GET_THREAD_INTEL_MANY' ? { intel } : intel[ids[0]] || {});
         return;
       }
       if (message?.type === 'ENSURE_WORKER_TAB') {
@@ -654,35 +839,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse(await handleAskInbox(msg.query));
         break;
       case 'INDEX_INBOX': {
+        const workerId = await workerTabs.ensureTab({ active: false, pinned: true });
         indexRunner = new IndexJobRunner(ingestor, async (query, cursor) => {
-          const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-          const tab = tabs[0];
-          if (!tab?.id) return { threads: [], error: 'Open Gmail to index' };
-          try {
-            const res = (await chrome.tabs.sendMessage(tab.id, {
-              type: 'INDEX_FETCH_BATCH',
-              query,
-              cursor,
-            })) as {
-              threads?: unknown[];
-              nextCursor?: string;
-              error?: string;
-              captchaOrBlock?: boolean;
-            };
-            return {
-              threads: (res.threads || []) as import('@gi/mailbox').IngestThread[],
-              nextCursor: res.nextCursor,
-              error: res.error,
-              captchaOrBlock: res.captchaOrBlock,
-            };
-          } catch (e) {
-            return { threads: [], error: String(e) };
-          }
+          const res = (await sendToTab(workerId, {
+            type: 'INDEX_FETCH_BATCH',
+            query,
+            cursor,
+          })) as {
+            threads?: IngestThread[];
+            nextCursor?: string;
+            error?: string;
+            captchaOrBlock?: boolean;
+          };
+          return {
+            threads: res.threads || [],
+            nextCursor: res.nextCursor,
+            error: res.error,
+            captchaOrBlock: res.captchaOrBlock,
+          };
         });
         const cp = await indexRunner.run({
           mode: msg.mode,
           customQuery: msg.customQuery,
         });
+        for (const threadId of (cp.processedThreadIds || []).slice(0, 8)) {
+          const row = await db.threads.get(threadId);
+          if (row?.quality === 'THREAD_COMPLETE') continue;
+          const hydrated = (await sendToTab(workerId, {
+            type: 'HYDRATE_THREAD',
+            threadId,
+            restore: true,
+          })) as { thread?: IngestThread };
+          if (!hydrated.thread) continue;
+          const result = await ingestor.ingestThread(hydrated.thread);
+          if (result.changed) await classifyIngested(hydrated.thread, result.fingerprint, result.quality, 'inbound');
+        }
         await rebuildSearchIndex();
         sendResponse({ checkpoint: cp });
         break;
@@ -717,21 +908,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
         if (action.type === 'archive' && action.threadId) {
-          // Best-effort: open thread in All Mail via Gmail UI search (not a Gmail API call)
-          const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-          if (tabs[0]?.id) {
-            await chrome.tabs
-              .sendMessage(tabs[0].id, {
-                type: 'PERFORM_ACTION',
-                action: {
-                  kind: 'NAVIGATE_SEARCH',
-                  query: `in:anywhere`,
-                },
-                thenOpenThreadId: action.threadId,
-              })
-              .catch(() => undefined);
-          }
-          await db.threads.update(action.threadId, { archivedLocally: false });
+          const threadId = action.threadId;
+          await workerTabs.runExclusive((tabId) =>
+            sendToTab(tabId, {
+              type: 'PERFORM_ACTION',
+              context: 'background',
+              action: { kind: 'NAVIGATE_SEARCH', query: 'in:anywhere' },
+              thenOpenThreadId: threadId,
+            }),
+          );
+          await db.threads.update(threadId, { archivedLocally: false });
         }
         await db.agent_actions.update(msg.actionId, { undone: true });
         sendResponse({ ok: true });
@@ -782,13 +968,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case 'ENQUEUE_ACTION': {
-        const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-        if (!tabs[0]?.id) {
-          sendResponse({ error: 'no gmail tab' });
+        const background = Boolean((msg.args as { background?: boolean } | undefined)?.background);
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const gmailTabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
+        const workerTabId = background ? await workerTabs.ensureTab({ active: false, pinned: true }) : workerTabs.getTabId();
+        const selected = selectGmailTab({
+          mode: background ? 'background' : 'foreground',
+          activeTab: active,
+          workerTabId,
+          gmailTabs,
+        });
+        if (selected.tabId == null) {
+          sendResponse({ success: false, verified: false, reason: selected.reason || 'No Gmail tab' });
           break;
         }
-        const res = await chrome.tabs.sendMessage(tabs[0].id, {
+        const res = await sendToTab(selected.tabId, {
           type: 'PERFORM_ACTION',
+          context: background ? 'background' : 'foreground',
           action: { kind: msg.action, ...(msg.args || {}) },
         });
         sendResponse(res);

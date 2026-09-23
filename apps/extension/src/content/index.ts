@@ -1,287 +1,310 @@
-import {
-  BridgeMessageSchema,
-  type ExtensionSettings,
-  DEFAULT_SETTINGS,
-} from '@gi/shared';
+import { createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import type { ExtensionSettings } from '@gi/shared';
+import { DEFAULT_SETTINGS } from '@gi/shared';
 import {
   CompositeGmailAdapter,
-  validateGmailJsBridgePayload,
+  findNotice,
+  findThreadRows,
+  normalizeOpenedThread,
+  normalizeVisibleRow,
+  selectorDiagnostics,
+  verifyArchive,
+  verifyDraftInserted,
+  verifyNavigation,
+  type InboxSdkLike,
   type QueuedGmailAction,
 } from '@gi/gmail';
-import type { InboxSdkLike } from '@gi/gmail';
 import type { CreateTrackedEmailInput, CreateTrackedEmailResult, TrackedEmailSummary } from '@gi/tracking';
-import { attachSdkComposeTracking, installDomComposeTracking } from './compose-tracking';
+import { applyCategoryChip, rowsForThread } from './chips';
+import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
+import { attachSdkComposeTracking, installDomComposeTracking, prepareDomCompose } from './compose-tracking';
 import { installSentStatus, type SentStatusController } from './sent-status';
+import { ThreadIntelCard, type ThreadIntelData } from './thread-panel';
+import { showToast } from './toasts';
 
-const BRIDGE_SOURCE = 'gi-main-world';
 const adapter = new CompositeGmailAdapter();
 let settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 let sdkReady = false;
 let sdkOwnsCompose = false;
 let sentStatus: SentStatusController | null = null;
+let booted = false;
+let paletteBound = false;
+const panelRoots = new Map<HTMLElement, Root>();
+let currentThreadId: string | null = null;
 
 async function refreshSettings(): Promise<void> {
   try {
-    const res = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })) as {
-      settings?: ExtensionSettings;
-    };
+    const res = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })) as { settings?: ExtensionSettings };
     if (res?.settings) settings = res.settings;
   } catch {
-    /* ignore */
+    /* settings stay at the last known value */
   }
 }
 
-function injectMainWorld(): void {
-  const s = document.createElement('script');
-  s.src = chrome.runtime.getURL('main-world.js');
-  s.async = false;
-  (document.documentElement || document.head).appendChild(s);
-  s.onload = () => s.remove();
-}
-
-async function loadInboxSdk(): Promise<void> {
+async function tryLoadInboxSdk(): Promise<InboxSdkLike | null> {
+  const appId = settings.inboxSdkAppId.trim();
+  if (!appId) return null;
   try {
-    // Inject pageWorld for MV3
     await chrome.runtime.sendMessage({ type: 'ENSURE_INBOXSDK_PAGEWORLD' }).catch(() => undefined);
     const mod = await import('@inboxsdk/core');
-    const InboxSDK = (mod as { InboxSDK?: { load: typeof mod.load }; load: typeof mod.load }).InboxSDK
-      || mod;
-    const appId = settings.inboxSdkAppId || 'gi-local-dev';
-    const sdk = (await InboxSDK.load(2, appId, {
-      appName: 'Gmail Intelligence',
-    })) as unknown as InboxSdkLike;
-    adapter.bindInboxSdk(sdk);
-    sdkReady = true;
-    setupSdkUi(sdk);
-  } catch (err) {
-    console.warn('[gi] InboxSDK unavailable, using DOM fallback', err);
-    sdkReady = false;
+    const loader = (mod as { load?: (version: number, appId: string, opts?: { appName?: string }) => Promise<unknown> }).load;
+    if (!loader) return null;
+    return (await loader(2, appId, { appName: 'Gmail Intelligence' })) as InboxSdkLike;
+  } catch (error) {
+    console.warn('[gi] InboxSDK failed to load', error);
+    return null;
   }
 }
 
-function setupSdkUi(sdk: InboxSdkLike): void {
+function reportRuntime(lastAction?: { success: boolean; action: string; reason?: string }): void {
+  const diagnostics = selectorDiagnostics(document);
+  const integration = adapter.getActiveIntegration();
+  const rowsOk = diagnostics.find((item) => item.key === 'threadRow')?.found;
+  const threadOk = diagnostics.find((item) => item.key === 'openThread')?.found;
+  const onList = /#(inbox|search|sent|starred)/i.test(location.hash);
+  chrome.runtime.sendMessage({
+    type: 'REPORT_RUNTIME',
+    runtime: {
+      connected: true,
+      integration: integration || 'unavailable',
+      inboxSdk: sdkReady ? 'loaded' : 'failed',
+      domFallback: !onList || rowsOk || threadOk ? 'healthy' : 'selector issue',
+      lastEvent: adapter.bus.getLastEvent()
+        ? { type: adapter.bus.getLastEvent()!.type, at: adapter.bus.getLastEvent()!.at }
+        : null,
+      currentThreadId,
+      lastAction: lastAction ? { ...lastAction, at: Date.now() } : undefined,
+    },
+  }).catch(() => undefined);
+}
+
+async function boot(): Promise<void> {
+  if (booted) return;
+  booted = true;
+  await refreshSettings();
+  const sdk = await tryLoadInboxSdk();
+  if (sdk) {
+    const bound = adapter.bindInboxSdk(sdk);
+    sdkReady = bound;
+    if (bound) mountSdkUi(sdk);
+  }
+  await adapter.start((event) => {
+    if (event.type === 'VISIBLE_ROWS_CHANGED') {
+      const threads = event.rows.map((row) => normalizeVisibleRow(row, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom'));
+      if (threads.length) {
+        chrome.runtime.sendMessage({ type: 'INGEST_THREADS', direction: 'inbound', threads });
+        void paintVisibleChips(threads.map((thread) => thread.threadId));
+      }
+    }
+    if (event.type === 'THREAD_OPENED' || event.type === 'THREAD_DATA_UPDATED') {
+      currentThreadId = event.thread.threadId;
+      const thread = normalizeOpenedThread(event.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
+      chrome.runtime.sendMessage({ type: 'INGEST_THREAD', direction: 'inbound', thread });
+      if (!sdkReady) showDomThreadPanel(event.thread.threadId);
+    }
+    if (event.type === 'COMPOSE_OPENED') {
+      const compose = document.querySelector<HTMLElement>(`[data-gi-compose-id="${CSS.escape(event.compose.composeId)}"]`);
+      if (compose && !sdkOwnsCompose) prepareDomCompose(compose, trackingDeps());
+    }
+    if (event.type === 'ROUTE_CHANGED' && !/#\/[A-Za-z0-9]/.test(location.hash)) {
+      currentThreadId = null;
+      hideDomThreadPanel();
+    }
+    reportRuntime();
+  });
+  sentStatus = installSentStatus({
+    trackerBaseUrl: settings.trackerBaseUrl,
+    onNotify: (trackingId, enabled) => {
+      chrome.runtime.sendMessage({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }, (res) => {
+        if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
+      });
+    },
+  });
+  installDomComposeTracking({ ...trackingDeps(), sdkOwnsCompose: () => sdkOwnsCompose });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
+      settings = { ...settings, ...(changes.settings.newValue as ExtensionSettings) };
+      sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+    }
+    if (area === 'local' && Array.isArray(changes.trackedEmails?.newValue)) {
+      sentStatus?.setEmails(changes.trackedEmails.newValue as TrackedEmailSummary[]);
+    }
+    if (area === 'session' && changes.intelPulse?.newValue?.threadId) {
+      const threadId = String(changes.intelPulse.newValue.threadId);
+      void refreshThread(threadId);
+    }
+  });
+  chrome.runtime.sendMessage({ type: 'GET_TRACKED_EMAILS' }, (res) => {
+    if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
+  });
+  setupCommandPalette();
+  reportRuntime();
+}
+
+function trackingDeps() {
+  return {
+    getSettings: () => settings,
+    refreshSettings,
+    createTracked,
+    linkTracked,
+    onSent: ({ subject, recipients, bodyText }: { subject: string; recipients: string[]; bodyText: string }) => {
+      chrome.runtime.sendMessage({ type: 'OUTGOING_COMPOSE', subject, recipients, bodyText, threadId: currentThreadId || 'sent' });
+    },
+  };
+}
+
+function mountSdkUi(sdk: InboxSdkLike): void {
   try {
     sdk.Lists.registerThreadRowViewHandler(async (rowView) => {
-      const threadId =
-        (typeof rowView.getThreadID === 'function' && rowView.getThreadID()) ||
-        (typeof rowView.getThreadIDAsync === 'function'
-          ? await rowView.getThreadIDAsync()
-          : null);
+      const threadId = typeof rowView.getThreadIDAsync === 'function' ? await rowView.getThreadIDAsync() : rowView.getThreadID?.();
       const rowElement = typeof rowView.getElement === 'function' ? rowView.getElement() : null;
-      const threadRow =
-        rowElement?.closest?.('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]') || rowElement;
-      if (threadRow && typeof threadId === 'string') {
+      const threadRow = rowElement?.closest?.('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]') || rowElement;
+      if (threadRow instanceof HTMLElement && typeof threadId === 'string') {
         threadRow.setAttribute('data-gi-thread-id', threadId);
         sentStatus?.paint();
       }
-      if (!threadId || typeof threadId !== 'string') return;
-      chrome.runtime.sendMessage(
-        { type: 'GET_THREAD_INTEL', threadId },
-        (intel: { classification?: { category?: string } } | undefined) => {
-          const cat = intel?.classification?.category;
-          if (cat && rowView.addLabel) {
-            const colors = categoryColors(cat);
-            rowView.addLabel({
-              title: cat,
-              foregroundColor: colors.fg,
-              backgroundColor: colors.bg,
-            });
-          }
-        },
-      );
     });
   } catch {
-    /* degrade */
+    /* row stamps are optional */
   }
-
   try {
     sdk.Conversations.registerThreadViewHandler((threadView) => {
-      mountThreadSidebar(threadView);
+      void mountSdkSidebar(threadView);
     });
   } catch {
-    /* degrade */
+    /* sidebar is optional */
   }
-
   try {
     sdk.Compose.registerComposeViewHandler((composeView) => {
-      addWriteWithAiButton(composeView);
-      attachSdkComposeTracking(composeView, {
-        getSettings: () => settings,
-        refreshSettings,
-        createTracked,
-        linkTracked,
-        onSent: ({ subject, recipients, bodyText }) => {
-          chrome.runtime.sendMessage({
-            type: 'OUTGOING_COMPOSE',
-            subject,
-            recipients,
-            bodyText,
-            threadId: 'sent',
-          });
-        },
-      });
+      attachSdkComposeTracking(composeView, trackingDeps());
     });
     sdkOwnsCompose = true;
   } catch {
-    /* degrade */
+    sdkOwnsCompose = false;
   }
-
   try {
-    if (sdk.NavMenu?.addNavItem) {
-      const splits = [
-        'Priority',
-        'Respond',
-        'Waiting',
-        'FYI',
-        'Notifications',
-        'Promotions',
-        'News',
-        'Follow-ups',
-      ];
-      for (const name of splits) {
-        sdk.NavMenu.addNavItem({
-          name,
-          routeID: `gi/${name.toLowerCase()}`,
-          onClick: () => {
-            void openSplit(name);
-          },
-        });
-      }
+    const splits: Array<[string, string]> = [
+      ['Priority', 'PRIORITY'],
+      ['Respond', 'RESPOND'],
+      ['Waiting', 'WAITING'],
+      ['FYI', 'FYI'],
+      ['Notifications', 'NOTIFICATIONS'],
+      ['Promotions', 'PROMOTIONS'],
+      ['News', 'NEWS'],
+      ['Follow-ups', 'FOLLOW_UPS'],
+    ];
+    for (const [name, category] of splits) {
+      sdk.NavMenu?.addNavItem({
+        name,
+        routeID: `gi/${category.toLowerCase()}`,
+        onClick: () => {
+          chrome.runtime.sendMessage({ type: 'OPEN_SPLIT', category });
+        },
+      });
     }
   } catch {
-    /* degrade */
+    /* nav is optional */
   }
 }
 
-function categoryColors(cat: string): { fg: string; bg: string } {
-  switch (cat) {
-    case 'RESPOND':
-      return { fg: '#8b1a1a', bg: '#fce8e6' };
-    case 'WAITING':
-      return { fg: '#8a6116', bg: '#fef7e0' };
-    case 'FYI':
-      return { fg: '#174ea6', bg: '#e8f0fe' };
-    case 'NOTIFICATIONS':
-      return { fg: '#3c4043', bg: '#f1f3f4' };
-    case 'PROMOTIONS':
-      return { fg: '#137333', bg: '#e6f4ea' };
-    case 'NEWS':
-      return { fg: '#5e35b1', bg: '#f3e8fd' };
-    default:
-      return { fg: '#3c4043', bg: '#f1f3f4' };
-  }
-}
-
-async function openSplit(name: string): Promise<void> {
-  const map: Record<string, string> = {
-    Respond: 'RESPOND',
-    Waiting: 'WAITING',
-    FYI: 'FYI',
-    Notifications: 'NOTIFICATIONS',
-    Promotions: 'PROMOTIONS',
-    News: 'NEWS',
-    'Follow-ups': 'WAITING',
-    Priority: 'RESPOND',
-  };
-  const category = map[name];
-  // Navigate using Gmail search of locally known threads is imperfect;
-  // open side panel filtered view as primary UX.
-  chrome.runtime.sendMessage({ type: 'OPEN_SPLIT', category }).catch(() => undefined);
-  await adapter.navigateToSearch(category === 'WAITING' ? 'is:sent' : 'in:inbox');
-}
-
-function mountThreadSidebar(threadView: {
-  getThreadID?: () => string;
-  addSidebarContentPanel?: (desc: unknown) => { remove?: () => void };
-}): void {
-  const threadId = threadView.getThreadID?.();
+async function mountSdkSidebar(threadView: {
+  getThreadID?: () => string | null | undefined | Promise<string | null | undefined>;
+  getThreadIDAsync?: () => string | Promise<string | null | undefined>;
+  addSidebarContentPanel?: (desc: unknown) => void;
+}): Promise<void> {
+  const raw = threadView.getThreadIDAsync ? await threadView.getThreadIDAsync() : await threadView.getThreadID?.();
+  const threadId = typeof raw === 'string' ? raw : '';
   if (!threadId || !threadView.addSidebarContentPanel) return;
-  if (document.querySelector(`[data-gi-ui="thread-sidebar"][data-thread="${threadId}"]`)) {
-    return; // prevent duplicate roots
-  }
   const el = document.createElement('div');
   el.setAttribute('data-gi-ui', 'thread-sidebar');
-  el.setAttribute('data-thread', threadId);
-  el.style.cssText =
-    'font:13px/1.4 "IBM Plex Sans",system-ui,sans-serif;padding:10px 12px;color:#202124;';
-  el.innerHTML = `<div style="font-weight:600;margin-bottom:6px;">Thread intelligence</div><div class="gi-body">Loading…</div>`;
-  try {
-    threadView.addSidebarContentPanel({
-      title: 'GI',
-      iconUrl: chrome.runtime.getURL('icons/icon48.png'),
-      el,
-    });
-  } catch {
-    return;
+  el.style.padding = '8px 4px';
+  threadView.addSidebarContentPanel({
+    title: 'Intelligence',
+    iconUrl: chrome.runtime.getURL('icons/icon48.png'),
+    el,
+  });
+  currentThreadId = threadId;
+  await refreshPanel(el, threadId);
+}
+
+function showDomThreadPanel(threadId: string): void {
+  let panel = document.getElementById('gi-thread-panel');
+  if (!panel) {
+    panel = document.createElement('aside');
+    panel.id = 'gi-thread-panel';
+    panel.setAttribute('data-gi-ui', 'thread-panel');
+    panel.style.cssText = [
+      'position:fixed',
+      'top:64px',
+      'right:16px',
+      'width:280px',
+      'z-index:20',
+      'background:#fff',
+      'border:1px solid #dadce0',
+      'border-radius:8px',
+      'padding:12px',
+    ].join(';');
+    document.documentElement.append(panel);
   }
-  chrome.runtime.sendMessage({ type: 'GET_THREAD_INTEL', threadId }, (intel) => {
-    const body = el.querySelector('.gi-body');
-    if (!body) return;
-    const cat = intel?.classification?.category || '—';
-    const summary = intel?.summary?.summary?.oneLine || 'No summary yet';
-    const needs = intel?.classification?.needsReply ? 'Yes' : 'No';
-    const draft = intel?.draft?.suggestion?.body
-      ? intel.draft.suggestion.body.slice(0, 160) + '…'
-      : 'None';
-    body.innerHTML = `
-      <div><strong>Category:</strong> ${escapeHtml(cat)}</div>
-      <div style="margin-top:4px"><strong>Needs reply:</strong> ${needs}</div>
-      <div style="margin-top:8px;color:#5f6368">${escapeHtml(summary)}</div>
-      <div style="margin-top:8px"><strong>Suggested:</strong> ${escapeHtml(draft)}</div>
-      <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
-        <button data-act="insert" style="padding:4px 8px;border:1px solid #dadce0;border-radius:4px;background:#fff;cursor:pointer">Insert Draft</button>
-        <button data-act="remind" style="padding:4px 8px;border:1px solid #dadce0;border-radius:4px;background:#fff;cursor:pointer">Remind</button>
-        <button data-act="archive" style="padding:4px 8px;border:1px solid #dadce0;border-radius:4px;background:#fff;cursor:pointer">Archive</button>
-        <button data-act="ask" style="padding:4px 8px;border:1px solid #dadce0;border-radius:4px;background:#fff;cursor:pointer">Ask</button>
-      </div>`;
-    body.querySelectorAll('button').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const act = btn.getAttribute('data-act');
-        if (act === 'archive') {
-          void adapter.actions.enqueueArchiveVerified(threadId, async () => {
-            const rows = await adapter.getVisibleThreadMetadata();
-            return Boolean(rows.rows?.some((r) => r.threadId === threadId));
-          });
-        }
-        if (act === 'insert' && intel?.draft?.suggestion?.body) {
-          void adapter.createReplyDraft(threadId).then(() =>
-            adapter.insertComposeBody(intel.draft.suggestion.body),
-          );
-        }
-        if (act === 'ask') {
-          chrome.runtime.sendMessage({ type: 'ASK_ABOUT_THREAD', threadId });
-          void chrome.sidePanel?.open?.({ windowId: undefined as unknown as number }).catch(() => undefined);
-        }
-        if (act === 'remind') {
-          chrome.runtime.sendMessage({ type: 'REMIND_THREAD', threadId });
-        }
-      });
-    });
+  void refreshPanel(panel, threadId);
+}
+
+function hideDomThreadPanel(): void {
+  const panel = document.getElementById('gi-thread-panel');
+  if (!panel) return;
+  panelRoots.get(panel)?.unmount();
+  panelRoots.delete(panel);
+  panel.remove();
+}
+
+async function refreshThread(threadId: string): Promise<void> {
+  for (const row of rowsForThread(threadId)) {
+    const intel = await getIntel(threadId);
+    const category = intel?.classification?.category;
+    if (category) applyCategoryChip(row, category, Boolean(intel?.manual));
+  }
+  const panel = document.getElementById('gi-thread-panel');
+  if (panel && currentThreadId === threadId) await refreshPanel(panel, threadId);
+  document.querySelectorAll<HTMLElement>('[data-gi-ui="thread-sidebar"]').forEach((el) => {
+    if (currentThreadId === threadId) void refreshPanel(el, threadId);
   });
 }
 
-function addWriteWithAiButton(composeView: {
-  addButton?: (desc: unknown) => void;
-  getBodyElement?: () => HTMLElement | null;
-  insertTextIntoBodyAtCursor?: (t: string) => void;
-}): void {
-  composeView.addButton?.({
-    title: 'Write with AI',
-    iconUrl: chrome.runtime.getURL('icons/icon16.png'),
-    onClick: async () => {
-      const body = composeView.getBodyElement?.()?.textContent || '';
-      const res = (await chrome.runtime.sendMessage({
-        type: 'WRITE_WITH_AI',
-        mode: 'improve',
-        text: body,
-      })) as { text?: string; error?: string };
-      if (res?.text) {
-        // Recoverability: keep previous text in data attribute
-        const el = composeView.getBodyElement?.();
-        if (el) el.setAttribute('data-gi-prev', body);
-        composeView.insertTextIntoBodyAtCursor?.(res.text);
-      }
-    },
+async function paintVisibleChips(threadIds: string[]): Promise<void> {
+  const res = (await chrome.runtime.sendMessage({ type: 'GET_THREAD_INTEL_MANY', threadIds })) as {
+    intel?: Record<string, ThreadIntelData>;
+  };
+  const intel = res?.intel || {};
+  for (const threadId of threadIds) {
+    const category = intel[threadId]?.classification?.category;
+    if (!category) continue;
+    for (const row of rowsForThread(threadId)) applyCategoryChip(row, category, Boolean(intel[threadId]?.manual));
+  }
+}
+
+async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
+  const intel = await getIntel(threadId);
+  let root = panelRoots.get(el);
+  if (!root) {
+    root = createRoot(el);
+    panelRoots.set(el, root);
+  }
+  root.render(
+    createElement(ThreadIntelCard, {
+      intel,
+      pending: intel?.summary ? null : 'Reading this thread…',
+      onDraft: () => void draftReply(threadId),
+      onRemind: () => void remind(threadId),
+    }),
+  );
+}
+
+function getIntel(threadId: string): Promise<ThreadIntelData | undefined> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'GET_THREAD_INTEL', threadId }, (intel?: ThreadIntelData) => {
+      resolve(intel);
+    });
   });
 }
 
@@ -289,7 +312,6 @@ function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrackedEma
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: 'CREATE_TRACKED_EMAIL', input }, (res) => {
       if (chrome.runtime.lastError || !res?.ok || !res.tracking_id || !res.pixel_url) {
-        if (res?.error) console.warn('[gi] tracking create failed (send continues)', res.error);
         resolve(null);
         return;
       }
@@ -302,369 +324,274 @@ function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrackedEma
   });
 }
 
-function linkTracked(link: {
-  trackingId: string;
-  gmailThreadId: string | null;
-  gmailMessageId: string | null;
-}): void {
-  chrome.runtime.sendMessage({
-    type: 'LINK_TRACKED_EMAIL',
-    trackingId: link.trackingId,
-    gmailThreadId: link.gmailThreadId,
-    gmailMessageId: link.gmailMessageId,
-  });
+function linkTracked(link: { trackingId: string; gmailThreadId: string | null; gmailMessageId: string | null }): void {
+  chrome.runtime.sendMessage({ type: 'LINK_TRACKED_EMAIL', ...link });
 }
-
-function rememberTrackedList(emails: TrackedEmailSummary[]): void {
-  sentStatus?.setEmails(emails);
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// MAIN world → content script bridge (validate everything)
-window.addEventListener('message', (event) => {
-  if (event.source !== window) return;
-  const data = event.data;
-  const parsed = BridgeMessageSchema.safeParse(data);
-  if (!parsed.success || parsed.data.source !== BRIDGE_SOURCE) return;
-
-  if (parsed.data.type === 'gmailjs_capture') {
-    const v = validateGmailJsBridgePayload(parsed.data.payload);
-    if (v.ok) {
-      adapter.gmailJs.markAvailable(true);
-      adapter.gmailJs.ingestValidatedCapture(v.data);
-    }
-    return;
-  }
-
-  chrome.runtime.sendMessage({
-    type: 'GMAIL_EVENT',
-    event: parsed.data.type,
-    payload: parsed.data.payload,
-  });
-});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void (async () => {
+    if (message?.type === 'THREAD_INTELLIGENCE_UPDATED') {
+      await refreshThread(String(message.threadId || ''));
+      sendResponse({ ok: true });
+      return;
+    }
     if (message?.type === 'PERFORM_ACTION') {
       const action = message.action as QueuedGmailAction;
-      // Archives use open → archive → verify gone; other actions wait for structured result
-      const result =
-        action.kind === 'ARCHIVE_THREAD'
-          ? await adapter.actions.enqueueArchiveVerifiedAndWait(action.threadId, async () => {
-              const rows = await adapter.getVisibleThreadMetadata();
-              return Boolean(rows.rows?.some((r) => r.threadId === action.threadId));
-            })
-          : await adapter.actions.enqueueAndWait(action);
-      if (message.insertText && action.kind === 'CREATE_REPLY_DRAFT' && result.success) {
-        await new Promise((r) => setTimeout(r, 800));
-        const inserted = await adapter.insertComposeBody(message.insertText);
-        sendResponse({
-          success: inserted.success,
-          actionId: result.actionId,
-          error: inserted.error,
-          verified: result.verified,
-        });
-        return;
-      }
-      if (message.thenOpenThreadId && result.success) {
-        await new Promise((r) => setTimeout(r, 600));
-        const opened = await adapter.openThread(String(message.thenOpenThreadId));
-        sendResponse({
-          success: opened.success,
-          actionId: result.actionId,
-          error: opened.error,
-        });
-        return;
-      }
-      sendResponse({
-        success: result.success,
-        actionId: result.actionId,
-        error: result.error,
-        verified: result.verified,
+      const result = await runAction(action, message.insertText);
+      reportRuntime({
+        success: Boolean(result.success && result.verified !== false),
+        action: action.kind,
+        reason: result.reason || ('error' in result ? result.error : undefined),
       });
+      sendResponse(result);
       return;
     }
     if (message?.type === 'INDEX_FETCH_BATCH') {
-      const page = Number(message.cursor || '0') || 0;
-      if (page === 0) {
-        await adapter.navigateToSearch(message.query);
-        await new Promise((r) => setTimeout(r, 1500));
-      } else {
-        // Scroll list to coax Gmail into loading more results (DOM-only; no private RPC)
-        const scrollRoot =
-          document.querySelector('div.AO') ||
-          document.querySelector('div[role="main"]') ||
-          document.scrollingElement;
-        if (scrollRoot) {
-          const before = scrollRoot.scrollTop;
-          scrollRoot.scrollTop = scrollRoot.scrollHeight;
-          if (scrollRoot.scrollTop === before && scrollRoot instanceof HTMLElement) {
-            scrollRoot.scrollBy?.(0, 2000);
-          }
-        }
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-
-      const rows = await adapter.getVisibleThreadMetadata();
-      if (!rows.success) {
-        sendResponse({ threads: [], error: rows.error, captchaOrBlock: false });
-        return;
-      }
-      const threads = (rows.rows || []).map((r) => ({
-        threadId: r.threadId,
-        subject: r.subject,
-        participants: r.participants,
-        latestSender: r.latestSender,
-        latestTimestamp: r.latestTimestamp || new Date().toISOString(),
-        messageCount: 1,
-        snippet: r.snippet,
-        route: 'search' as const,
-        messages: [
-          {
-            messageId: `${r.threadId}-visible`,
-            threadId: r.threadId,
-            sender: r.latestSender || { email: 'unknown@local' },
-            recipients: [],
-            cc: [],
-            timestamp: r.latestTimestamp || new Date().toISOString(),
-            bodyText: r.snippet,
-            attachmentsMetadata: [],
-          },
-        ],
-      }));
-
-      // Cap pages; IndexJobRunner also stops when a page yields no new thread IDs
-      const maxPages = 25;
-      const nextCursor = page + 1 < maxPages && threads.length > 0 ? String(page + 1) : undefined;
-      sendResponse({ threads, nextCursor });
+      sendResponse(await indexBatch(String(message.query || 'in:inbox'), String(message.cursor || '0')));
+      return;
+    }
+    if (message?.type === 'HYDRATE_THREAD') {
+      sendResponse(await hydrateThread(String(message.threadId || ''), message.restore !== false));
       return;
     }
     if (message?.type === 'GET_CAPABILITIES') {
       sendResponse(await adapter.detectCapabilities());
-      return;
     }
   })();
   return true;
 });
 
-function setupCommandPalette(): void {
-  document.addEventListener(
-    'keydown',
-    (e) => {
-      if (!settings.commandPaletteEnabled) return;
-      const isMac = navigator.platform.includes('Mac');
-      const mod = isMac ? e.metaKey : e.ctrlKey;
-      if (!mod || e.key.toLowerCase() !== 'k') return;
-      if (!settings.commandPaletteOverrideGmail) {
-        // Only intercept when focus is not in Gmail search / compose
-        const t = e.target as HTMLElement | null;
-        if (t?.closest?.('input, textarea, [contenteditable="true"], [role="textbox"]')) {
-          return;
-        }
-      }
-      e.preventDefault();
-      e.stopPropagation();
-      openCommandPalette();
+async function runAction(action: QueuedGmailAction, insertText?: string) {
+  if (action.kind === 'ARCHIVE_THREAD') return archiveThread(action.threadId);
+  if (action.kind === 'CREATE_REPLY_DRAFT' && insertText) return insertDraft(action.threadId, insertText);
+  if (action.kind === 'NAVIGATE_SEARCH') {
+    const result = await adapter.actions.enqueueAndWait(action, {
+      verify: async () => verifyNavigation(location.hash, action.query).verified,
+    });
+    return { ...result, reason: result.reason || result.error, verified: Boolean(result.verified) };
+  }
+  const result = await adapter.actions.enqueueAndWait(action);
+  return { ...result, reason: result.reason || result.error, verified: Boolean(result.verified) };
+}
+
+async function archiveThread(threadId: string) {
+  const before = await inspect(threadId);
+  const result = await adapter.actions.enqueueAndWait(
+    { kind: 'ARCHIVE_THREAD', threadId },
+    {
+      maxAttempts: 2,
+      verify: async () => {
+        await wait(500);
+        const after = await inspect(threadId);
+        return verifyArchive({
+          toastText: after.toastText,
+          beforeOpenThreadId: before.openThreadId,
+          afterOpenThreadId: after.openThreadId,
+          expectedThreadId: threadId,
+          inboxContainsThread: after.inboxContainsThread,
+        }).verified;
+      },
     },
-    true,
   );
+  const verified = Boolean(result.verified);
+  return {
+    ...result,
+    success: result.success && verified,
+    verified,
+    action: 'ARCHIVE_THREAD',
+    threadId,
+    reason: verified ? 'Archived' : result.reason || result.error || 'Could not archive',
+  };
+}
+
+async function insertDraft(threadId: string, text: string) {
+  const opened = await adapter.actions.enqueueAndWait({ kind: 'CREATE_REPLY_DRAFT', threadId });
+  if (!opened.success) {
+    return { success: false, verified: false, action: 'CREATE_REPLY_DRAFT', threadId, reason: opened.reason || 'Could not open reply' };
+  }
+  await wait(700);
+  await adapter.insertComposeBody(text);
+  await wait(200);
+  const compose = await adapter.getCurrentCompose();
+  const thread = await adapter.getCurrentThread();
+  const check = verifyDraftInserted({
+    composeOpen: Boolean(compose.compose),
+    bodyText: compose.compose?.bodyText || '',
+    expectedText: text,
+    activeThreadId: thread.thread?.threadId ?? null,
+    expectedThreadId: threadId,
+  });
+  return {
+    success: check.verified,
+    verified: check.verified,
+    action: 'CREATE_REPLY_DRAFT',
+    threadId,
+    reason: check.reason,
+  };
+}
+
+async function inspect(threadId: string) {
+  const current = await adapter.getCurrentThread();
+  const openThreadId = current.thread?.threadId ?? null;
+  const rows = findThreadRows(document);
+  const onList = rows.length > 0 && !openThreadId;
+  return {
+    toastText: findNotice(document),
+    openThreadId,
+    inboxContainsThread: onList ? rows.some((row) => row.getAttribute('data-legacy-thread-id') === threadId || row.getAttribute('data-gi-thread-id') === threadId) : null,
+  };
+}
+
+async function indexBatch(query: string, cursor: string) {
+  const page = Number(cursor) || 0;
+  if (page === 0) {
+    await adapter.navigateToSearch(query);
+    await wait(1200);
+  }
+  const rows = await adapter.getVisibleThreadMetadata();
+  const threads = (rows.rows || []).map((row) => normalizeVisibleRow(row, 'dom', 'search'));
+  return { threads, nextCursor: threads.length && page < 8 ? String(page + 1) : undefined };
+}
+
+async function hydrateThread(threadId: string, restore: boolean) {
+  const previous = location.hash;
+  location.hash = `#inbox/${threadId}`;
+  await wait(1400);
+  const current = await adapter.getCurrentThread();
+  const thread = current.thread ? normalizeOpenedThread(current.thread, 'hydrated') : null;
+  if (restore) location.hash = previous;
+  return { thread };
+}
+
+function setupCommandPalette(): void {
+  if (paletteBound) return;
+  paletteBound = true;
+  document.addEventListener('keydown', (event) => {
+    if (!settings.commandPaletteEnabled) return;
+    const mod = navigator.platform.includes('Mac') ? event.metaKey : event.ctrlKey;
+    if (!mod || event.key.toLowerCase() !== 'k') return;
+    const target = event.target as HTMLElement | null;
+    if (!settings.commandPaletteOverrideGmail && target?.closest('input, textarea, [contenteditable="true"]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openCommandPalette();
+  }, true);
 }
 
 function openCommandPalette(): void {
   if (document.querySelector('[data-gi-ui="cmdk"]')) return;
   const wrap = document.createElement('div');
   wrap.setAttribute('data-gi-ui', 'cmdk');
-  wrap.style.cssText =
-    'position:fixed;inset:0;z-index:2147483646;background:rgba(32,33,36,.45);display:flex;align-items:flex-start;justify-content:center;padding-top:15vh';
+  wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(32,33,36,.32);display:flex;justify-content:center;padding-top:12vh';
   const panel = document.createElement('div');
-  panel.style.cssText =
-    'width:min(520px,92vw);background:#fff;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);overflow:hidden;font:14px/1.4 IBM Plex Sans,system-ui,sans-serif';
+  panel.style.cssText = 'width:min(480px,92vw);background:#fff;border-radius:8px;overflow:hidden;font:14px/1.4 "Google Sans",Roboto,Arial,sans-serif';
   const input = document.createElement('input');
-  input.placeholder = 'Command…';
-  input.style.cssText =
-    'width:100%;border:0;border-bottom:1px solid #dadce0;padding:14px 16px;outline:none;font:inherit';
+  input.placeholder = 'Search commands';
+  input.style.cssText = 'width:100%;border:0;border-bottom:1px solid #dadce0;padding:12px 14px;outline:none;font:inherit';
   const list = document.createElement('div');
-  const commands = [
-    { id: 'ask', label: 'Ask Inbox' },
-    { id: 'summarize', label: 'Summarize Thread' },
-    { id: 'draft', label: 'Draft Reply' },
-    { id: 'followup', label: 'Draft Follow-up' },
-    { id: 'archive', label: 'Archive' },
-    { id: 'remind', label: 'Remind Me' },
-    { id: 'mark_respond', label: 'Mark Respond' },
-    { id: 'mark_waiting', label: 'Mark Waiting' },
-    { id: 'mark_fyi', label: 'Mark FYI' },
-    { id: 'always_archive', label: 'Always Archive Sender' },
-    { id: 'never_archive', label: 'Never Archive Sender' },
-    { id: 'index', label: 'Index Recent Mail' },
-    { id: 'settings', label: 'Open Agent Settings' },
-  ];
-  function render(filter: string) {
-    list.innerHTML = '';
-    for (const c of commands.filter((x) => x.label.toLowerCase().includes(filter.toLowerCase()))) {
+  const render = (filter: string) => {
+    list.replaceChildren();
+    for (const command of VISIBLE_COMMANDS.filter((item) => item.label.toLowerCase().includes(filter.toLowerCase()))) {
       const row = document.createElement('button');
-      row.textContent = c.label;
-      row.style.cssText =
-        'display:block;width:100%;text-align:left;padding:10px 16px;border:0;background:#fff;cursor:pointer;font:inherit';
-      row.onmouseenter = () => {
-        row.style.background = '#f1f3f4';
-      };
-      row.onmouseleave = () => {
-        row.style.background = '#fff';
-      };
+      row.type = 'button';
+      row.textContent = command.label;
+      row.style.cssText = 'display:block;width:100%;text-align:left;padding:10px 14px;border:0;background:#fff;cursor:pointer;font:inherit';
       row.onclick = () => {
         wrap.remove();
-        runCommand(c.id);
+        void runCommand(command.id);
       };
-      list.appendChild(row);
+      list.append(row);
     }
-  }
+  };
   render('');
   input.oninput = () => render(input.value);
-  wrap.onclick = (ev) => {
-    if (ev.target === wrap) wrap.remove();
+  wrap.onclick = (event) => {
+    if (event.target === wrap) wrap.remove();
   };
-  document.addEventListener(
-    'keydown',
-    function onEsc(ev) {
-      if (ev.key === 'Escape') {
-        wrap.remove();
-        document.removeEventListener('keydown', onEsc, true);
-      }
-    },
-    true,
-  );
-  panel.appendChild(input);
-  panel.appendChild(list);
-  wrap.appendChild(panel);
-  document.documentElement.appendChild(wrap);
+  panel.append(input, list);
+  wrap.append(panel);
+  document.documentElement.append(wrap);
   input.focus();
 }
 
-function runCommand(id: string): void {
-  switch (id) {
-    case 'ask':
-      void chrome.runtime.sendMessage({ type: 'FOCUS_SIDEPANEL' });
-      break;
-    case 'settings':
-      chrome.runtime.openOptionsPage();
-      break;
-    case 'index':
-      void chrome.runtime.sendMessage({ type: 'INDEX_INBOX', mode: '30d' });
-      break;
-    case 'archive':
-      void adapter.getCurrentThread().then((t) => {
-        if (t.thread?.threadId) {
-          const threadId = t.thread.threadId;
-          void adapter.actions.enqueueArchiveVerified(threadId, async () => {
-            const rows = await adapter.getVisibleThreadMetadata();
-            return Boolean(rows.rows?.some((r) => r.threadId === threadId));
-          });
-        }
-      });
-      break;
-    default:
-      void chrome.runtime.sendMessage({ type: 'COMMAND', id });
+async function runCommand(id: string): Promise<void> {
+  if (!isVisibleCommand(id)) {
+    showToast('That command is not available.');
+    return;
   }
+  const command = id as CommandId;
+  if (command === 'ask') {
+    const res = await send<{ ok?: boolean; reason?: string }>({ type: 'FOCUS_SIDEPANEL', mode: 'ask' });
+    if (!res?.ok) showToast(res?.reason || 'Could not open Ask Inbox.');
+    return;
+  }
+  if (command === 'settings') {
+    chrome.runtime.openOptionsPage();
+    return;
+  }
+  const threadId = currentThreadId || (await adapter.getCurrentThread()).thread?.threadId;
+  if (!threadId) {
+    showToast('Open a thread first.');
+    return;
+  }
+  if (command === 'summarize') {
+    showToast('Summarizing…');
+    const res = await send<{ ok?: boolean; oneLine?: string; reason?: string }>({ type: 'SUMMARIZE_THREAD', threadId });
+    showToast(res?.ok ? res.oneLine || 'Summary ready.' : res?.reason || 'Could not summarize.');
+    await refreshThread(threadId);
+    return;
+  }
+  if (command === 'draft') {
+    await draftReply(threadId);
+    return;
+  }
+  if (command === 'remind') {
+    await remind(threadId);
+    return;
+  }
+  if (command === 'archive') {
+    const result = await archiveThread(threadId);
+    if (!result.success) showToast(result.reason || 'Could not archive.', () => void runCommand('archive'));
+    else showToast('Archived.');
+    return;
+  }
+  const category = command === 'mark_respond' ? 'RESPOND' : command === 'mark_waiting' ? 'WAITING' : 'FYI';
+  const marked = await send<{ ok?: boolean; reason?: string }>({ type: 'SET_CATEGORY', threadId, category });
+  showToast(marked?.ok ? `Marked ${category === 'RESPOND' ? 'Respond' : category === 'WAITING' ? 'Waiting' : 'FYI'}.` : marked?.reason || 'Could not update the category.');
+  await refreshThread(threadId);
 }
 
-async function boot(): Promise<void> {
-  injectMainWorld();
-  await refreshSettings();
-  await adapter.start(async (event) => {
-    if (event.type === 'thread_opened') {
-      chrome.runtime.sendMessage({
-        type: 'INGEST_THREAD',
-        direction: 'inbound',
-        thread: {
-          threadId: event.thread.threadId,
-          subject: event.thread.subject,
-          participants: event.thread.messages.map((m) => m.sender),
-          latestSender: event.thread.messages.at(-1)?.sender,
-          latestTimestamp: event.thread.messages.at(-1)?.timestamp || new Date().toISOString(),
-          messageCount: event.thread.messages.length,
-          snippet: event.thread.messages.at(-1)?.bodyText?.slice(0, 200) || '',
-          route: event.thread.route,
-          messages: event.thread.messages,
-        },
-      });
-    }
-    if (event.type === 'inbox_observed') {
-      for (const row of event.rows.slice(0, 25)) {
-        chrome.runtime.sendMessage({
-          type: 'INGEST_THREAD',
-          direction: 'inbound',
-          thread: {
-            threadId: row.threadId,
-            subject: row.subject,
-            participants: row.participants,
-            latestSender: row.latestSender,
-            latestTimestamp: row.latestTimestamp || new Date().toISOString(),
-            messageCount: 1,
-            snippet: row.snippet,
-            route: 'inbox',
-            messages: [
-              {
-                messageId: `${row.threadId}-row`,
-                threadId: row.threadId,
-                sender: row.latestSender || { email: 'unknown@local' },
-                recipients: [],
-                cc: [],
-                timestamp: row.latestTimestamp || new Date().toISOString(),
-                bodyText: row.snippet,
-                attachmentsMetadata: [],
-              },
-            ],
-          },
-        });
-      }
-    }
-  });
-  sentStatus = installSentStatus({
-    trackerBaseUrl: settings.trackerBaseUrl,
-    onNotify: (trackingId, enabled) => {
-      chrome.runtime.sendMessage({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }, (res) => {
-        if (Array.isArray(res?.emails)) rememberTrackedList(res.emails);
-      });
-    },
-  });
-  installDomComposeTracking({
-    sdkOwnsCompose: () => sdkOwnsCompose,
-    getSettings: () => settings,
-    refreshSettings,
-    createTracked,
-    linkTracked,
-  });
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local') return;
-    if (changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
-      settings = { ...settings, ...(changes.settings.newValue as ExtensionSettings) };
-      sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
-    }
-    if (Array.isArray(changes.trackedEmails?.newValue)) {
-      rememberTrackedList(changes.trackedEmails.newValue as TrackedEmailSummary[]);
-    }
-  });
-  chrome.runtime.sendMessage({ type: 'GET_TRACKED_EMAILS' }, (res) => {
-    if (Array.isArray(res?.emails)) rememberTrackedList(res.emails);
-  });
-  await loadInboxSdk();
-  setupCommandPalette();
-  console.info('[gi] content script ready', {
-    sdkReady,
-    caps: await adapter.detectCapabilities(),
+async function draftReply(threadId: string): Promise<void> {
+  showToast('Drafting reply…');
+  const res = await send<{ ok?: boolean; body?: string; reason?: string }>({ type: 'DRAFT_REPLY', threadId });
+  if (!res?.ok || !res.body) {
+    showToast(res?.reason || 'Could not draft a reply.');
+    return;
+  }
+  const inserted = await insertDraft(threadId, res.body);
+  if (!inserted.success) showToast(inserted.reason || 'Could not insert the draft.', () => void draftReply(threadId));
+  else showToast('Draft inserted. It was not sent.');
+}
+
+async function remind(threadId: string): Promise<void> {
+  const res = await send<{ ok?: boolean; dueAt?: number; reason?: string }>({ type: 'REMIND_THREAD', threadId });
+  if (!res?.ok) {
+    showToast(res?.reason || 'Could not set a reminder.');
+    return;
+  }
+  const when = res.dueAt ? new Date(res.dueAt).toLocaleDateString() : 'later';
+  showToast(`Reminder set for ${when}.`);
+}
+
+function send<T>(message: unknown): Promise<T> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => resolve(response as T));
   });
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => void boot());
-} else {
-  void boot();
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void boot(), { once: true });
+else void boot();

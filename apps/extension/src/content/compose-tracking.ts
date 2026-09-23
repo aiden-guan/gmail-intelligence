@@ -1,13 +1,12 @@
 import type { ExtensionSettings } from '@gi/shared';
 import {
   applyTrackingToOutgoingHtml,
-  buildTrackingPixelHtml,
   extractHttpLinks,
   pairRewrittenLinks,
-  trackingStatusLine,
   type CreateTrackedEmailInput,
   type CreateTrackedEmailResult,
 } from '@gi/tracking';
+import { findComposeBody, findSendButton } from '@gi/gmail';
 
 export type ComposeRecipient = { emailAddress?: string; email?: string };
 
@@ -31,9 +30,9 @@ export type SdkComposeView = {
   getFromContact?: () => { emailAddress?: string } | null;
   getBodyElement?: () => HTMLElement | null;
   getTextContent?: () => string;
-  getElement?: () => HTMLElement;
-  getThreadID?: () => string | null;
-  addStatusBar?: (desc: { height?: number }) => { el: HTMLElement };
+  getElement?: () => HTMLElement | null;
+  getThreadID?: () => string | null | undefined | Promise<string | null | undefined>;
+  addButton?: (desc: unknown) => void;
 };
 
 export type ComposeTrackingDeps = {
@@ -48,87 +47,119 @@ export type ComposeTrackingDeps = {
   onSent?: (info: { subject: string; recipients: string[]; bodyText: string }) => void;
 };
 
-const CREATE_TIMEOUT_MS = 6000;
+export type ComposeTrackState = {
+  composeId: string;
+  trackingId: string | null;
+  pixelUrl: string | null;
+  linkMap: Map<string, string>;
+  ready: boolean;
+  trackOpens: boolean;
+  trackLinks: boolean;
+  kind: 'new' | 'reply' | 'forward';
+};
+
+const sessions = new Map<string, ComposeTrackState>();
+
+export function getComposeSession(composeId: string): ComposeTrackState | undefined {
+  return sessions.get(composeId);
+}
+
+export function listComposeSessions(): ComposeTrackState[] {
+  return [...sessions.values()];
+}
+
+export function resetComposeSessionsForTests(): void {
+  sessions.clear();
+}
+
+export function planTrackingInjection(state: ComposeTrackState | undefined): 'inject' | 'send-untracked' {
+  if (!state?.ready || !state.pixelUrl) return 'send-untracked';
+  if (!state.trackOpens && !state.trackLinks) return 'send-untracked';
+  return 'inject';
+}
+
+export function composeElementId(el: HTMLElement): string {
+  const existing = el.getAttribute('data-gi-compose-id');
+  if (existing) return existing;
+  const id = el.id || `compose-${Math.random().toString(36).slice(2, 10)}`;
+  el.setAttribute('data-gi-compose-id', id);
+  return id;
+}
+
+function composeKind(el: HTMLElement | null | undefined): ComposeTrackState['kind'] {
+  const label = (el?.getAttribute('aria-label') || '').toLowerCase();
+  if (label.includes('forward')) return 'forward';
+  if (label.includes('reply')) return 'reply';
+  return 'new';
+}
+
+function ensureSession(composeId: string, settings: ExtensionSettings, kind: ComposeTrackState['kind']): ComposeTrackState {
+  const existing = sessions.get(composeId);
+  if (existing) return existing;
+  const session: ComposeTrackState = {
+    composeId,
+    trackingId: null,
+    pixelUrl: null,
+    linkMap: new Map(),
+    ready: false,
+    trackOpens: settings.trackOpens,
+    trackLinks: settings.trackLinks,
+    kind,
+  };
+  sessions.set(composeId, session);
+  return session;
+}
 
 /**
- * InboxSDK send path.
- * The request modifier runs on the outgoing send body. If that hook is not
- * ready yet, presending cancels synchronously, the pixel is appended, then send runs again.
+ * InboxSDK send path. Tracking is preallocated. The modifier never waits on the tracker.
+ * If the record is not ready, the original body is sent.
  */
-export function attachSdkComposeTracking(view: SdkComposeView, deps: ComposeTrackingDeps): void {
-  let registered = false;
-  let injected = false;
-  let pendingTrackingId: string | null = null;
+export function attachSdkComposeTracking(view: SdkComposeView, deps: ComposeTrackingDeps): string {
+  const element = view.getElement?.() || null;
+  const composeId = element ? composeElementId(element) : `compose-${Math.random().toString(36).slice(2, 10)}`;
+  ensureSession(composeId, deps.getSettings(), composeKind(element));
+  if (element) mountTrackingControl(element, composeId, deps);
 
-  showComposeStatus(view, deps.getSettings());
+  const preallocate = () => {
+    void prepareSession(composeId, view, deps);
+  };
+  preallocate();
 
-  const tryRegister = (): boolean => {
-    if (registered || !view.registerRequestModifier) return registered;
+  if (view.registerRequestModifier) {
     try {
       view.registerRequestModifier(async (params) => {
-        const original = params.body || '';
-        if (params.isPlainText) return { body: original };
-        const next = await withTimeout(modifyOutgoingBody(view, original, deps), CREATE_TIMEOUT_MS, null);
-        if (!next) return { body: original };
-        pendingTrackingId = next.trackingId;
-        return { body: next.html };
+        const current = sessions.get(composeId);
+        if (params.isPlainText || planTrackingInjection(current) === 'send-untracked') {
+          if (current && !current.ready) console.info('[gi] tracking not ready, sending without it');
+          return { body: params.body || '' };
+        }
+        return { body: injectReady(params.body || '', current!) };
       });
-      registered = true;
     } catch (error) {
-      console.warn('[gi] tracking modifier not ready yet', error);
+      console.warn('[gi] tracking modifier unavailable', error);
     }
-    return registered;
-  };
+  }
 
-  tryRegister();
-  view.on?.('draftSaved', () => {
-    tryRegister();
-  });
-
-  view.on?.('presending', (event) => {
-    if (registered || injected) return;
-    if (!canTrack(deps.getSettings())) return;
-    // Cancel before any await. Otherwise Gmail sends the message without the pixel.
-    event?.cancel?.();
-    void (async () => {
-      try {
-        await deps.refreshSettings();
-        if (!canTrack(deps.getSettings())) return;
-        if (tryRegister()) return;
-        const html = view.getBodyElement?.()?.innerHTML || '';
-        const next = await withTimeout(modifyOutgoingBody(view, html, deps), CREATE_TIMEOUT_MS, null);
-        if (next) {
-          pendingTrackingId = next.trackingId;
-          const body = view.getBodyElement?.();
-          if (body && deps.getSettings().trackOpens && next.pixelUrl && !body.innerHTML.includes(next.pixelUrl)) {
-            body.insertAdjacentHTML('beforeend', buildTrackingPixelHtml(next.pixelUrl));
-          }
-          if (deps.getSettings().trackLinks && body) applyLinkMap(body, next.linkMap);
-        }
-      } catch (error) {
-        console.warn('[gi] tracking injection failed (send continues)', error);
-      } finally {
-        injected = true;
-        try {
-          view.send?.();
-        } catch (error) {
-          console.warn('[gi] re-send after tracking failed', error);
-        }
-      }
-    })();
+  view.on?.('presending', () => {
+    const current = sessions.get(composeId);
+    if (planTrackingInjection(current) !== 'inject') return;
+    const body = view.getBodyElement?.();
+    if (body) applyToElement(body, current!);
   });
 
   view.on?.('sent', (event) => {
-    const trackingId = pendingTrackingId;
-    pendingTrackingId = null;
-    injected = false;
-    const subject = view.getSubject?.() || '';
-    const recipients = collectRecipients(view);
-    const bodyText = view.getTextContent?.() || view.getBodyElement?.()?.textContent || '';
-    deps.onSent?.({ subject, recipients, bodyText });
-    if (!trackingId) return;
-    void linkSentMessage(view, event, trackingId, deps);
+    const current = sessions.get(composeId);
+    const trackingId = current?.trackingId;
+    sessions.delete(composeId);
+    deps.onSent?.({
+      subject: view.getSubject?.() || '',
+      recipients: collectRecipients(view),
+      bodyText: view.getTextContent?.() || view.getBodyElement?.()?.textContent || '',
+    });
+    if (trackingId) void linkSentMessage(view, event, trackingId, deps);
   });
+
+  return composeId;
 }
 
 export function installDomComposeTracking(
@@ -139,101 +170,150 @@ export function installDomComposeTracking(
     const target = event.target;
     if (!(target instanceof Element)) return;
     const sendButton = target.closest(SEND_BUTTON);
-    if (!sendButton || !(sendButton instanceof HTMLElement)) return;
+    if (!(sendButton instanceof HTMLElement)) return;
     const compose = sendButton.closest(COMPOSE_ROOT);
     if (!(compose instanceof HTMLElement)) return;
-    if (compose.dataset.giTrackReady === '1') return;
-    if (!canTrack(deps.getSettings())) return;
-    event.preventDefault();
-    event.stopPropagation();
-    void armComposeAndResend(compose, sendButton, deps);
-  };
-
-  const onKeyDown = (event: KeyboardEvent) => {
-    if (deps.sdkOwnsCompose()) return;
-    if (!(event.metaKey || event.ctrlKey) || event.key !== 'Enter') return;
-    const active = document.activeElement;
-    const compose = active instanceof Element ? active.closest(COMPOSE_ROOT) : null;
-    if (!(compose instanceof HTMLElement)) return;
-    if (compose.dataset.giTrackReady === '1') return;
-    if (!canTrack(deps.getSettings())) return;
-    const sendButton = compose.querySelector(SEND_BUTTON);
-    if (!(sendButton instanceof HTMLElement)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    void armComposeAndResend(compose, sendButton, deps);
+    const composeId = composeElementId(compose);
+    const session = sessions.get(composeId);
+    if (planTrackingInjection(session) !== 'inject' || !(event.target instanceof Node)) return;
+    const body = findComposeBody(compose);
+    if (body && session) applyToElement(body, session);
   };
 
   document.addEventListener('pointerdown', onPointerDown, true);
-  document.addEventListener('keydown', onKeyDown, true);
-  return () => {
-    document.removeEventListener('pointerdown', onPointerDown, true);
-    document.removeEventListener('keydown', onKeyDown, true);
-  };
+  return () => document.removeEventListener('pointerdown', onPointerDown, true);
 }
 
-async function armComposeAndResend(
-  compose: HTMLElement,
-  sendButton: HTMLElement,
-  deps: ComposeTrackingDeps,
-): Promise<void> {
-  try {
-    await deps.refreshSettings();
-    if (canTrack(deps.getSettings())) {
-      const body = compose.querySelector(COMPOSE_BODY);
-      const html = body instanceof HTMLElement ? body.innerHTML : '';
-      const next = await withTimeout(
-        modifyOutgoingBody(domComposeView(compose, body), html, deps),
-        CREATE_TIMEOUT_MS,
-        null,
-      );
-      if (next && body instanceof HTMLElement) {
-        if (deps.getSettings().trackOpens && next.pixelUrl && !body.innerHTML.includes(next.pixelUrl)) {
-          body.insertAdjacentHTML('beforeend', buildTrackingPixelHtml(next.pixelUrl));
-        }
-        if (deps.getSettings().trackLinks) applyLinkMap(body, next.linkMap);
-        deps.linkTracked({ trackingId: next.trackingId, gmailThreadId: null, gmailMessageId: null });
-      }
-    }
-  } catch (error) {
-    console.warn('[gi] tracking injection failed (send continues)', error);
-  } finally {
-    compose.dataset.giTrackReady = '1';
-    sendButton.click();
-  }
+export function prepareDomCompose(compose: HTMLElement, deps: ComposeTrackingDeps): string {
+  const composeId = composeElementId(compose);
+  ensureSession(composeId, deps.getSettings(), composeKind(compose));
+  mountTrackingControl(compose, composeId, deps);
+  const body = findComposeBody(compose);
+  void prepareSession(composeId, domComposeView(compose, body), deps);
+  return composeId;
 }
 
-export async function modifyOutgoingBody(
+export async function prepareSession(
+  composeId: string,
   view: SdkComposeView,
-  html: string,
   deps: ComposeTrackingDeps,
-): Promise<{ html: string; trackingId: string; pixelUrl: string; linkMap: Map<string, string> } | null> {
+): Promise<ComposeTrackState | null> {
+  const session = sessions.get(composeId);
+  if (!session || session.ready) return session || null;
   await deps.refreshSettings();
   const settings = deps.getSettings();
-  if (!canTrack(settings)) return null;
+  if (!canTrack(settings)) return session;
+  session.trackOpens = session.trackOpens && settings.trackOpens;
+  session.trackLinks = session.trackLinks && settings.trackLinks;
   const recipients = collectRecipients(view);
-  if (recipients.length === 0) return null;
-  const hrefs = settings.trackLinks ? extractHttpLinks(html).slice(0, 50) : [];
+  if (recipients.length === 0) return session;
+  const html = view.getBodyElement?.()?.innerHTML || '';
+  const hrefs = session.trackLinks ? extractHttpLinks(html).slice(0, 50) : [];
   const created = await deps.createTracked({
     subject: (view.getSubject?.() || '').slice(0, 998),
     sender: view.getFromContact?.()?.emailAddress || 'me',
     recipients,
-    gmail_thread_id: view.getThreadID?.() || undefined,
+    gmail_thread_id: (await readThreadId(view)) || undefined,
     links: hrefs.map((href) => ({ url: decodeURIComponentSafe(href) })),
   });
-  if (!created?.pixel_url || !created.tracking_id) return null;
-  const linkMap = pairRewrittenLinks(hrefs, created.rewritten_links || []);
-  return {
-    html: applyTrackingToOutgoingHtml(html, {
-      pixelUrl: created.pixel_url,
-      linkMap,
-      trackOpens: settings.trackOpens,
-      trackLinks: settings.trackLinks,
-    }),
-    trackingId: created.tracking_id,
-    pixelUrl: created.pixel_url,
-    linkMap,
+  const current = sessions.get(composeId);
+  if (!current || !created?.pixel_url || !created.tracking_id) return current || null;
+  current.trackingId = created.tracking_id;
+  current.pixelUrl = created.pixel_url;
+  current.linkMap = current.trackLinks ? pairRewrittenLinks(hrefs, created.rewritten_links || []) : new Map();
+  current.ready = true;
+  return current;
+}
+
+function injectReady(html: string, session: ComposeTrackState): string {
+  return applyTrackingToOutgoingHtml(html, {
+    pixelUrl: session.pixelUrl,
+    linkMap: session.linkMap,
+    trackOpens: session.trackOpens,
+    trackLinks: session.trackLinks,
+  });
+}
+
+function applyToElement(body: HTMLElement, session: ComposeTrackState): void {
+  body.innerHTML = injectReady(body.innerHTML, session);
+}
+
+function mountTrackingControl(compose: HTMLElement, composeId: string, deps: ComposeTrackingDeps): void {
+  if (compose.querySelector('[data-gi-ui="track-toggle"]')) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.setAttribute('data-gi-ui', 'track-toggle');
+  button.style.cssText =
+    'margin:0 8px;border:0;background:transparent;color:#5f6368;font:12px "Google Sans",Roboto,Arial,sans-serif;cursor:pointer;padding:4px';
+  const paint = () => {
+    const session = sessions.get(composeId);
+    const on = Boolean(session && (session.trackOpens || session.trackLinks) && canTrack(deps.getSettings()));
+    button.textContent = on ? '✓✓' : 'Tracking off';
+    button.title = 'Email tracking';
   };
+  paint();
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleMenu(button, composeId, deps, paint);
+  });
+  const send = findSendButton(compose);
+  if (send?.parentElement) send.parentElement.insertBefore(button, send);
+  else compose.append(button);
+}
+
+function toggleMenu(
+  anchor: HTMLButtonElement,
+  composeId: string,
+  deps: ComposeTrackingDeps,
+  paint: () => void,
+): void {
+  const existing = document.querySelector('[data-gi-ui="track-menu"]');
+  if (existing) {
+    existing.remove();
+    return;
+  }
+  const session = sessions.get(composeId);
+  if (!session) return;
+  const menu = document.createElement('div');
+  menu.setAttribute('data-gi-ui', 'track-menu');
+  menu.style.cssText =
+    'position:fixed;z-index:2147483646;background:#fff;border:1px solid #dadce0;border-radius:8px;padding:8px 10px;font:13px "Google Sans",Roboto,Arial,sans-serif;color:#202124;box-shadow:0 4px 16px rgba(32,33,36,.18)';
+  menu.append(checkRow('Track opens', session.trackOpens, (on) => {
+    session.trackOpens = on;
+    session.ready = false;
+    paint();
+    void prepareSession(composeId, domComposeView(anchor.closest(COMPOSE_ROOT) as HTMLElement, findComposeBody(anchor.closest(COMPOSE_ROOT) as HTMLElement)), deps);
+  }));
+  menu.append(checkRow('Track links', session.trackLinks, (on) => {
+    session.trackLinks = on;
+    session.ready = false;
+    paint();
+  }));
+  const rect = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, rect.left - 80)}px`;
+  menu.style.top = `${rect.bottom + 6}px`;
+  document.body.append(menu);
+}
+
+function checkRow(label: string, checked: boolean, onChange: (on: boolean) => void): HTMLLabelElement {
+  const row = document.createElement('label');
+  row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 0;cursor:pointer';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = checked;
+  input.addEventListener('change', () => onChange(input.checked));
+  row.append(input, document.createTextNode(label));
+  return row;
+}
+
+async function readThreadId(view: SdkComposeView): Promise<string | null> {
+  try {
+    const value = await view.getThreadID?.();
+    return typeof value === 'string' && value ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 function canTrack(settings: ExtensionSettings): boolean {
@@ -245,19 +325,6 @@ function canTrack(settings: ExtensionSettings): boolean {
   );
 }
 
-function showComposeStatus(view: SdkComposeView, settings: ExtensionSettings): void {
-  const line = trackingStatusLine(settings);
-  if (!line || !view.addStatusBar) return;
-  try {
-    const bar = view.addStatusBar({ height: 28 });
-    bar.el.textContent = line;
-    bar.el.style.cssText =
-      'font:12px/28px "Google Sans",Roboto,Arial,sans-serif;color:#5f6368;padding:0 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-  } catch {
-    /* compose chrome varies */
-  }
-}
-
 function collectRecipients(view: SdkComposeView): string[] {
   const fromApi = [
     ...(view.getToRecipients?.() || []),
@@ -266,24 +333,13 @@ function collectRecipients(view: SdkComposeView): string[] {
   ]
     .map((recipient) => recipient.emailAddress || recipient.email || '')
     .filter((email) => email.includes('@'));
-
   const root = view.getElement?.();
   const fromDom: string[] = [];
-  root?.querySelectorAll('[name="to"] [email], [name="cc"] [email], [name="bcc"] [email]').forEach((node) => {
+  root?.querySelectorAll('[email]').forEach((node) => {
     const email = node.getAttribute('email') || '';
     if (email.includes('@')) fromDom.push(email);
   });
-
   return [...new Set([...fromApi, ...fromDom].map((email) => email.trim().toLowerCase()))];
-}
-
-function applyLinkMap(body: HTMLElement, linkMap: Map<string, string>): void {
-  if (linkMap.size === 0) return;
-  body.querySelectorAll('a[href]').forEach((anchor) => {
-    const href = anchor.getAttribute('href') || '';
-    const tracked = linkMap.get(href);
-    if (tracked) anchor.setAttribute('href', tracked);
-  });
 }
 
 async function linkSentMessage(
@@ -295,9 +351,9 @@ async function linkSentMessage(
   let gmailThreadId: string | null = null;
   let gmailMessageId: string | null = null;
   try {
-    gmailThreadId = (await event?.getThreadID?.()) || view.getThreadID?.() || null;
+    gmailThreadId = (await event?.getThreadID?.()) || (await readThreadId(view));
   } catch {
-    gmailThreadId = view.getThreadID?.() || null;
+    gmailThreadId = await readThreadId(view);
   }
   try {
     gmailMessageId = (await event?.getMessageID?.()) || null;
@@ -307,21 +363,18 @@ async function linkSentMessage(
   deps.linkTracked({ trackingId, gmailThreadId, gmailMessageId });
 }
 
-function domComposeView(compose: HTMLElement, body: Element | null): SdkComposeView {
-  const subject = compose.querySelector('input[name="subjectbox"], input[aria-label="Subject"]');
+function domComposeView(compose: HTMLElement | null, body: HTMLElement | null): SdkComposeView {
+  const subject = compose?.querySelector('input[name="subjectbox"], input[aria-label="Subject"]');
   return {
     getSubject: () => (subject instanceof HTMLInputElement ? subject.value : ''),
     getElement: () => compose,
-    getBodyElement: () => (body instanceof HTMLElement ? body : null),
+    getBodyElement: () => body,
     getTextContent: () => body?.textContent || '',
   };
 }
 
 function decodeURIComponentSafe(value: string): string {
-  const named = value
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
+  const named = value.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
   try {
     return new URL(named).toString();
   } catch {
@@ -329,22 +382,5 @@ function decodeURIComponentSafe(value: string): string {
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(fallback);
-      },
-    );
-  });
-}
-
 const SEND_BUTTON = '[data-tooltip="Send"], [aria-label="Send"], [aria-label^="Send "]';
 const COMPOSE_ROOT = 'div[role="dialog"], form.bAs, div.AD, div.M9';
-const COMPOSE_BODY = '[aria-label="Message Body"], div[g_editable="true"], div[contenteditable="true"]';
