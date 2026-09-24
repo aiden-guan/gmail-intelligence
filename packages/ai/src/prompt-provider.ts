@@ -2,6 +2,7 @@ import {
   ClassificationResultSchema,
   DraftSuggestionSchema,
   ThreadSummarySchema,
+  sanitizeDates,
   type DraftSuggestion,
   type ThreadSummary,
 } from '@gi/shared';
@@ -174,13 +175,20 @@ export function coerceThreadSummary(value: unknown): unknown {
   if (!record) return value;
   const oneLine = firstString(record, ['oneLine', 'one_line', 'summary', 'tldr', 'tl_dr']);
   if (!oneLine) return value;
+  const rawQuestions = stringList(record.unansweredQuestions ?? record.unanswered_questions ?? record.questions);
+  const filteredQuestions = rawQuestions.filter(
+    (q) =>
+      !/\b(?:want|looking for|ready for|interested in|why not|why wait|did you know|have you heard|how about|need a|questions\?)\b/i.test(
+        q,
+      ),
+  );
   return {
     oneLine: clip(oneLine, 280),
     keyPoints: stringList(record.keyPoints ?? record.key_points ?? record.points),
     decisions: stringList(record.decisions),
-    unansweredQuestions: stringList(record.unansweredQuestions ?? record.unanswered_questions ?? record.questions),
+    unansweredQuestions: filteredQuestions,
     commitments: stringList(record.commitments),
-    dates: stringList(record.dates),
+    dates: sanitizeDates(stringList(record.dates)),
     actionItems: stringList(record.actionItems ?? record.action_items ?? record.actions),
   };
 }
@@ -206,12 +214,23 @@ function firstString(record: Record<string, unknown>, keys: string[]): string | 
 function stringList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
-      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      .map((item) => clip(item.trim(), 240))
+      .filter((item): item is string => typeof item === 'string' && isCleanItem(item))
+      .map((item) => clip(item.replace(/^[•\s\-*–—]+/, '').trim(), 240))
+      .filter((item) => item.length > 0)
       .slice(0, 8);
   }
-  if (typeof value === 'string' && value.trim()) return [clip(value.trim(), 240)];
+  if (typeof value === 'string' && isCleanItem(value)) {
+    return [clip(value.replace(/^[•\s\-*–—]+/, '').trim(), 240)];
+  }
   return [];
+}
+
+function isCleanItem(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 3) return false;
+  if (!/[a-zA-Z]{2,}/.test(trimmed)) return false;
+  if (/^[.\s…\-_?]+$/.test(trimmed)) return false;
+  return true;
 }
 
 function clip(text: string, max: number): string {

@@ -11,11 +11,12 @@ Leave out greetings, sign-offs, hype ("we're excited", "an opportunity with you"
 Keep only what a busy person needs: who it is from, what it is, the deadline, and the one real ask.
 
 Fields:
-- oneLine: one sentence, under 140 characters. Name the org or sender, the event or request, and the deadline if there is one. Do not start with Hi, Hello, Hey, or Dear.
+- oneLine: one sentence, under 140 characters. Name the org or sender, the event or request, and the deadline if there is one. Do not start with Hi, Hello, Hey, or Dear. For newsletters, digests, or announcements, synthesize the core updates in your own words.
 - keyPoints: 0 to 2 new facts that are not already in oneLine. Use [] when nothing else matters.
 - actionItems: at most 2 verb phrases for a real next step. Use [] when oneLine already states the ask.
-- dates: deadline phrases only, as written. Use [] if none.
-- decisions, unansweredQuestions, commitments: [] unless the thread actually contains them.
+- dates: specific deadline or event dates only (e.g. "September 26", "Oct 15"). Never output isolated bare month names ("September") or bare day names ("Wednesday"). Use [] if none.
+- unansweredQuestions: ONLY genuine, direct questions from the sender to the user that require a reply. MUST be [] for newsletters, promotional emails, marketing, sponsor ads, notifications, and receipts. NEVER include rhetorical marketing questions (e.g., "Want a healthy snack?", "Ready to work out?").
+- decisions, commitments: ONLY explicit agreements or commitments made in a discussion. MUST be [] for newsletters, promotions, announcements, and receipts.
 
 Do not invent names, dates, or asks.
 

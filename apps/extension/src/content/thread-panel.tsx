@@ -42,15 +42,16 @@ export function ThreadIntelCard(props: {
   const [uncontrolled, setUncontrolled] = useState<IslandMode>('open');
   const mode = props.mode ?? uncontrolled;
   const category = categoryLabel(props.intel?.classification?.category);
+  const isMarketing = /^(promotions|news|notifications)$/i.test(category || '');
   const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
   const brief = props.intel?.summary?.summary;
-  const points = brief?.keyPoints || [];
-  const dates = brief?.dates || [];
-  const actions = brief?.actionItems || [];
-  const decisions = brief?.decisions || [];
-  const questions = brief?.unansweredQuestions || [];
-  const commitments = brief?.commitments || [];
+  const points = sanitizeList(brief?.keyPoints || []);
+  const dates = sanitizeDateTags(brief?.dates || []);
+  const actions = sanitizeList(brief?.actionItems || []);
+  const decisions = isMarketing ? [] : sanitizeList(brief?.decisions || []);
+  const questions = isMarketing ? [] : sanitizeList(brief?.unansweredQuestions || []);
+  const commitments = isMarketing ? [] : sanitizeList(brief?.commitments || []);
   const hasDetails = Boolean(actions.length || decisions.length || questions.length || commitments.length);
   const line = summary || props.pending || 'No summary yet.';
   const waiting = !summary && Boolean(props.pending);
@@ -162,15 +163,54 @@ export function ThreadIntelCard(props: {
   );
 }
 function DetailList(props: { title: string; items: string[] }) {
-  if (!props.items.length) return null;
+  const valid = sanitizeList(props.items);
+  if (!valid.length) return null;
   return (
     <div>
       <div className="gi-eyebrow">{props.title}</div>
       <ul className="gi-points">
-        {props.items.map((item) => (
+        {valid.map((item) => (
           <li key={item}>{item}</li>
         ))}
       </ul>
     </div>
   );
 }
+
+function sanitizeList(items: string[]): string[] {
+  return items
+    .map((item) => item.replace(/^[•\s\-*–—]+/, '').trim())
+    .filter((item) => item.length >= 3 && /[a-zA-Z]{2,}/.test(item) && !/^[.\s…\-_?]+$/.test(item));
+}
+
+function sanitizeDateTags(dates: string[]): string[] {
+  const MONTHS =
+    /^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june|july|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)$/i;
+  const WEEKDAYS = /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i;
+
+  const cleaned: string[] = [];
+  const hasSpecificDate = dates.some((d) => !MONTHS.test(d.trim()) && !WEEKDAYS.test(d.trim()));
+
+  for (const date of dates) {
+    const trimmed = date.replace(/\s+/g, ' ').trim();
+    if (!trimmed || trimmed.length < 2) continue;
+    if (MONTHS.test(trimmed)) continue;
+    if (hasSpecificDate && WEEKDAYS.test(trimmed)) continue;
+    cleaned.push(trimmed);
+  }
+
+  const deduped: string[] = [];
+  for (const item of cleaned) {
+    const lower = item.toLowerCase();
+    const alreadySubsumed = deduped.some((existing) => existing.toLowerCase().includes(lower));
+    if (alreadySubsumed) continue;
+    for (let i = deduped.length - 1; i >= 0; i -= 1) {
+      if (lower.includes(deduped[i]!.toLowerCase())) {
+        deduped.splice(i, 1);
+      }
+    }
+    deduped.push(item);
+  }
+  return deduped;
+}
+

@@ -189,4 +189,50 @@ describe('reactive intelligence', () => {
     expect(host.textContent).toContain('Thursday is open');
     root.unmount();
   });
+
+  it('suppresses open questions and cleans dates for promotional emails', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'PROMOTIONS' },
+            summary: {
+              summary: {
+                oneLine: 'RecWell announced their September programs.',
+                dates: ['September', 'Wednesday', 'September 30'],
+                unansweredQuestions: ['...', 'OAKBERRY Want a healthy and delicious grub?'],
+                actionItems: ['Sign up online'],
+              },
+            },
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+
+    // Dates should be cleaned to only 'September 30'
+    expect(host.textContent).toContain('September 30');
+    const dateElements = host.querySelectorAll('.gi-date');
+    expect(dateElements).toHaveLength(1);
+    expect(dateElements[0]?.textContent?.trim()).toBe('September 30');
+
+    // Details button should be present for Next steps ('Sign up online')
+    const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
+    expect(details).toBeTruthy();
+    await act(async () => {
+      details?.click();
+    });
+
+    // Open questions must NOT be rendered for promotional emails
+    expect(host.textContent).not.toContain('Open questions');
+    expect(host.textContent).not.toContain('OAKBERRY');
+    expect(host.textContent).not.toContain('...');
+    expect(host.textContent).toContain('Next steps');
+    expect(host.textContent).toContain('Sign up online');
+    root.unmount();
+  });
 });

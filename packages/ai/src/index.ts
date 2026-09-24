@@ -11,6 +11,7 @@ import {
 } from '@gi/shared';
 import { z } from 'zod';
 import { EMAIL_SUMMARY_SYSTEM_PROMPT, summaryUserContent } from './summary-prompt.js';
+import { coerceThreadSummary } from './prompt-provider.js';
 
 export type ClassifyInput = {
   subject: string;
@@ -173,7 +174,7 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
           })),
         }),
       ),
-      ThreadSummarySchema,
+      z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
     );
     return { result: data, usage };
   }

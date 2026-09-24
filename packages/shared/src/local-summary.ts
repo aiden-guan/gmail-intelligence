@@ -23,7 +23,29 @@ const FILLER = [
   /\blearn about the latest\b/i,
   /\bdon't hesitate\b/i,
   /\breach out if\b/i,
+  /\bsee what\b.*\b(has to offer|is happening|recwell)\b/i,
+  /\bwhat (we have|recwell has) to offer\b/i,
+  /\bcheck out\b.*\b(new|latest|offer|what's)\b/i,
+  /\bhere(?:'s| is) what(?:'s| is) (new|happening)\b/i,
+  /\bin this (issue|edition|newsletter)\b/i,
+  /\bread (more|on) below\b/i,
+  /\bview (this email|in (your )?browser)\b/i,
 ];
+
+const MARKETING_PATTERN =
+  /\b(?:newsletter|unsubscribe|% off|deal|sale|promo|marketing|view in browser|digest|sponsor|bulletin)\b/i;
+
+const RHETORICAL_QUESTION =
+  /\b(?:want|looking for|ready for|interested in|why not|why wait|did you know|have you heard|how about|need a|questions\?|have questions\?)\b/i;
+
+const CONVERSATIONAL_QUESTION =
+  /\b(?:can you|could you|would you|will you|are you able|do you have|please let (?:me|us) know|what do you think|any thoughts|should we|how should we|when can you|where should)\b/i;
+
+const MONTH_NAMES =
+  /^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june|july|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)$/i;
+
+const WEEKDAY_NAMES =
+  /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i;
 
 /**
  * A short brief of the text already on screen.
@@ -44,11 +66,18 @@ export function localThreadSummary(input: {
   const highlight =
     useful.find((sentence) => /\b(free until|until|deadline|due)\b/i.test(sentence)) || useful[0] || '';
   const oneLine = composeLine(subject, highlight, dates);
+  const isMarketing = MARKETING_PATTERN.test(`${subject} ${body}`);
+
   return {
     oneLine,
     keyPoints: extraFacts(body, oneLine),
     decisions: [],
-    unansweredQuestions: useful.filter((sentence) => sentence.includes('?')).slice(0, 2).map((sentence) => clip(sentence, 120)),
+    unansweredQuestions: isMarketing
+      ? []
+      : useful
+          .filter(isMeaningfulQuestion)
+          .slice(0, 2)
+          .map((sentence) => clip(sentence.replace(/^[.\s…\-_]+/, '').trim(), 120)),
     commitments: [],
     dates,
     actionItems: /\b(sign up|register|rsvp)\b/i.test(body) ? ['Sign up'] : [],
@@ -64,17 +93,53 @@ export function tightenSummary(
 ): LocalThreadSummary {
   const body = input.messages.map((message) => message.bodyText).join('\n');
   const local = localThreadSummary(input);
-  const oneLine = !summary.oneLine.trim() || isRestatement(summary.oneLine, body) ? local.oneLine : clip(summary.oneLine, 200);
+  const isMarketing = MARKETING_PATTERN.test(`${input.subject} ${body}`);
+  const oneLineIsPasted = !summary.oneLine?.trim() || isRestatement(summary.oneLine, body);
+  const oneLine = oneLineIsPasted ? local.oneLine : clip(summary.oneLine, 200);
   const said = oneLine.toLowerCase();
-  const keyPoints = unique(summary.keyPoints.map((item) => clip(item, 120)).filter((item) => keepPoint(item, body, said))).slice(0, 2);
+
+  const keyPoints = unique(
+    summary.keyPoints.map((item) => clip(item, 120)).filter((item) => keepPoint(item, body, said)),
+  ).slice(0, 2);
+
+  const finalKeyPoints =
+    keyPoints.length > 0
+      ? keyPoints
+      : oneLineIsPasted || summary.keyPoints.length > 0
+        ? local.keyPoints
+        : [];
+
+  const rawDates = summary.dates.length
+    ? summary.dates
+    : oneLineIsPasted || summary.dates.length > 0
+      ? local.dates
+      : [];
+  const dates = sanitizeDates(rawDates).slice(0, 4);
+
+  const decisions = isMarketing
+    ? []
+    : unique(summary.decisions.filter((item) => keepPoint(item, body, said))).slice(0, 3);
+
+  const unansweredQuestions = isMarketing
+    ? []
+    : unique(
+        summary.unansweredQuestions.filter((item) => keepPoint(item, body, said) && isMeaningfulQuestion(item)),
+      ).slice(0, 3);
+
+  const commitments = isMarketing
+    ? []
+    : unique(summary.commitments.filter((item) => keepPoint(item, body, said))).slice(0, 3);
+
+  const actionItems = unique(summary.actionItems.filter((item) => keepPoint(item, body, said))).slice(0, 2);
+
   return {
     oneLine,
-    keyPoints: keyPoints.length ? keyPoints : local.keyPoints,
-    decisions: unique(summary.decisions.filter((item) => keepPoint(item, body, said))).slice(0, 3),
-    unansweredQuestions: unique(summary.unansweredQuestions.filter((item) => keepPoint(item, body, said))).slice(0, 3),
-    commitments: unique(summary.commitments.filter((item) => keepPoint(item, body, said))).slice(0, 3),
-    dates: summary.dates.length ? summary.dates.slice(0, 4) : local.dates,
-    actionItems: unique(summary.actionItems.filter((item) => keepPoint(item, body, said))).slice(0, 2),
+    keyPoints: finalKeyPoints,
+    decisions,
+    unansweredQuestions,
+    commitments,
+    dates,
+    actionItems,
   };
 }
 
@@ -118,6 +183,8 @@ function deadlinePhrase(fact: string, dates: string[]): string {
 function keepPoint(text: string, body: string, said: string): boolean {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (clean.length < 3 || isFiller(clean) || GREETING.test(clean) || SIGN_OFF.test(clean)) return false;
+  if (!/[a-zA-Z]{2,}/.test(clean)) return false;
+  if (/^[.\s…\-_?]+$/.test(clean)) return false;
   if (isRestatement(clean, body)) return false;
   const head = clean.slice(0, 24).toLowerCase();
   return !head || !said.includes(head);
@@ -128,11 +195,13 @@ function isRestatement(text: string, body: string): boolean {
   const source = squash(body);
   if (!line) return false;
   if (GREETING.test(line)) return true;
-  if (line.length >= 40 && source.includes(line)) return true;
+  if (SIGN_OFF.test(line)) return true;
+  if (isFiller(line) && source.includes(line)) return true;
+  if (line.length >= 50 && source.includes(line)) return true;
   const words = line.split(' ').filter(Boolean);
-  if (words.length < 8) return false;
-  for (let i = 0; i <= words.length - 8; i += 1) {
-    if (source.includes(words.slice(i, i + 8).join(' '))) return true;
+  if (words.length < 12) return false;
+  for (let i = 0; i <= words.length - 12; i += 1) {
+    if (source.includes(words.slice(i, i + 12).join(' '))) return true;
   }
   return false;
 }
@@ -141,8 +210,25 @@ function isFiller(sentence: string): boolean {
   return FILLER.some((pattern) => pattern.test(sentence));
 }
 
+function isMeaningfulQuestion(sentence: string): boolean {
+  if (!sentence.includes('?')) return false;
+  const clean = sentence.replace(/[?.\s…\-_]+/g, ' ').trim();
+  if (clean.length < 10) return false;
+  const words = clean.split(' ').filter(Boolean);
+  if (words.length < 3) return false;
+  if (!/[a-zA-Z]{2,}/.test(clean)) return false;
+  if (RHETORICAL_QUESTION.test(clean)) return false;
+  return (
+    CONVERSATIONAL_QUESTION.test(clean) ||
+    /^(?:what|when|where|who|how|why|which|can|could|would|will|is|are|do|does)\b/i.test(clean)
+  );
+}
+
 function cleanMessage(text: string): string {
-  const collapsed = text
+  const separated = text
+    .replace(/([A-Z]{2,})([A-Z][a-z])/g, '$1 $2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+  const collapsed = separated
     .replace(/\s+/g, ' ')
     .replace(/([,;:])(?=[A-Za-z])/g, '$1 ')
     .replace(/(?<![A-Z])([.!?])(?=[A-Z])/g, '$1 ')
@@ -167,11 +253,58 @@ function sentencesFrom(text: string): string[] {
   return parts.length ? parts : [text];
 }
 
-function datesIn(text: string): string[] {
-  const found = text.match(
-    /\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june|july|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2})?(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/gi,
+export function datesIn(text: string): string[] {
+  const fullDateRegex =
+    /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day,?\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june|july|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b/gi;
+  const numericDateRegex = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g;
+  const relativeDateRegex = /\b(?:today|tomorrow)\b/gi;
+  const deadlineWeekdayRegex =
+    /\b(?:by|due|before|until)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi;
+
+  const fullDates = text.match(fullDateRegex) || [];
+  const numericDates = text.match(numericDateRegex) || [];
+  const relativeDates = text.match(relativeDateRegex) || [];
+  const deadlineWeekdays = text.match(deadlineWeekdayRegex) || [];
+
+  const combined = [...fullDates, ...numericDates, ...relativeDates, ...deadlineWeekdays].map((item) =>
+    item.trim(),
   );
-  return [...new Set((found || []).map((item) => item.trim()))];
+
+  return sanitizeDates(combined);
+}
+
+export function sanitizeDates(dates: string[]): string[] {
+  const cleaned: string[] = [];
+  const hasSpecificDate = dates.some(
+    (d) => !MONTH_NAMES.test(d.trim()) && !WEEKDAY_NAMES.test(d.trim()),
+  );
+
+  for (const date of dates) {
+    const trimmed = date.replace(/\s+/g, ' ').trim();
+    if (!trimmed || trimmed.length < 2) continue;
+    // Discard bare month names (e.g. "September")
+    if (MONTH_NAMES.test(trimmed)) continue;
+    // Discard bare weekdays if a specific date exists (e.g. drop "Wednesday" if "September 30" exists)
+    if (hasSpecificDate && WEEKDAY_NAMES.test(trimmed)) continue;
+    cleaned.push(trimmed);
+  }
+
+  // Deduplicate and prune subsumed dates (e.g. keep "Wednesday, September 30" and drop "September 30")
+  const deduped: string[] = [];
+  for (const item of cleaned) {
+    const lower = item.toLowerCase();
+    const alreadySubsumed = deduped.some((existing) => existing.toLowerCase().includes(lower));
+    if (alreadySubsumed) continue;
+    // Remove any previously added item that is subsumed by this longer date
+    for (let i = deduped.length - 1; i >= 0; i -= 1) {
+      if (lower.includes(deduped[i]!.toLowerCase())) {
+        deduped.splice(i, 1);
+      }
+    }
+    deduped.push(item);
+  }
+
+  return unique(deduped);
 }
 
 function squash(text: string): string {
@@ -195,3 +328,4 @@ function clip(text: string, max: number): string {
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max - 1).trimEnd()}…`;
 }
+

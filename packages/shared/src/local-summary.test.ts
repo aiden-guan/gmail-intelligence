@@ -73,4 +73,43 @@ describe('local thread summary', () => {
     expect(summary.keyPoints.join(' ')).toMatch(/internship/i);
     expect(summary.actionItems).toEqual([]);
   });
+
+  it('handles newsletters cleanly without teaser slogans, bare month tags, or sponsor questions', () => {
+    const body = [
+      'See What RecWell Has to Offer!',
+      'OAKBERRY Want a healthy and delicious grub after a long school day?',
+      'Group fitness passes and facility orientations run through Wednesday, September 30.',
+      'To unsubscribe from this newsletter, click here.',
+    ].join('\n');
+    const summary = localThreadSummary({
+      subject: 'RecWell September Newsletter',
+      messages: [{ bodyText: body }],
+    });
+    expect(summary.oneLine).not.toMatch(/See What RecWell Has to Offer/i);
+    expect(summary.unansweredQuestions).toEqual([]);
+    expect(summary.dates).toEqual(['Wednesday, September 30']);
+    expect(summary.dates).not.toContain('September');
+    expect(summary.dates).not.toContain('Wednesday');
+  });
+
+  it('tightenSummary preserves empty dates from model and strips marketing questions', () => {
+    const body = 'Check out our latest deals this fall! Want a discount? Unsubscribe here.';
+    const modelSummary = {
+      oneLine: 'Brand launched their fall collection with discounted items.',
+      keyPoints: [],
+      decisions: [],
+      unansweredQuestions: ['Want a discount?'],
+      commitments: [],
+      dates: [],
+      actionItems: [],
+    };
+    const tightened = tightenSummary(modelSummary, {
+      subject: 'Fall Deals Newsletter',
+      messages: [{ bodyText: body }],
+    });
+    expect(tightened.dates).toEqual([]);
+    expect(tightened.unansweredQuestions).toEqual([]);
+    expect(tightened.keyPoints).toEqual([]);
+  });
 });
+
