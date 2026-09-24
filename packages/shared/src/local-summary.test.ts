@@ -74,6 +74,57 @@ describe('local thread summary', () => {
     expect(summary.actionItems).toEqual([]);
   });
 
+  it('summarizes the latest update and keeps only a date worth remembering', () => {
+    const body = [
+      'Hi everyone!',
+      'Update: The tutoring sections website has been reopened.',
+      'Students now have the opportunity to switch tutoring sections. Section Week 6 starting (9/28).',
+      '----------------',
+      'Previous Announcement:',
+      'There will be no tutoring sections during Week 5 due to Midterm 1.',
+      'The sections website will reopen on Wednesday, 9/23 at 12:30 PM PT.',
+      'Good luck on the midterm, and we will see you again in Week 6!',
+    ].join('\n');
+    const summary = localThreadSummary({
+      subject: 'Data C8: Tutoring Sections Update for Week 5',
+      messages: [{ bodyText: body }],
+    });
+    expect(summary.oneLine).toMatch(/reopened/i);
+    expect(summary.oneLine).toMatch(/switch/i);
+    expect(summary.oneLine).not.toMatch(/previous announcement|-{3,}|no tutoring sections during week 5/i);
+    expect(summary.dates).toEqual(['Week 6 starts Sep 28']);
+    expect(summary.dates.join(' ')).not.toMatch(/9\/23|Sep 23/);
+  });
+
+  it('replaces a pasted old announcement with the current update', () => {
+    const body = [
+      'Update: The tutoring sections website has been reopened.',
+      'Students now have the opportunity to switch tutoring sections. Week 6 starting (9/28).',
+      '----------------',
+      'Previous Announcement:',
+      'There will be no tutoring sections during Week 5 due to Midterm 1.',
+    ].join('\n');
+    const tightened = tightenSummary(
+      {
+        oneLine:
+          'Data C8: Tutoring Sections Update for Week 5. ---------------- Previous Announcement: There will be no tutoring sections during Week 5 due to Midterm 1.',
+        keyPoints: [],
+        decisions: [],
+        unansweredQuestions: [],
+        commitments: [],
+        dates: ['9/28', '9/23'],
+        actionItems: [],
+      },
+      {
+        subject: 'Data C8: Tutoring Sections Update for Week 5',
+        messages: [{ bodyText: body }],
+      },
+    );
+    expect(tightened.oneLine).toMatch(/reopened/i);
+    expect(tightened.oneLine).not.toMatch(/-{3,}|no tutoring sections during week 5/i);
+    expect(tightened.dates).toEqual(['Week 6 starts Sep 28']);
+  });
+
   it('handles newsletters cleanly without teaser slogans, bare month tags, or sponsor questions', () => {
     const body = [
       'See What RecWell Has to Offer!',

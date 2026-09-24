@@ -11,6 +11,7 @@ export default defineConfig({
       'workers/**/src/**/*.test.ts',
       'apps/**/src/**/*.test.ts',
       'apps/**/src/**/*.test.tsx',
+      'convex/**/*.test.ts',
     ],
     coverage: {
       reporter: ['text', 'html'],

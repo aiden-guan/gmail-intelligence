@@ -48,6 +48,23 @@ const MONTH_NAMES =
 const WEEKDAY_NAMES =
   /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i;
 
+const SUPERSEDED_SPLIT =
+  /(?:\n\s*)?[-_=*\u2014\u2013]{6,}(?:\s*\n|\s+)|(?:^|\n)\s*(?:previous|earlier)\s+announcement\b|\n\s*(?:begin forwarded message|original message)\b|\bon [\s\S]{0,80}? wrote:\s*/i;
+
+/**
+ * Text above a dashed line, "Previous announcement", or quoted reply is the
+ * current status. Everything after that is old context.
+ */
+export function splitSuperseded(text: string): { current: string; older: string } {
+  const normalized = text.replace(/\r\n/g, '\n');
+  const match = SUPERSEDED_SPLIT.exec(normalized);
+  if (!match || match.index == null) return { current: normalized.trim(), older: '' };
+  const current = normalized.slice(0, match.index).trim();
+  const older = normalized.slice(match.index).trim();
+  if (current.length < 20) return { current: normalized.trim(), older: '' };
+  return { current, older };
+}
+
 /**
  * A short brief of the text already on screen.
  * Used when a model is off, slow, or only quotes the email back.
@@ -56,17 +73,16 @@ export function localThreadSummary(input: {
   subject: string;
   messages: Array<{ bodyText: string }>;
 }): LocalThreadSummary {
-  const bodies = input.messages.map((message) => cleanMessage(message.bodyText)).filter((text) => text.length > 0);
-  const body = bodies.at(-1) || '';
+  const latestRaw = input.messages.map((message) => message.bodyText).filter((text) => text.trim()).at(-1) || '';
+  const { current } = splitSuperseded(latestRaw);
+  const body = cleanMessage(current);
   const subject = input.subject.replace(/\s+/g, ' ').trim();
   const sentences = sentencesFrom(body)
     .map(keepSentence)
     .filter((sentence): sentence is string => Boolean(sentence));
-  const useful = sentences.filter((sentence) => !isFiller(sentence));
-  const dates = datesIn(`${subject} ${body}`).slice(0, 4);
-  const highlight =
-    useful.find((sentence) => /\b(free until|until|deadline|due)\b/i.test(sentence)) || useful[0] || '';
-  const oneLine = composeLine(subject, highlight, dates);
+  const useful = sentences.filter((sentence) => !isFiller(sentence) && !isSeparator(sentence));
+  const dates = memorableDates(`${subject}\n${body}`);
+  const oneLine = composeBrief(subject, useful);
   const isMarketing = MARKETING_PATTERN.test(`${subject} ${body}`);
 
   return {
@@ -93,11 +109,17 @@ export function tightenSummary(
   input: { subject: string; messages: Array<{ bodyText: string }> },
 ): LocalThreadSummary {
   const body = input.messages.map((message) => message.bodyText).join('\n');
+  const latestRaw = input.messages.map((message) => message.bodyText).filter((text) => text.trim()).at(-1) || body;
+  const { current } = splitSuperseded(latestRaw);
   const local = localThreadSummary(input);
   const isMarketing = MARKETING_PATTERN.test(`${input.subject} ${body}`);
   const hasModelLine = Boolean(summary.oneLine?.trim());
-  const oneLineIsPasted = !hasModelLine || isRestatement(summary.oneLine, body);
-  const oneLine = oneLineIsPasted ? local.oneLine : clip(summary.oneLine, 360);
+  const oneLineIsPasted =
+    !hasModelLine ||
+    isBrokenBrief(summary.oneLine) ||
+    prefersOlderNotice(summary.oneLine, latestRaw) ||
+    isRestatement(summary.oneLine, body);
+  const oneLine = oneLineIsPasted ? local.oneLine : clip(cleanBrief(summary.oneLine), 360);
   const said = oneLine.toLowerCase();
 
   const keyPoints = unique(
@@ -111,12 +133,7 @@ export function tightenSummary(
         ? local.keyPoints
         : [];
 
-  const rawDates = summary.dates.length
-    ? summary.dates
-    : oneLineIsPasted || summary.dates.length > 0
-      ? local.dates
-      : [];
-  const dates = sanitizeDates(rawDates).slice(0, 4);
+  const dates = chooseDates(summary.dates, local.dates, oneLineIsPasted, current);
 
   const decisions = isMarketing
     ? []
@@ -148,7 +165,10 @@ export function tightenSummary(
 
 /** True when the text is a greeting or a long stretch copied from the email. */
 export function isPastedSummary(oneLine: string, messages: Array<{ bodyText: string }>): boolean {
-  return isRestatement(oneLine, messages.map((message) => message.bodyText).join('\n'));
+  const raw = messages.map((message) => message.bodyText).join('\n');
+  const latest = messages.map((message) => message.bodyText).filter((text) => text.trim()).at(-1) || raw;
+  if (isBrokenBrief(oneLine) || prefersOlderNotice(oneLine, latest)) return true;
+  return isRestatement(oneLine, raw);
 }
 
 function extraFacts(body: string, oneLine: string): string[] {
@@ -162,26 +182,172 @@ function extraFacts(body: string, oneLine: string): string[] {
   return facts.slice(0, 2);
 }
 
-function composeLine(subject: string, fact: string, dates: string[]): string {
+function composeBrief(subject: string, sentences: string[]): string {
+  const fact = pickSentences(sentences).map(stripLabel).filter(Boolean).join(' ');
   const subjectBit = /^\(no subject\)$/i.test(subject) ? '' : clip(subject, 90);
-  const deadline = deadlinePhrase(fact, dates);
-  const factBit = deadline || (fact && !isFiller(fact) ? clip(fact, 120) : '');
   const head = subjectBit.slice(0, 18).toLowerCase();
-  if (subjectBit && factBit && head && !factBit.toLowerCase().includes(head)) {
-    return clip(`${subjectBit}. ${factBit}`, 200);
+  if (subjectBit && fact && head && !fact.toLowerCase().includes(head.slice(0, 12))) {
+    return clip(`${subjectBit}. ${fact}`, 280);
   }
-  return clip(factBit || subjectBit || 'Empty message', 200);
+  return clip(fact || subjectBit || 'Empty message', 280);
 }
 
-function deadlinePhrase(fact: string, dates: string[]): string {
-  if (!fact) return '';
-  const part =
-    fact
-      .split(/(?<=[.!?])\s+/)
-      .find((sentence) => dates.some((date) => sentence.toLowerCase().includes(date.toLowerCase()))) || '';
-  if (!part || isFiller(part)) return '';
-  return clip(part.replace(/\s*you can sign up here\.?/i, '').trim(), 100);
+function pickSentences(sentences: string[]): string[] {
+  const scored = sentences.map((sentence, index) => ({ sentence, index, score: scoreSentence(sentence) }));
+  const positive = scored
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, 2);
+  const chosen = positive.length ? positive : scored.filter((item) => item.score === 0).slice(0, 1);
+  return chosen.sort((a, b) => a.index - b.index).map((item) => item.sentence);
 }
+
+function scoreSentence(sentence: string): number {
+  if (isSeparator(sentence) || /(?:previous|earlier)\s+announcement/i.test(sentence)) return -5;
+  let score = 0;
+  if (/\b(update|reopened|available|now|you can)\b/i.test(sentence)) score += 3;
+  if (/\b(deadline|due\s+(?:by|on|date|\d)|until|through|start(?:ing|s)?|begins)\b/i.test(sentence)) score += 2;
+  if (/\bdue\s+to\b/i.test(sentence)) score -= 4;
+  if (isFiller(sentence)) score -= 3;
+  return score;
+}
+
+function stripLabel(sentence: string): string {
+  return sentence.replace(/^(?:update|announcement|note)\s*:\s*/i, '').replace(/\s+/g, ' ').trim();
+}
+
+function isSeparator(sentence: string): boolean {
+  return /^[-_=*\s]+$/.test(sentence) || /[-_=]{6,}/.test(sentence);
+}
+
+function isBrokenBrief(text: string): boolean {
+  return /[-_=]{3,}/.test(text) || /\b(?:previous|earlier)\s+announcement\b/i.test(text);
+}
+
+function cleanBrief(text: string): string {
+  return text
+    .replace(/[-_=]{3,}/g, ' ')
+    .replace(/\b(?:previous|earlier)\s+announcement\s*:?/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function prefersOlderNotice(oneLine: string, raw: string): boolean {
+  const { current, older } = splitSuperseded(raw);
+  if (!older) return false;
+  const lineWords = contentWords(oneLine);
+  if (lineWords.length < 4) return false;
+  const olderScore = overlapCount(lineWords, contentWords(older));
+  const currentScore = overlapCount(lineWords, contentWords(current));
+  return olderScore >= 4 && olderScore > currentScore;
+}
+
+function contentWords(text: string): string[] {
+  return squash(text)
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length >= 4 && !STOP_WORDS.has(word));
+}
+
+function overlapCount(left: string[], right: string[]): number {
+  const pool = new Set(right);
+  return new Set(left.filter((word) => pool.has(word))).size;
+}
+
+const STOP_WORDS = new Set([
+  'that',
+  'this',
+  'with',
+  'from',
+  'have',
+  'been',
+  'will',
+  'your',
+  'about',
+  'there',
+  'their',
+  'they',
+  'them',
+  'were',
+  'when',
+  'what',
+  'into',
+  'also',
+  'just',
+  'than',
+]);
+
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const MEMORABLE_CUE =
+  /\b(deadline|due\s+(?:by|on|date|\d)|by\s+\d|by\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june|july|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|until|before|through|start(?:ing|s)?|begins|exam|midterm|final|meeting|interview|appointment|rsvp|register|submit)\b/i;
+
+function memorableDates(text: string): string[] {
+  const found: string[] = [];
+  for (const sentence of sentencesFrom(cleanMessage(text))) {
+    if (!MEMORABLE_CUE.test(sentence)) continue;
+    if (/\bdue\s+to\b/i.test(sentence) && !/\b(deadline|due\s+(?:by|on|date|\d)|until|before|through|start(?:ing|s)?|begins)\b/i.test(sentence)) {
+      continue;
+    }
+    for (const date of datesIn(sentence)) {
+      found.push(labelMemorableDate(sentence, date));
+    }
+  }
+  return unique(found).slice(0, 2);
+}
+
+function labelMemorableDate(sentence: string, date: string): string {
+  const pretty = prettifyDate(date);
+  const week = sentence.match(/\bweek\s+\d+\b/i);
+  if (week && /\b(start(?:ing)?|begins)\b/i.test(sentence)) {
+    return `${week[0].replace(/\bweek\b/i, 'Week')} starts ${pretty}`;
+  }
+  if (!isBareNumericDate(date)) return pretty;
+  if (/\b(deadline|due)\b/i.test(sentence) && !/\bdue\s+to\b/i.test(sentence)) return `Due ${pretty}`;
+  if (/\buntil\b/i.test(sentence)) return `Until ${pretty}`;
+  if (/\bthrough\b/i.test(sentence)) return `Through ${pretty}`;
+  if (/\bby\b/i.test(sentence)) return `By ${pretty}`;
+  return pretty;
+}
+
+function prettifyDate(date: string): string {
+  const trimmed = date.replace(/\s+/g, ' ').trim();
+  const numeric = trimmed.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!numeric) return trimmed;
+  const month = Number(numeric[1]);
+  const day = Number(numeric[2]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return trimmed;
+  const year = numeric[3] ? `, ${numeric[3].length === 2 ? `20${numeric[3]}` : numeric[3]}` : '';
+  return `${MONTH_LABELS[month - 1]} ${day}${year}`;
+}
+
+function isBareNumericDate(date: string): boolean {
+  return /^\d{1,2}\/\d{1,2}(?:\/\d{2,4})?$/.test(date.trim());
+}
+
+function chooseDates(
+  modelDates: string[],
+  localDates: string[],
+  oneLineIsPasted: boolean,
+  currentText: string,
+): string[] {
+  if (oneLineIsPasted) return localDates.slice(0, 2);
+  if (!modelDates.length) return [];
+  if (modelDates.every((date) => isBareNumericDate(date)) && localDates.length) return localDates.slice(0, 2);
+  const current = currentText.toLowerCase();
+  const kept = sanitizeDates(modelDates)
+    .filter((date) => !isBareNumericDate(date) && dateMentioned(date, current))
+    .slice(0, 2);
+  return kept.length ? kept : localDates.slice(0, 2);
+}
+
+function dateMentioned(date: string, currentText: string): boolean {
+  const normalized = date.toLowerCase();
+  if (currentText.includes(normalized)) return true;
+  const words = normalized.split(/[^a-z0-9]+/).filter((word) => word.length >= 3 && !DATE_STOP.has(word));
+  return words.some((word) => currentText.includes(word));
+}
+
+const DATE_STOP = new Set(['due', 'until', 'through', 'starts', 'start', 'week', 'the', 'and']);
 
 function keepPoint(text: string, body: string, said: string): boolean {
   const clean = text.replace(/\s+/g, ' ').trim();

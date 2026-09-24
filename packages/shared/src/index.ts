@@ -356,7 +356,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   learnFromSent: false,
 };
 
-export { datesIn, isPastedSummary, localThreadSummary, sanitizeDates, tightenSummary } from './local-summary.js';
+export { datesIn, isPastedSummary, localThreadSummary, sanitizeDates, splitSuperseded, tightenSummary } from './local-summary.js';
 export type { LocalThreadSummary } from './local-summary.js';
 
 export function addBusinessDays(from: Date, days: number): Date {

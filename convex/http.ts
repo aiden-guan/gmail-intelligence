@@ -1,6 +1,7 @@
 import { httpRouter } from "convex/server";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
+import { publicTrackerOrigin, trackingIdFromUrl } from "./openRequest";
 
 const TRANSPARENT_GIF = Uint8Array.from(
   atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"),
@@ -19,9 +20,15 @@ function gif(): Response {
     status: 200,
     headers: {
       "Content-Type": "image/gif",
-      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      "Content-Length": String(TRANSPARENT_GIF.byteLength),
+      "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+      "CDN-Cache-Control": "no-store",
+      "Cloudflare-CDN-Cache-Control": "no-store",
       Pragma: "no-cache",
       Expires: "0",
+      // A fresh tag on every response keeps a proxy from reusing a cached copy.
+      ETag: `"${crypto.randomUUID()}"`,
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
@@ -61,7 +68,11 @@ async function hashIp(ip: string): Promise<string | null> {
 }
 
 function clientIp(request: Request): string {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "";
+  return (
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    ""
+  );
 }
 
 function newId(prefix: string): string {
@@ -146,20 +157,19 @@ http.route({
   pathPrefix: "/open/",
   method: "GET",
   handler: httpAction(async (ctx, request) => {
-    let rawId = decodeURIComponent(new URL(request.url).pathname.slice("/open/".length)).trim();
-    rawId = rawId.replace(/\/+$/, "").replace(/\.(gif|png|jpe?g|webp)$/i, "");
-    if (!validId(rawId)) return gif();
-    const trackingId = rawId;
+    const headerPath = request.headers.get("x-forwarded-uri") || request.headers.get("x-original-url") || "";
+    const trackingId = trackingIdFromUrl(request.url) || (headerPath ? trackingIdFromUrl(headerPath) : null);
+    if (!trackingId || !validId(trackingId)) return gif();
     try {
       const email = await ctx.runQuery(internal.tracking.getEmail, { trackingId });
       if (email) {
         const now = Date.now();
         const ua = request.headers.get("User-Agent");
         const self = suspectSelfOpen(email.sentAt, now, ua);
-        await ctx.runMutation(internal.tracking.recordOpen, {
+        const event = {
           eventId: newId("evt"),
           trackingId,
-          type: "OPEN",
+          type: "OPEN" as const,
           timestamp: new Date(now).toISOString(),
           userAgent: ua,
           ipHash: await hashIp(clientIp(request)),
@@ -167,7 +177,16 @@ http.route({
           confidence: self.confidence,
           clickId: null,
           destination: null,
-        });
+        };
+        // Count first, in its own mutation. A failed event insert must not roll the count back.
+        const recorded = await ctx.runMutation(internal.tracking.recordOpen, event);
+        if (recorded.recorded) {
+          try {
+            await ctx.runMutation(internal.tracking.recordOpenEvent, event);
+          } catch (error) {
+            console.error("open event insert failed", error);
+          }
+        }
       }
     } catch (error) {
       console.error("open record failed", error);
@@ -263,7 +282,7 @@ http.route({
     if (!recipients.length || body.subject.length > 998) return json({ error: "bad_request" }, 400);
     const trackingId = newId("trk");
     const sentAt = new Date().toISOString();
-    const origin = process.env.CONVEX_SITE_URL?.replace(/\/$/, "") || new URL(request.url).origin;
+    const origin = publicTrackerOrigin(process.env.CONVEX_SITE_URL, request.url);
     const links: Array<{ clickId: string; destination: string }> = [];
     const rewritten: Array<{ click_id: string; original: string; tracked_url: string }> = [];
     if (Array.isArray(body.links)) {
@@ -288,7 +307,7 @@ http.route({
     });
     return json({
       tracking_id: trackingId,
-      pixel_url: `${origin}/open/${trackingId}`,
+      pixel_url: `${origin}/open/${trackingId}.gif`,
       rewritten_links: rewritten,
     });
   }),

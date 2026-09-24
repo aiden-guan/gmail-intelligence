@@ -16,7 +16,12 @@ import type {
   SummarizeInput,
   UsageStats,
 } from './index.js';
-import { EMAIL_SUMMARY_SYSTEM_PROMPT, formatThreadForSummary, summaryUserContent } from './summary-prompt.js';
+import {
+  EMAIL_SUMMARY_SYSTEM_PROMPT,
+  LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT,
+  formatThreadForSummary,
+  summaryUserContent,
+} from './summary-prompt.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -46,9 +51,10 @@ export function extractJsonObject(text: string): unknown {
 export function createPromptBackedProvider(
   name: string,
   complete: PromptComplete,
-  options?: { maxUserChars?: number },
+  options?: { maxUserChars?: number; summaryStyle?: 'compact' | 'full' },
 ): AIProvider {
   const maxUserChars = options?.maxUserChars ?? 12_000;
+  const summaryStyle = options?.summaryStyle ?? 'full';
 
   async function chatJson<T>(system: string, user: string, schema: z.ZodType<T>): Promise<{
     data: T;
@@ -100,8 +106,8 @@ export function createPromptBackedProvider(
         })),
       });
       const { data, usage } = await chatJson(
-        EMAIL_SUMMARY_SYSTEM_PROMPT,
-        summaryUserContent(formatted),
+        summaryStyle === 'compact' ? LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT : EMAIL_SUMMARY_SYSTEM_PROMPT,
+        summaryUserContent(formatted, summaryStyle),
         z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
       );
       return { result: data, usage };

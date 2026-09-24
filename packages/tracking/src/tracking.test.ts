@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyRecentOpens,
   shouldRewriteLink,
   buildTrackingPixelHtml,
   formatSentTrackingBadge,
@@ -208,6 +209,31 @@ describe('sent mail status', () => {
     expect(copy.detail).toBe('Tracking is on for this email.');
     expect(copy.countLabel).toBe('Not opened yet');
     expect(copy.markLabel).toBe('Not opened');
+  });
+
+  it('shows an opened copy when a newer duplicate on the same thread is still unread', () => {
+    const opened = { ...base, openCount: 1, lastOpenedAt: '2026-09-22T15:05:00.000Z' };
+    const newer = { ...base, trackingId: 'trk_new', openCount: 0, sentAt: '2026-09-22T18:00:00.000Z' };
+    expect(
+      matchTrackedEmail({ threadIds: ['thread-1'], subject: 'Hello', emails: ['a@b.com'] }, [newer, opened])?.trackingId,
+    ).toBe('trk_1');
+  });
+
+  it('raises a zero open count when a recent open event exists', () => {
+    const [next] = applyRecentOpens(
+      [base],
+      [{ tracking_id: 'trk_1', type: 'OPEN', timestamp: '2026-09-22T16:00:00.000Z' }],
+    );
+    expect(next?.openCount).toBe(1);
+    expect(next?.firstOpenedAt).toBe('2026-09-22T16:00:00.000Z');
+  });
+
+  it('does not lower an open count that is already higher than the recent events', () => {
+    const [next] = applyRecentOpens(
+      [{ ...base, openCount: 4, firstOpenedAt: base.sentAt, lastOpenedAt: base.sentAt }],
+      [{ tracking_id: 'trk_1', type: 'OPEN', timestamp: '2026-09-22T16:00:00.000Z' }],
+    );
+    expect(next?.openCount).toBe(4);
   });
 
   it('keeps the local reply reminder when remote stats refresh', () => {

@@ -1,3 +1,5 @@
+import { splitSuperseded } from '@gi/shared';
+
 /**
  * Shared instructions for every selected model (ChatGPT, API models, on-device).
  * The model must reason first (Chain-of-Thought) before outputting the structured brief.
@@ -8,14 +10,15 @@ Perform step-by-step reasoning first in the "reasoning" field before drafting th
 1. Sender & Intent: Who sent this, what is their goal, and what is the situation?
 2. Thread Progression: In multi-message threads, trace the chronology. What was initially discussed, what did subsequent replies resolve, and what is the LATEST active status? If earlier questions were already answered in later replies, they are resolved.
 3. Signal vs Noise: Separate essential business substance from formalities, greetings, sign-offs, marketing hype ("we're thrilled to announce"), vague filler, and disclaimers.
-4. Next Steps: Who has the ball? Is any action or decision needed from the recipient, by what deadline?
+4. Current vs old: Text above a dashed line, or above "Previous announcement" / "Earlier announcement" / a quoted reply, is the current status. Do not lead with the old notice, and do not describe a replaced plan as if it is still happening.
+5. Next Steps: Who has the ball? Is any action or decision needed from the recipient, by what deadline?
 
 Fields to output in valid JSON:
 - reasoning: 1 to 3 sentences of clear step-by-step thinking analyzing sender intent, thread progression, latest state, and needed action vs noise.
 - oneLine: 1 to 2 crisp, articulate sentences synthesizing the core update (who/what/why) in your own words. Focus on the actual takeaway and impact for the reader. Do not start with greetings or robot formulas. Never exceed 360 characters.
 - keyPoints: 0 to 3 high-value factual points that add essential context not already covered in oneLine. [] if oneLine covers everything.
 - actionItems: 0 to 3 concrete verb phrases representing real next steps (e.g. "Review staging pull request", "Submit budget approval"). [] if purely informational.
-- dates: specific deadline or event dates only (e.g. "September 26", "Oct 15, 2026"). Never output isolated bare month or day names. [] if none.
+- dates: only a date the reader should remember (a deadline, exam, meeting, or the day something they must do starts). Phrase it, for example "Due Sep 26" or "Week 6 starts Sep 28". Never output a bare number like "9/28", a bare month, or a date that only appears in a superseded notice. [] if every date is history or already happened.
 - unansweredQuestions: ONLY questions that remain OPEN and unaddressed in the latest state of the thread and genuinely require a response from the recipient. MUST be [] for newsletters, promotions, automated notifications, or if already answered in a later reply.
 - decisions: explicit decisions or consensus reached during the thread. [] if none or if promotional/announcement.
 - commitments: explicit commitments made by participants (e.g. "Sarah will patch the bug tomorrow"). [] if none.
@@ -34,6 +37,22 @@ Example output:
   "actionItems": []
 }`;
 
+/**
+ * Short instructions for small on-device models. A long prompt crowds out the email
+ * and these models copy the message instead of deciding what is current.
+ */
+export const LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT = `You summarize one email for the person reading it. Think in "reasoning" first, in two short sentences: what is true now, and what (if anything) they must remember. Then fill the other fields.
+
+Rules:
+- The latest update is the truth. Ignore greetings and sign-offs. Text below a dashed line, "Previous announcement", "Earlier announcement", or a quoted reply is old. Do not summarize the old part as if it is still happening.
+- oneLine: 1 or 2 plain sentences in your own words about the current status. No dashed lines, no "Previous announcement", no copied paragraph.
+- keyPoints: up to 2 extra facts that are still true. [] if oneLine is enough.
+- dates: only a date the reader should put on a calendar. Write "Due Sep 26" or "Week 6 starts Sep 28", never a bare "9/28". [] if the dates are history or already happened.
+- actionItems: up to 2 things the reader should actually do. [] if none.
+- decisions, unansweredQuestions, commitments: [] unless one is explicit and still open.
+
+Return one JSON object with keys reasoning, oneLine, keyPoints, dates, actionItems, decisions, unansweredQuestions, commitments.`;
+
 export function formatThreadForSummary(input: {
   subject: string;
   messages: Array<{ sender: string; bodyText: string; timestamp?: string }>;
@@ -49,12 +68,22 @@ export function formatThreadForSummary(input: {
     const time = msg.timestamp ? ` at ${msg.timestamp}` : '';
     const sender = msg.sender ? ` from ${msg.sender}` : '';
     parts.push(`\n--- Message ${idx + 1}${sender}${time} ---`);
-    parts.push(msg.bodyText.trim());
+    const { current, older } = splitSuperseded(msg.bodyText);
+    parts.push(current.trim());
+    if (older) {
+      parts.push(
+        '\n[Older notice. This is not the current status unless the latest text above still depends on it.]',
+      );
+      parts.push(older.trim().slice(0, 1200));
+    }
   });
 
   return parts.join('\n');
 }
 
-export function summaryUserContent(formattedThreadOrJson: string): string {
+export function summaryUserContent(formattedThreadOrJson: string, style: 'compact' | 'full' = 'full'): string {
+  if (style === 'compact') {
+    return `Summarize the latest status for the reader. Reason first, then return the JSON brief.\n\n${formattedThreadOrJson}`;
+  }
   return `Analyze and synthesize this email thread. Reason first, then provide the brief in JSON.\n\n${formattedThreadOrJson}`;
 }

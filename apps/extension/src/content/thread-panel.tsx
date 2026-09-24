@@ -43,19 +43,12 @@ export function ThreadIntelCard(props: {
   const [uncontrolled, setUncontrolled] = useState<IslandMode>('open');
   const mode = props.mode ?? uncontrolled;
   const category = categoryLabel(props.intel?.classification?.category);
-  const isMarketing = /^(promotions|news|notifications)$/i.test(category || '');
   const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
   const brief = props.intel?.summary?.summary;
-  const reasoning = brief?.reasoning?.trim() || null;
   const points = sanitizeList(brief?.keyPoints || []);
   const dates = sanitizeDateTags(brief?.dates || []);
-  const actions = sanitizeList(brief?.actionItems || []);
-  const decisions = isMarketing ? [] : sanitizeList(brief?.decisions || []);
-  const questions = isMarketing ? [] : sanitizeList(brief?.unansweredQuestions || []);
-  const commitments = isMarketing ? [] : sanitizeList(brief?.commitments || []);
-  const hasDetails = Boolean(reasoning || actions.length || decisions.length || questions.length || commitments.length);
-  const line = summary || props.pending || 'No summary yet.';
+  const line = presentSummary(summary || props.pending || 'No summary yet.');
   const waiting = !summary && Boolean(props.pending);
 
   function setMode(next: IslandMode) {
@@ -86,8 +79,6 @@ export function ThreadIntelCard(props: {
       </button>
     );
   }
-
-  const expanded = mode === 'expanded';
 
   return (
     <div
@@ -146,41 +137,8 @@ export function ThreadIntelCard(props: {
           <button type="button" className={needsReply ? 'gi-action is-ghost' : 'gi-action'} onClick={props.onRemind}>
             Remind
           </button>
-          {hasDetails ? (
-            <button type="button" className="gi-action is-ghost" onClick={() => setMode(expanded ? 'open' : 'expanded')}>
-              {expanded ? 'Hide details' : 'Details'}
-            </button>
-          ) : null}
         </div>
-        {expanded && hasDetails ? (
-          <div className="gi-more">
-            {reasoning ? (
-              <div className="gi-reasoning-block">
-                <div className="gi-eyebrow">Reasoning</div>
-                <p className="gi-reasoning-text">{reasoning}</p>
-              </div>
-            ) : null}
-            <DetailList title="Decisions" items={decisions} />
-            <DetailList title="Open questions" items={questions} />
-            <DetailList title="Commitments" items={commitments} />
-            <DetailList title="Next steps" items={actions} />
-          </div>
-        ) : null}
       </div>
-    </div>
-  );
-}
-function DetailList(props: { title: string; items: string[] }) {
-  const valid = sanitizeList(props.items);
-  if (!valid.length) return null;
-  return (
-    <div>
-      <div className="gi-eyebrow">{props.title}</div>
-      <ul className="gi-points">
-        {valid.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ul>
     </div>
   );
 }
@@ -189,6 +147,15 @@ function sanitizeList(items: string[]): string[] {
   return items
     .map((item) => item.replace(/^[•\s\-*–—]+/, '').trim())
     .filter((item) => item.length >= 3 && /[a-zA-Z]{2,}/.test(item) && !/^[.\s…\-_?]+$/.test(item));
+}
+
+function presentSummary(text: string): string {
+  return text
+    .replace(/[-_=]{3,}/g, ' ')
+    .replace(/\b(?:previous|earlier)\s+announcement\s*:?/gi, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.])/g, '$1')
+    .trim();
 }
 
 function sanitizeDateTags(dates: string[]): string[] {
@@ -202,6 +169,7 @@ function sanitizeDateTags(dates: string[]): string[] {
   for (const date of dates) {
     const trimmed = date.replace(/\s+/g, ' ').trim();
     if (!trimmed || trimmed.length < 2) continue;
+    if (/^\d{1,2}\/\d{1,2}(?:\/\d{2,4})?$/.test(trimmed)) continue;
     if (MONTHS.test(trimmed)) continue;
     if (hasSpecificDate && WEEKDAYS.test(trimmed)) continue;
     cleaned.push(trimmed);

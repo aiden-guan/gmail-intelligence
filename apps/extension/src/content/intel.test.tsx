@@ -149,12 +149,48 @@ describe('reactive intelligence', () => {
     expect(host.querySelector('li')?.textContent).toBe('TikTok Recruiting is a partner');
     expect(host.textContent).toContain('Friday');
     const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
-    expect(details).toBeTruthy();
+    expect(details).toBeFalsy();
+    expect(host.textContent).not.toContain('Next steps');
+    root.unmount();
+  });
+
+  it('does not render bottom detail sections (reasoning, decisions, commitments, next steps, open questions)', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
     await act(async () => {
-      details?.click();
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'RESPOND', needsReply: true },
+            summary: {
+              summary: {
+                oneLine: 'Onboarding instructions sent.',
+                reasoning: 'The sender is UC Berkeley guiding participants through onboarding.',
+                decisions: ['Section 1 confirmed'],
+                commitments: ['Representative must be provided info'],
+                actionItems: ['Provide authorized representative with info'],
+                unansweredQuestions: ['Who is the representative?'],
+              },
+            },
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
     });
-    expect(host.textContent).toContain('Next steps');
-    expect(host.textContent).toContain('Open the summit details');
+    expect(host.textContent).toContain('Onboarding instructions sent.');
+    expect(host.textContent).not.toContain('Reasoning');
+    expect(host.textContent).not.toContain('The sender is UC Berkeley guiding participants through onboarding.');
+    expect(host.textContent).not.toContain('Decisions');
+    expect(host.textContent).not.toContain('Section 1 confirmed');
+    expect(host.textContent).not.toContain('Commitments');
+    expect(host.textContent).not.toContain('Representative must be provided info');
+    expect(host.textContent).not.toContain('Next steps');
+    expect(host.textContent).not.toContain('Provide authorized representative with info');
+    expect(host.textContent).not.toContain('Open questions');
+    const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
+    expect(details).toBeFalsy();
     root.unmount();
   });
 
@@ -220,19 +256,42 @@ describe('reactive intelligence', () => {
     expect(dateElements).toHaveLength(1);
     expect(dateElements[0]?.textContent?.trim()).toBe('September 30');
 
-    // Details button should be present for Next steps ('Sign up online')
-    const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
-    expect(details).toBeTruthy();
-    await act(async () => {
-      details?.click();
-    });
+    root.unmount();
+  });
 
-    // Open questions must NOT be rendered for promotional emails
+  it('flattens a dashed summary and hides bare numeric dates', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'NOTIFICATIONS' },
+            summary: {
+              summary: {
+                oneLine:
+                  'Data C8: Tutoring Sections Update for Week 5. ---------------- Previous Announcement: There will be no tutoring sections during Week 5.',
+                dates: ['9/28', '9/23', 'Week 6 starts Sep 28'],
+              },
+            },
+          }}
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.textContent).not.toMatch(/-{3,}/);
+    expect(host.textContent).not.toContain('Previous Announcement');
+    expect(host.textContent).not.toContain('9/28');
+    expect(host.textContent).not.toContain('9/23');
+    expect(host.textContent).toContain('Week 6 starts Sep 28');
+
+    // Details button and drawer should not be present
+    const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
+    expect(details).toBeFalsy();
     expect(host.textContent).not.toContain('Open questions');
-    expect(host.textContent).not.toContain('OAKBERRY');
-    expect(host.textContent).not.toContain('...');
-    expect(host.textContent).toContain('Next steps');
-    expect(host.textContent).toContain('Sign up online');
+    expect(host.textContent).not.toContain('Next steps');
     root.unmount();
   });
 });

@@ -244,7 +244,7 @@ export function matchTrackedEmail(
   const ids = new Set(row.threadIds.map((id) => id.trim()).filter(Boolean));
   if (ids.size > 0) {
     const byThread = emails.filter((email) => threadIdsMatch(email.gmailThreadId, ids));
-    if (byThread.length > 0) return mostRecent(byThread);
+    if (byThread.length > 0) return preferOpened(byThread);
   }
 
   const subject = normalizeSubject(row.subject);
@@ -261,7 +261,38 @@ export function matchTrackedEmail(
   const sameThread = candidates.filter(
     (email) => !email.gmailThreadId || ids.size === 0 || ids.has(email.gmailThreadId),
   );
-  return sameThread.length > 0 ? mostRecent(sameThread) : null;
+  return sameThread.length > 0 ? preferOpened(sameThread) : null;
+}
+
+/**
+ * Recent open events can be ahead of the email row when the counter write failed.
+ * Never lower a count the row already has.
+ */
+export function applyRecentOpens(
+  emails: TrackedEmailSummary[],
+  events: Array<{ tracking_id: string; type: string; timestamp: string }>,
+): TrackedEmailSummary[] {
+  const byId = new Map(emails.map((email) => [email.trackingId, email]));
+  const opens = new Map<string, { count: number; first: string; last: string }>();
+  for (const event of events) {
+    if (event.type !== 'OPEN' || !event.tracking_id || !event.timestamp) continue;
+    const slot = opens.get(event.tracking_id) || { count: 0, first: event.timestamp, last: event.timestamp };
+    slot.count += 1;
+    if (event.timestamp < slot.first) slot.first = event.timestamp;
+    if (event.timestamp > slot.last) slot.last = event.timestamp;
+    opens.set(event.tracking_id, slot);
+  }
+  for (const [id, slot] of opens) {
+    const current = byId.get(id);
+    if (!current || slot.count <= current.openCount) continue;
+    byId.set(id, {
+      ...current,
+      openCount: slot.count,
+      firstOpenedAt: current.firstOpenedAt || slot.first,
+      lastOpenedAt: !current.lastOpenedAt || slot.last > current.lastOpenedAt ? slot.last : current.lastOpenedAt,
+    });
+  }
+  return [...byId.values()];
 }
 
 function threadIdsMatch(stored: string | null, ids: Set<string>): boolean {
@@ -506,6 +537,11 @@ function asStringList(value: unknown): string[] {
 }
 function mostRecent(emails: TrackedEmailSummary[]): TrackedEmailSummary {
   return [...emails].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0))[0];
+}
+
+function preferOpened(emails: TrackedEmailSummary[]): TrackedEmailSummary {
+  const opened = emails.filter((email) => email.openCount > 0 || email.clickCount > 0);
+  return mostRecent(opened.length > 0 ? opened : emails);
 }
 function formatSpan(delta: number, ago: boolean): string {
   if (!Number.isFinite(delta)) return ago ? 'recently' : 'after you sent';

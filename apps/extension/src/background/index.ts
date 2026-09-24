@@ -1,3 +1,15 @@
+function isWorkerEvictionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return msg.includes('No SW') || msg.includes('No RPH') || msg.includes('Extension context invalidated');
+}
+
+// Suppress benign MV3 service worker collection/eviction errors reported by Chromium
+self.addEventListener('unhandledrejection', (event) => {
+  if (isWorkerEvictionError(event.reason)) {
+    event.preventDefault();
+  }
+});
+
 import { AgentLoop } from '@gi/agent';
 import {
   AIJobQueue,
@@ -23,6 +35,7 @@ import {
 } from '@gi/shared';
 import {
   TrackingClient,
+  applyRecentOpens,
   formatSentTrackingBadge,
   summaryFromRemote,
   type TrackedEmailSummary,
@@ -103,14 +116,14 @@ function getAI() {
     return createPromptBackedProvider(
       'local',
       (system, user) => completeOnDevice(settings.aiModel, system, user),
-      { maxUserChars: 4_000 },
+      { maxUserChars: 4_000, summaryStyle: 'compact' },
     );
   }
   if (settings.aiProvider === 'chrome') {
     return createPromptBackedProvider(
       'chrome',
       (system, user) => completeOnDevice('gemini-nano', system, user),
-      { maxUserChars: 7_000 },
+      { maxUserChars: 7_000, summaryStyle: 'compact' },
     );
   }
   if (!settings.aiApiKey && settings.aiProvider !== 'ollama') return null;
@@ -206,7 +219,7 @@ function rebuildAgent(): void {
       return id;
     },
     onIntel: (threadId, kind) => {
-      void publishIntel(threadId, kind);
+      void publishIntel(threadId, kind).catch(() => undefined);
     },
   });
 }
@@ -365,15 +378,20 @@ async function runDiagnostics() {
 }
 
 async function publishIntel(threadId: string, kind: string): Promise<void> {
-  await chrome.storage.session.set({ intelPulse: { threadId, kind, at: Date.now() } });
-  const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-  await Promise.all(
-    tabs.map((tab) =>
-      tab.id == null
-        ? undefined
-        : chrome.tabs.sendMessage(tab.id, { type: 'THREAD_INTELLIGENCE_UPDATED', threadId, kind }).catch(() => undefined),
-    ),
-  );
+  try {
+    await chrome.storage.session.set({ intelPulse: { threadId, kind, at: Date.now() } });
+    const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
+    await Promise.all(
+      tabs.map((tab) =>
+        tab.id == null
+          ? undefined
+          : chrome.tabs.sendMessage(tab.id, { type: 'THREAD_INTELLIGENCE_UPDATED', threadId, kind }).catch(() => undefined),
+      ),
+    );
+  } catch (error) {
+    if (isWorkerEvictionError(error)) return;
+    throw error;
+  }
 }
 
 async function sendToTab(tabId: number, message: unknown, attempts = 8): Promise<unknown> {
@@ -428,12 +446,13 @@ async function pollTracking(): Promise<void> {
   const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
   const local = await readTrackedEmails();
   const byId = new Map(local.map((email) => [email.trackingId, email]));
+  let sawRemote = false;
   try {
     const remote = await client.listEmails(200);
     for (const row of remote) {
       byId.set(row.tracking_id, summaryFromRemote(row, byId.get(row.tracking_id) || null));
     }
-    await writeTrackedEmails([...byId.values()]);
+    sawRemote = true;
   } catch (e) {
     console.warn('[gi] tracking list failed', e);
     await Promise.all(
@@ -441,23 +460,30 @@ async function pollTracking(): Promise<void> {
         try {
           const row = await client.getEmail(email.trackingId);
           byId.set(row.tracking_id, summaryFromRemote(row, email));
+          sawRemote = true;
         } catch {
           /* keep the last status we already have */
         }
       }),
     );
-    if (local.length) await writeTrackedEmails([...byId.values()]);
   }
+  let events: Awaited<ReturnType<TrackingClient['getRecentEvents']>> = [];
   try {
     await loadNotifiedEvents();
-    const events = await client.getRecentEvents();
-    const local = await readTrackedEmails();
+    events = await client.getRecentEvents();
+    for (const email of applyRecentOpens([...byId.values()], events)) byId.set(email.trackingId, email);
+  } catch (e) {
+    console.warn('[gi] tracking poll failed', e);
+  }
+  if (sawRemote || local.length) await writeTrackedEmails([...byId.values()]);
+  try {
+    const fresh = [...byId.values()];
     for (const ev of events) {
       if (notifiedEventIds.has(ev.id)) continue;
       if (settings.hideSuspectedSelfOpens && ev.suspected_self_open) continue;
       if (!(await markEventNotified(ev.id))) continue;
       if (!settings.desktopNotifications) continue;
-      const email = local.find((item) => item.trackingId === ev.tracking_id);
+      const email = fresh.find((item) => item.trackingId === ev.tracking_id);
       const who = email?.recipients.length === 1 ? email.recipients[0] : 'Someone';
       const subject = email?.subject || 'your email';
       void Promise.resolve(chrome.notifications.create(ev.id, {
@@ -539,8 +565,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'LOCAL_MODEL_PROGRESS' || message?.type === 'LOCAL_MODEL_RELEASE') return false;
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    message?.type === 'LOCAL_MODEL_PROGRESS' ||
+    message?.type === 'LOCAL_MODEL_RELEASE' ||
+    message?.type === 'ON_DEVICE_PING' ||
+    message?.type === 'ON_DEVICE_PROMPT' ||
+    message?.type === 'ON_DEVICE_DOWNLOAD'
+  ) return false;
   void (async () => {
     try {
     await loadSettings();
@@ -817,6 +849,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ tabId: id });
         return;
       }
+      if (message?.type === 'inboxsdk__injectPageWorld' && sender?.tab?.id != null) {
+        try {
+          const documentIds = sender.documentId ? [sender.documentId] : undefined;
+          const frameIds = !documentIds && sender.frameId != null ? [sender.frameId] : undefined;
+          await chrome.scripting.executeScript({
+            target: { tabId: sender.tab.id, documentIds, frameIds },
+            world: 'MAIN',
+            files: ['inboxsdk/pageWorld.js'],
+          });
+          sendResponse(true);
+        } catch (e) {
+          console.warn('[gi] InboxSDK pageWorld injection failed', e);
+          sendResponse(false);
+        }
+        return;
+      }
       if (message?.type === 'ENSURE_INBOXSDK_PAGEWORLD') {
         try {
           const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
@@ -1075,10 +1123,15 @@ setChatGptSignedInHandler(async () => {
 
 installChatGptLoginListeners();
 
-void loadSettings().then(async () => {
-  rebuildAgent();
-  chrome.alarms.create('tracking_poll', { periodInMinutes: 1 });
-  await pollTracking();
-});
+void loadSettings()
+  .then(async () => {
+    rebuildAgent();
+    chrome.alarms.create('tracking_poll', { periodInMinutes: 1 });
+    await pollTracking();
+  })
+  .catch((err) => {
+    if (isWorkerEvictionError(err)) return;
+    console.warn('[gi] background initialization failed', err);
+  });
 
 export { formatSentTrackingBadge };
