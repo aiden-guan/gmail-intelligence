@@ -273,7 +273,7 @@ describe('open pixel urls', () => {
     expect(verdict.suspected).toBe(true);
   });
 
-  it('active claim overrides GoogleImageProxy to SELF_LIKELY instead of PROXY_LIKELY', () => {
+  it('active claim does not reclassify GoogleImageProxy; proxy requests stay PROXY_LIKELY', () => {
     const sentAt = Date.parse('2026-09-23T12:00:00.000Z');
     const openTs = sentAt + 15_000;
     const verdict = classifyOpenEvent({
@@ -282,8 +282,9 @@ describe('open pixel urls', () => {
       userAgent: 'GoogleImageProxy',
       hasActiveSenderClaim: true,
     });
-    expect(verdict.classification).toBe('SELF_LIKELY');
+    expect(verdict.classification).toBe('PROXY_LIKELY');
     expect(verdict.countsAsOpen).toBe(false);
+    expect(verdict.source).toBe('google_image_proxy');
   });
 
   it('suppresses delayed pixel (>8s after send/view) with active sender claim', () => {

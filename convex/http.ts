@@ -154,7 +154,7 @@ http.route({
     json({
       ok: true,
       protocolVersion: 3,
-      features: ["self_view_claims", "event_reclassification", "classified_clicks"],
+      features: ["self_view_claims", "event_reclassification", "classified_clicks", "sender_fingerprint_claims"],
       store: "convex",
     }),
   ),
@@ -356,6 +356,8 @@ http.route({
       gmail_message_id?: string | null;
       source?: "ROW_INTERACTION" | "MESSAGE_EXPANDED" | "MESSAGE_LOAD" | "CACHE_REINSPECTION";
       selfViewEventId?: string;
+      reconcileGmailIds?: boolean;
+      reconcile_gmail_ids?: boolean;
     };
     const ts = body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
       ? new Date(body.timestamp).toISOString()
@@ -374,6 +376,8 @@ http.route({
       userAgent: ua,
       gmailThreadId: typeof threadId === "string" ? threadId.slice(0, 128) : null,
       gmailMessageId: typeof messageId === "string" ? messageId.slice(0, 128) : null,
+      ipHash: await hashIp(clientIp(request)),
+      reconcileGmailIds: body.reconcileGmailIds === true || body.reconcile_gmail_ids === true,
       source: body.source,
     });
 

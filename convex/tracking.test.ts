@@ -145,6 +145,7 @@ describe('Convex tracking mutations and self-view suppression', () => {
       trackingId,
       timestamp: selfViewTime,
       userAgent: 'Mozilla/5.0 Chrome',
+      ipHash: 'ip_1',
       gmailThreadId: 'thread_1',
       gmailMessageId: 'msg_1',
       source: 'MESSAGE_EXPANDED',
@@ -255,6 +256,7 @@ describe('Convex tracking mutations and self-view suppression', () => {
       trackingId,
       timestamp: new Date(baseTime).toISOString(),
       userAgent: 'Mozilla/5.0 Chrome',
+      ipHash: 'ip_sender',
       gmailThreadId: 'thread_2',
       gmailMessageId: 'msg_2',
       source: 'MESSAGE_EXPANDED',
@@ -348,7 +350,8 @@ describe('Convex tracking mutations and self-view suppression', () => {
       eventId: 'evt_sv_msg2',
       trackingId: trackingId2,
       timestamp: new Date().toISOString(),
-      userAgent: 'Chrome',
+      userAgent: 'Mozilla/5.0 Chrome',
+      ipHash: 'ip_sender',
       gmailThreadId: 'thread_shared',
       gmailMessageId: 'msg_second',
       source: 'MESSAGE_EXPANDED',
@@ -387,5 +390,257 @@ describe('Convex tracking mutations and self-view suppression', () => {
 
     const email2 = await callQuery(tracking.getEmail, ctx, { trackingId: trackingId2 });
     expect(email2.openCount).toBe(0);
+  });
+
+  it('proxy then sender browser then recipient browser ends at openCount 1 and does not burn the claim on the proxy', async () => {
+    const { ctx } = createMockDb();
+    const trackingId = 'trk_proxy_first';
+    const sentAt = new Date(Date.now() - 60_000).toISOString();
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId,
+      subject: 'Proxy first',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: 'thread_p',
+      gmailMessageId: 'msg_p',
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'evt_sv_proxy',
+      trackingId,
+      timestamp: new Date().toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_p',
+      source: 'MESSAGE_EXPANDED',
+    });
+
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_proxy',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: 'Mozilla/5.0 GoogleImageProxy',
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_sender_browser',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_recipient_browser',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date(Date.now() + 2000).toISOString(),
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36',
+      ipHash: 'ip_recipient',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((e: any) => e.eventId === 'evt_proxy').classification).toBe('PROXY_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_sender_browser').classification).toBe('SELF_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_recipient_browser').classification).toBe('RECIPIENT_LIKELY');
+    const email = await callQuery(tracking.getEmail, ctx, { trackingId });
+    expect(email.openCount).toBe(1);
+  });
+
+  it('does not let a different fingerprint consume the sender claim', async () => {
+    const { ctx } = createMockDb();
+    const trackingId = 'trk_fp';
+    const sentAt = new Date(Date.now() - 60_000).toISOString();
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId,
+      subject: 'Fingerprint',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: 'msg_fp',
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'evt_sv_fp',
+      trackingId,
+      timestamp: new Date().toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_recipient_first',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36',
+      ipHash: 'ip_recipient',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_sender_after',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date(Date.now() + 1500).toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const email = await callQuery(tracking.getEmail, ctx, { trackingId });
+    expect(email.openCount).toBe(1);
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((e: any) => e.eventId === 'evt_recipient_first').classification).toBe('RECIPIENT_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_sender_after').classification).toBe('SELF_LIKELY');
+  });
+
+  it('reclassifies only the fingerprint-matched browser open when the pixel arrives before SELF_VIEW', async () => {
+    const { ctx } = createMockDb();
+    const trackingId = 'trk_retro_fp';
+    const base = Date.now();
+    const sentAt = new Date(base - 60_000).toISOString();
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId,
+      subject: 'Retro fingerprint',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: 'old_id',
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_proxy_before',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date(base - 1000).toISOString(),
+      userAgent: 'GoogleImageProxy',
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_sender_before',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date(base - 800).toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_recipient_before',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date(base - 700).toISOString(),
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36',
+      ipHash: 'ip_recipient',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const result = await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'evt_sv_retro_fp',
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      gmailMessageId: 'new_id',
+      reconcileGmailIds: true,
+      source: 'MESSAGE_EXPANDED',
+    });
+    expect(result.reclassifiedEventIds).toContain('evt_sender_before');
+    expect(result.reclassifiedEventIds).not.toContain('evt_proxy_before');
+    expect(result.reclassifiedEventIds).not.toContain('evt_recipient_before');
+    const email = await callQuery(tracking.getEmail, ctx, { trackingId });
+    expect(email.openCount).toBe(1);
+    expect(email.gmailMessageId).toBe('new_id');
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((e: any) => e.eventId === 'evt_proxy_before').classification).toBe('PROXY_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_sender_before').classification).toBe('SELF_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_recipient_before').classification).toBe('RECIPIENT_LIKELY');
+  });
+
+  it('scanner request does not consume an active sender claim', async () => {
+    const { ctx } = createMockDb();
+    const trackingId = 'trk_scan';
+    const sentAt = new Date(Date.now() - 60_000).toISOString();
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId,
+      subject: 'Scanner',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: null,
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'evt_sv_scan',
+      trackingId,
+      timestamp: new Date().toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_scan',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: 'Barracuda Sentinel Scanner/1.0',
+      ipHash: 'ip_scan',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_sender_after_scan',
+      trackingId,
+      type: 'OPEN',
+      timestamp: new Date(Date.now() + 500).toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((e: any) => e.eventId === 'evt_scan').classification).toBe('MACHINE_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_sender_after_scan').classification).toBe('SELF_LIKELY');
+    const email = await callQuery(tracking.getEmail, ctx, { trackingId });
+    expect(email.openCount).toBe(0);
   });
 });

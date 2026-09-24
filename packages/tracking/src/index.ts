@@ -147,6 +147,7 @@ export class TrackingClient {
       gmailMessageId?: string | null;
       source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
       selfViewEventId?: string;
+      reconcileGmailIds?: boolean;
     },
   ): Promise<{
     ok: boolean;
@@ -801,13 +802,17 @@ export {
   inspectTrackedMime,
   isSelfViewCorrelated,
   normalizeGmailId,
+  normalizeUserAgentFamily,
+  openEventMatchesSenderClaim,
   probeTracker,
   SELF_VIEW_POST_WINDOW_MS,
   SELF_VIEW_PRE_WINDOW_MS,
+  senderFingerprintMatches,
   TRACKER_PROTOCOL_VERSION,
   TRACKER_REQUIRED_FEATURES,
   TRACKER_SUPPORTED_FEATURES,
   trackerHealthLabel,
+  uaFamiliesCompatible,
 } from './lifecycle.js';
 export type {
   ClickClassification,
@@ -819,6 +824,7 @@ export type {
   OpenVerdict,
   SelfViewClaim,
   SelfViewSource,
+  SenderFingerprint,
   TrackerHealthStatus,
   TrackerProbe,
   TrackingDiagnosticsReport,
@@ -827,3 +833,10 @@ export type {
   TrackingSelfViewDiagnostic,
   TrackingSendReport,
 } from './lifecycle.js';
+export {
+  decodeBounded,
+  extractTrackingIdFromCandidateUrl,
+  extractTrackingIdFromMessageBody,
+  extractTrackingIdsFromMessageBody,
+} from './pixel-identity.js';
+export type { PixelCandidateElement, PixelCandidateRoot } from './pixel-identity.js';

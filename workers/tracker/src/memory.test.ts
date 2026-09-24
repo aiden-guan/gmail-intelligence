@@ -6,18 +6,39 @@ const env: Env = {
   PERSONAL_API_TOKEN: 'test-token',
 };
 
-function authHeaders(): HeadersInit {
+const SENDER_IP = '203.0.113.10';
+const RECIPIENT_IP = '198.51.100.20';
+const CHROME_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+function authHeaders(): Record<string, string> {
   return {
     Authorization: 'Bearer test-token',
     'Content-Type': 'application/json',
   };
 }
 
-function browserHeaders(extra?: Record<string, string>): HeadersInit {
+function browserHeaders(extra?: Record<string, string>): Record<string, string> {
   return {
-    'User-Agent':
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': CHROME_UA,
+    'X-Forwarded-For': SENDER_IP,
     ...extra,
+  };
+}
+
+function senderViewHeaders(extra?: Record<string, string>): Record<string, string> {
+  return {
+    ...authHeaders(),
+    'User-Agent': CHROME_UA,
+    'X-Forwarded-For': SENDER_IP,
+    ...extra,
+  };
+}
+
+function recipientHeaders(): Record<string, string> {
+  return {
+    'User-Agent': CHROME_UA,
+    'X-Forwarded-For': RECIPIENT_IP,
   };
 }
 
@@ -37,7 +58,7 @@ describe('local memory tracker', () => {
     expect(await res.json()).toEqual({
       ok: true,
       protocolVersion: 3,
-      features: ['self_view_claims', 'event_reclassification', 'classified_clicks'],
+      features: ['self_view_claims', 'event_reclassification', 'classified_clicks', 'sender_fingerprint_claims'],
       store: 'memory',
     });
   });
@@ -271,7 +292,7 @@ describe('local memory tracker', () => {
     await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({ timestamp: selfViewTime }),
       }),
       env,
@@ -323,7 +344,7 @@ describe('local memory tracker', () => {
     const selfViewRes = await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({ timestamp: new Date().toISOString() }),
       }),
       env,
@@ -370,7 +391,7 @@ describe('local memory tracker', () => {
     await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({ timestamp: laterSelfViewTime }),
       }),
       env,
@@ -414,7 +435,7 @@ describe('local memory tracker', () => {
         await worker.fetch(
           new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
             method: 'POST',
-            headers: authHeaders(),
+            headers: senderViewHeaders(),
             body: JSON.stringify({ timestamp: now }),
           }),
           env,
@@ -521,7 +542,7 @@ describe('local memory tracker', () => {
     const selfViewRes = await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({ timestamp: new Date().toISOString(), gmailThreadId: 'thread-xyz' }),
       }),
       env,
@@ -579,7 +600,7 @@ describe('local memory tracker', () => {
       const selfViewRes = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({ timestamp: observedAtIso }),
         }),
         env,
@@ -623,7 +644,7 @@ describe('local memory tracker', () => {
     await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({ timestamp: customTs }),
       }),
       env,
@@ -650,7 +671,7 @@ describe('local memory tracker', () => {
     await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id_2}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({}),
       }),
       env,
@@ -727,7 +748,7 @@ describe('local memory tracker', () => {
     await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id_2}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({
           gmailMessageId: '#msg-a:linked-msg-456',
           gmailThreadId: 'thread-f:linked-thread-789',
@@ -772,7 +793,7 @@ describe('local memory tracker', () => {
       const selfViewRes = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(),
             source: 'MESSAGE_EXPANDED',
@@ -834,7 +855,7 @@ describe('local memory tracker', () => {
       await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({ timestamp: new Date(baseTime).toISOString(), source: 'MESSAGE_EXPANDED' }),
         }),
         env,
@@ -900,7 +921,7 @@ describe('local memory tracker', () => {
       await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({ timestamp: new Date(baseTime).toISOString() }),
         }),
         env,
@@ -933,7 +954,7 @@ describe('local memory tracker', () => {
     const firstRes = await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({
           selfViewEventId: 'evt_idempotent_123',
           timestamp: new Date().toISOString(),
@@ -950,7 +971,7 @@ describe('local memory tracker', () => {
     const secondRes = await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({
           selfViewEventId: 'evt_idempotent_123',
           timestamp: new Date().toISOString(),
@@ -1026,7 +1047,7 @@ describe('local memory tracker', () => {
     await worker.fetch(
       new Request(`http://127.0.0.1:8787/api/emails/${trkA}/self-view`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: senderViewHeaders(),
         body: JSON.stringify({
           gmailMessageId: 'msg_aaa',
           gmailThreadId: 'thread_shared',
@@ -1081,7 +1102,7 @@ describe('local memory tracker', () => {
       const expandedRes = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(),
             source: 'MESSAGE_EXPANDED',
@@ -1098,7 +1119,7 @@ describe('local memory tracker', () => {
       const loadRes = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(Date.now()).toISOString(),
             source: 'MESSAGE_LOAD',
@@ -1168,7 +1189,7 @@ describe('local memory tracker', () => {
       await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(),
             source: 'MESSAGE_EXPANDED',
@@ -1245,7 +1266,7 @@ describe('local memory tracker', () => {
       const reinspectRes = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(), // Original T0 timestamp!
             source: 'CACHE_REINSPECTION',
@@ -1328,7 +1349,7 @@ describe('local memory tracker', () => {
       const svRes = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(),
             source: 'MESSAGE_EXPANDED',
@@ -1399,7 +1420,7 @@ describe('local memory tracker', () => {
       const attempt2 = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/bad_id%2Fwith_slash/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({ timestamp: new Date(baseTime).toISOString(), selfViewEventId: idempotencyKey }),
         }),
         env,
@@ -1411,7 +1432,7 @@ describe('local memory tracker', () => {
       const attempt3 = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(),
             source: 'MESSAGE_EXPANDED',
@@ -1428,7 +1449,7 @@ describe('local memory tracker', () => {
       const retrySame = await worker.fetch(
         new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
           method: 'POST',
-          headers: authHeaders(),
+          headers: senderViewHeaders(),
           body: JSON.stringify({
             timestamp: new Date(baseTime).toISOString(),
             source: 'MESSAGE_EXPANDED',
@@ -1449,5 +1470,47 @@ describe('local memory tracker', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('proxy does not consume the sender claim, then the sender browser is excluded and a different recipient counts once', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Proxy then sender', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 60_000).toISOString() }),
+      }),
+      env,
+    );
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: senderViewHeaders(),
+        body: JSON.stringify({ timestamp: new Date().toISOString(), source: 'MESSAGE_EXPANDED' }),
+      }),
+      env,
+    );
+    await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+    await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await worker.fetch(new Request(pixel_url, { headers: recipientHeaders() }), env);
+
+    const events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ type: string; classification: string; user_agent?: string }>;
+    const opens = events.filter((event) => event.type === 'OPEN');
+    expect(opens.map((event) => event.classification).sort()).toEqual(['PROXY_LIKELY', 'RECIPIENT_LIKELY', 'SELF_LIKELY']);
+    const email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(email.open_count).toBe(1);
   });
 });

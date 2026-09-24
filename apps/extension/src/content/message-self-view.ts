@@ -1,8 +1,15 @@
-import { normalizeGmailId, type TrackedEmailSummary } from '@gi/tracking';
+import {
+  extractTrackingIdFromMessageBody,
+  normalizeGmailId,
+  type TrackedEmailSummary,
+} from '@gi/tracking';
 import { resolveMessageId, resolveThreadId, type MessageIdView, type ThreadIdView } from '@gi/gmail';
+
+const THREAD_RECOVERY_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 export type InboxSdkMessageViewLike = MessageIdView & {
   getViewState?: () => string;
+  getBodyElement?: () => HTMLElement | null;
   getThreadView?: () => ThreadIdView | null | undefined;
   on?: (event: string, cb: (payload?: any) => void) => void;
   destroyed?: boolean;
@@ -20,6 +27,12 @@ export type MessageSelfViewTrigger =
   | 'message-expanded'
   | 'message-load'
   | 'cache-reinspection';
+
+export type SelfViewDiagnostic = {
+  reason: 'unresolved' | 'ambiguous_pixel';
+  gmailMessageId: string | null;
+  gmailThreadId: string | null;
+};
 
 export interface MessageSelfViewController {
   handleMessageView(messageView: InboxSdkMessageViewLike): void;
@@ -40,6 +53,7 @@ export type ActiveMessageViewState = {
 
 export function createMessageSelfViewHandler(opts: {
   getEmails: () => TrackedEmailSummary[];
+  getTrackerBaseUrl?: () => string | null | undefined;
   onSelfView: (
     trackingId: string,
     gmailThreadId: string | null,
@@ -47,6 +61,8 @@ export function createMessageSelfViewHandler(opts: {
     observedAt: number,
     trigger: SelfViewSource,
   ) => void;
+  onReconcile?: (trackingId: string, gmailThreadId: string | null, gmailMessageId: string | null) => void;
+  onDiagnostic?: (info: SelfViewDiagnostic) => void;
   onCollapsed?: (trackingId: string, gmailMessageId: string | null) => void;
 }): MessageSelfViewController {
   const activeMessageViews = new Map<InboxSdkMessageViewLike, ActiveMessageViewState>();
@@ -80,47 +96,98 @@ export function createMessageSelfViewHandler(opts: {
 
       const rawMessageId = await resolveMessageId(messageView);
       const messageId = normalizeGmailId(rawMessageId);
-      if (!messageId) return;
-
+      const threadView = typeof messageView.getThreadView === 'function' ? messageView.getThreadView() : null;
+      const rawThreadId = threadView ? await resolveThreadId(threadView) : null;
+      const viewThreadId = normalizeGmailId(rawThreadId);
       const emails = opts.getEmails();
-      const match = emails.find((item) => normalizeGmailId(item.gmailMessageId) === messageId);
-      if (match) {
-        // Source-specific deduplication
-        if (source === 'MESSAGE_LOAD') {
-          if (
-            state.lastReportedTrackingId === match.trackingId &&
-            state.lastReportedMessageId === messageId &&
-            state.lastLoadedClaimAt === observedAt
-          ) {
-            return;
-          }
-          state.lastLoadedClaimAt = observedAt;
-        } else if (source === 'MESSAGE_EXPANDED') {
-          if (
-            state.lastReportedTrackingId === match.trackingId &&
-            state.lastReportedMessageId === messageId &&
-            state.lastExpandedClaimAt === observedAt
-          ) {
-            return;
-          }
-          state.lastExpandedClaimAt = observedAt;
-        } else if (source === 'CACHE_REINSPECTION') {
-          if (
-            state.lastReportedTrackingId === match.trackingId &&
-            state.lastReportedMessageId === messageId
-          ) {
-            return;
-          }
+      const trackerBaseUrl = opts.getTrackerBaseUrl?.() || undefined;
+      const body = typeof messageView.getBodyElement === 'function' ? messageView.getBodyElement() : null;
+      const pixelTrackingId = body ? extractTrackingIdFromMessageBody(body, trackerBaseUrl) : null;
+
+      let trackingId: string | null = null;
+      let identity: 'pixel' | 'message_id' | 'thread' | null = null;
+      let stored: TrackedEmailSummary | undefined;
+
+      if (pixelTrackingId) {
+        trackingId = pixelTrackingId;
+        identity = 'pixel';
+        stored = emails.find((item) => item.trackingId === pixelTrackingId);
+      } else if (messageId) {
+        stored = emails.find((item) => normalizeGmailId(item.gmailMessageId) === messageId);
+        if (stored) {
+          trackingId = stored.trackingId;
+          identity = 'message_id';
         }
-
-        state.lastReportedTrackingId = match.trackingId;
-        state.lastReportedMessageId = messageId;
-
-        const threadView = typeof messageView.getThreadView === 'function' ? messageView.getThreadView() : null;
-        const rawThreadId = threadView ? await resolveThreadId(threadView) : null;
-        const threadId = normalizeGmailId(rawThreadId) || normalizeGmailId(match.gmailThreadId);
-        opts.onSelfView(match.trackingId, threadId, messageId, observedAt, source);
       }
+
+      if (!trackingId && viewThreadId) {
+        const candidates = emails.filter((item) => {
+          if (normalizeGmailId(item.gmailThreadId) !== viewThreadId) return false;
+          if (normalizeGmailId(item.gmailMessageId)) return false;
+          const sent = item.sentAt ? Date.parse(item.sentAt) : Number.NaN;
+          if (!Number.isFinite(sent)) return false;
+          if (sent > observedAt + 60_000) return false;
+          return observedAt - sent <= THREAD_RECOVERY_WINDOW_MS;
+        });
+        if (candidates.length === 1) {
+          stored = candidates[0];
+          trackingId = stored.trackingId;
+          identity = 'thread';
+        }
+      }
+
+      if (!trackingId || !identity) {
+        const stillLoading = typeof messageView.isLoaded === 'function' && !messageView.isLoaded();
+        if (stillLoading) return;
+        const info: SelfViewDiagnostic = {
+          reason: 'unresolved',
+          gmailMessageId: messageId,
+          gmailThreadId: viewThreadId,
+        };
+        if (opts.onDiagnostic) opts.onDiagnostic(info);
+        else console.debug('[gi][self-view] unresolved message view', info);
+        return;
+      }
+
+      const threadId = viewThreadId || normalizeGmailId(stored?.gmailThreadId);
+      const storedMessageId = normalizeGmailId(stored?.gmailMessageId);
+      const shouldReconcile = Boolean(
+        messageId &&
+          (identity === 'pixel' || identity === 'thread') &&
+          (!stored || storedMessageId !== messageId),
+      );
+
+      if (source === 'MESSAGE_LOAD') {
+        if (
+          state.lastReportedTrackingId === trackingId &&
+          state.lastReportedMessageId === (messageId || undefined) &&
+          state.lastLoadedClaimAt === observedAt
+        ) {
+          return;
+        }
+        state.lastLoadedClaimAt = observedAt;
+      } else if (source === 'MESSAGE_EXPANDED') {
+        if (
+          state.lastReportedTrackingId === trackingId &&
+          state.lastReportedMessageId === (messageId || undefined) &&
+          state.lastExpandedClaimAt === observedAt
+        ) {
+          return;
+        }
+        state.lastExpandedClaimAt = observedAt;
+      } else if (source === 'CACHE_REINSPECTION') {
+        if (state.lastReportedTrackingId === trackingId && state.lastReportedMessageId === (messageId || undefined)) {
+          return;
+        }
+      }
+
+      state.lastReportedTrackingId = trackingId;
+      state.lastReportedMessageId = messageId || undefined;
+
+      if (shouldReconcile) {
+        opts.onReconcile?.(trackingId, threadId, messageId);
+      }
+      opts.onSelfView(trackingId, threadId, messageId, observedAt, source);
     } catch (error) {
       console.warn('[gi][self-view] Message view inspection error', error);
     }

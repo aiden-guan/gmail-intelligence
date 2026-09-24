@@ -60,6 +60,7 @@ function reportTrackingSelfView(
   gmailMessageId?: string | null,
   observedAt = Date.now(),
   source: SelfViewSource = 'MESSAGE_EXPANDED',
+  reconcileGmailIds = false,
 ): void {
   const normMessageId = normalizeGmailId(gmailMessageId);
   const normThreadId = normalizeGmailId(gmailThreadId);
@@ -78,6 +79,7 @@ function reportTrackingSelfView(
     timestamp: new Date(observedAt).toISOString(),
     source,
     selfViewEventId,
+    reconcileGmailIds,
   });
 }
 
@@ -352,10 +354,22 @@ function mountSdkUi(sdk: InboxSdkLike): void {
     console.debug('[gi] registerThreadViewHandler skipped/failed', error);
   }
   try {
+    const pendingReconcile = new Set<string>();
     messageSelfView = createMessageSelfViewHandler({
       getEmails: () => cachedTrackedEmails,
+      getTrackerBaseUrl: () => settings.trackerBaseUrl,
+      onReconcile: (trackingId, threadId, messageId) => {
+        pendingReconcile.add(trackingId);
+        const row = cachedTrackedEmails.find((item) => item.trackingId === trackingId);
+        if (row) {
+          if (messageId) row.gmailMessageId = messageId;
+          if (threadId) row.gmailThreadId = threadId;
+        }
+        linkTracked({ trackingId, gmailThreadId: threadId, gmailMessageId: messageId });
+      },
       onSelfView: (trackingId, threadId, msgId, observedAt, source) => {
-        reportTrackingSelfView(trackingId, threadId, msgId, observedAt, source);
+        const reconcileGmailIds = pendingReconcile.delete(trackingId);
+        reportTrackingSelfView(trackingId, threadId, msgId, observedAt, source, reconcileGmailIds);
       },
       onCollapsed: (trackingId, msgId) => {
         selfViewDeduplicator.clearRecord(trackingId, msgId);

@@ -691,8 +691,8 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(probe.label).toBe('Tracker healthy');
   });
 
-  // Case T: classifyOpenEvent with active sender claim suppresses even standard browser UA or GoogleImageProxy
-  it('Case T: classifyOpenEvent with hasActiveSenderClaim classifies as SELF_LIKELY', () => {
+  // Case T: a sender claim suppresses browser-like opens. Proxy requests stay proxy.
+  it('Case T: classifyOpenEvent with hasActiveSenderClaim classifies browser opens as SELF_LIKELY', () => {
     const baseTime = Date.parse('2026-09-24T10:00:00.000Z');
     const openTime = baseTime + 10_000; // T+10s (outside legacy correlation window)
 
@@ -707,15 +707,16 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(browserVerdict.countsAsOpen).toBe(false);
     expect(browserVerdict.suspected).toBe(true);
 
-    // With hasActiveSenderClaim: true, GoogleImageProxy UA is suppressed as SELF_LIKELY
+    // Proxy requests stay PROXY_LIKELY even while a sender claim is active.
     const proxyVerdict = classifyOpenEvent({
       eventTs: openTime,
       sentAt: baseTime,
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy',
       hasActiveSenderClaim: true,
     });
-    expect(proxyVerdict.classification).toBe('SELF_LIKELY');
+    expect(proxyVerdict.classification).toBe('PROXY_LIKELY');
     expect(proxyVerdict.countsAsOpen).toBe(false);
+    expect(proxyVerdict.source).toBe('google_image_proxy');
 
     // Without active claim or self-view at T+10s, browser UA is RECIPIENT_LIKELY
     const recipientVerdict = classifyOpenEvent({

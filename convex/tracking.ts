@@ -1,6 +1,14 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
-import { classifyOpenEvent, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from "./openRequest";
+import {
+  decideTrackedOpen,
+  deriveTrackingStats,
+  isSelfViewCorrelated,
+  normalizeGmailId,
+  normalizeUserAgentFamily,
+  openEventMatchesSenderClaim,
+  senderFingerprintMatches,
+} from "./openRequest";
 
 async function getAllEventsForEmail(ctx: { db: QueryCtx["db"] | MutationCtx["db"] }, trackingId: string) {
   return await ctx.db
@@ -208,6 +216,8 @@ export const recordSelfView = internalMutation({
     userAgent: v.union(v.string(), v.null()),
     gmailThreadId: v.optional(v.union(v.string(), v.null())),
     gmailMessageId: v.optional(v.union(v.string(), v.null())),
+    ipHash: v.optional(v.union(v.string(), v.null())),
+    reconcileGmailIds: v.optional(v.boolean()),
     source: v.optional(
       v.union(
         v.literal("ROW_INTERACTION"),
@@ -243,10 +253,7 @@ export const recordSelfView = internalMutation({
         .collect();
       const byClaimId = claims.find((c) => c.claimId === `clm_${args.eventId}`);
       const activeClaim = claims.find(
-        (c) =>
-          c.consumedByEventId === null &&
-          Date.parse(c.expiresAt) > selfMs &&
-          (!normMessage || !c.gmailMessageId || c.gmailMessageId === normMessage),
+        (c) => c.consumedByEventId === null && Date.parse(c.expiresAt) > selfMs,
       );
       const existingClaim = activeClaim || byClaimId;
       return {
@@ -258,11 +265,14 @@ export const recordSelfView = internalMutation({
       };
     }
 
+    const reconcile = args.reconcileGmailIds === true;
+    const senderIpHash = args.ipHash || null;
+    const senderUaFamily = normalizeUserAgentFamily(args.userAgent);
     const emailPatch: { gmailThreadId?: string | null; gmailMessageId?: string | null } = {};
-    if (normThread && !email.gmailThreadId) {
+    if (normThread && (reconcile || !email.gmailThreadId) && email.gmailThreadId !== normThread) {
       emailPatch.gmailThreadId = normThread;
     }
-    if (normMessage && !email.gmailMessageId) {
+    if (normMessage && (reconcile || !email.gmailMessageId) && email.gmailMessageId !== normMessage) {
       emailPatch.gmailMessageId = normMessage;
     }
     if (Object.keys(emailPatch).length > 0) {
@@ -275,10 +285,7 @@ export const recordSelfView = internalMutation({
       .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
       .collect();
     const validClaims = existingClaims.filter(
-      (c) =>
-        c.consumedByEventId === null &&
-        Date.parse(c.expiresAt) > selfMs &&
-        (!normMessage || !c.gmailMessageId || c.gmailMessageId === normMessage),
+      (c) => c.consumedByEventId === null && Date.parse(c.expiresAt) > selfMs,
     );
     validClaims.sort((a, b) => {
       const normA = normalizeGmailId(a.gmailMessageId);
@@ -300,8 +307,10 @@ export const recordSelfView = internalMutation({
       if (source === "CACHE_REINSPECTION") {
         claimExpiresAt = activeClaim.expiresAt;
         const patch: any = {};
-        if (normMessage && !activeClaim.gmailMessageId) patch.gmailMessageId = normMessage;
-        if (normThread && !activeClaim.gmailThreadId) patch.gmailThreadId = normThread;
+        if (normMessage && (reconcile || !activeClaim.gmailMessageId)) patch.gmailMessageId = normMessage;
+        if (normThread && (reconcile || !activeClaim.gmailThreadId)) patch.gmailThreadId = normThread;
+        if (senderIpHash) patch.senderIpHash = senderIpHash;
+        if (senderUaFamily) patch.senderUaFamily = senderUaFamily;
         if (Object.keys(patch).length > 0) await ctx.db.patch(activeClaim._id, patch);
       } else {
         claimExpiresAt = new Date(selfMs + CLAIM_TTL_MS).toISOString();
@@ -310,8 +319,10 @@ export const recordSelfView = internalMutation({
           expiresAt: claimExpiresAt,
           source,
         };
-        if (normMessage && !activeClaim.gmailMessageId) patch.gmailMessageId = normMessage;
-        if (normThread && !activeClaim.gmailThreadId) patch.gmailThreadId = normThread;
+        if (normMessage && (reconcile || !activeClaim.gmailMessageId)) patch.gmailMessageId = normMessage;
+        if (normThread && (reconcile || !activeClaim.gmailThreadId)) patch.gmailThreadId = normThread;
+        if (senderIpHash) patch.senderIpHash = senderIpHash;
+        if (senderUaFamily) patch.senderUaFamily = senderUaFamily;
         await ctx.db.patch(activeClaim._id, patch);
       }
     } else {
@@ -327,6 +338,10 @@ export const recordSelfView = internalMutation({
           lastObservedAt: args.timestamp,
           expiresAt: claimExpiresAt,
           source,
+          ...(senderIpHash ? { senderIpHash } : {}),
+          ...(senderUaFamily ? { senderUaFamily } : {}),
+          ...(normMessage && (reconcile || !existingClaim.gmailMessageId) ? { gmailMessageId: normMessage } : {}),
+          ...(normThread && (reconcile || !existingClaim.gmailThreadId) ? { gmailThreadId: normThread } : {}),
         });
       } else {
         await ctx.db.insert("selfViewClaims", {
@@ -334,6 +349,8 @@ export const recordSelfView = internalMutation({
           trackingId: args.trackingId,
           gmailMessageId: normMessage,
           gmailThreadId: normThread,
+          senderIpHash,
+          senderUaFamily,
           firstObservedAt: args.timestamp,
           lastObservedAt: args.timestamp,
           expiresAt: claimExpiresAt,
@@ -350,7 +367,7 @@ export const recordSelfView = internalMutation({
       type: "SELF_VIEW",
       timestamp: args.timestamp,
       userAgent: args.userAgent,
-      ipHash: null,
+      ipHash: senderIpHash,
       suspectedSelfOpen: true,
       confidence: 1,
       classification: "SELF_LIKELY",
@@ -366,32 +383,38 @@ export const recordSelfView = internalMutation({
     const claimStartMs = selfMs - 5_000;
 
     for (const evt of events) {
-      if (evt.type === "OPEN" || evt.type === "CLICK") {
-        const evtMs = Date.parse(evt.timestamp);
-        if (Number.isFinite(evtMs) && evtMs >= claimStartMs && evtMs <= claimExpiresAtMs) {
-          if (evt.classification !== "SELF_LIKELY") {
-            await ctx.db.patch(evt._id, {
-              classification: "SELF_LIKELY",
-              suspectedSelfOpen: true,
-              confidence: 1,
-            });
-            reclassifiedEventIds.push(evt.eventId);
-          }
-          if (evt.type === "OPEN" && !claimConsumed) {
-            claimConsumed = true;
-            const claimRows = await ctx.db
-              .query("selfViewClaims")
-              .withIndex("by_claimId", (q) => q.eq("claimId", claimId))
-              .take(1);
-            if (claimRows[0]) {
-              await ctx.db.patch(claimRows[0]._id, {
-                consumedByEventId: evt.eventId,
-                consumedAt: evt.timestamp,
-                consumedUa: evt.userAgent,
-                consumedIpHash: evt.ipHash,
-              });
-            }
-          }
+      const matchesSender = openEventMatchesSenderClaim({
+        eventType: evt.type,
+        eventTs: Date.parse(evt.timestamp),
+        claimStartMs,
+        claimEndMs: claimExpiresAtMs,
+        userAgent: evt.userAgent,
+        ipHash: evt.ipHash,
+        senderIpHash,
+        senderUaFamily,
+      });
+      if (!matchesSender) continue;
+      if (evt.classification !== "SELF_LIKELY") {
+        await ctx.db.patch(evt._id, {
+          classification: "SELF_LIKELY",
+          suspectedSelfOpen: true,
+          confidence: 1,
+        });
+        reclassifiedEventIds.push(evt.eventId);
+      }
+      if (evt.type === "OPEN" && !claimConsumed) {
+        claimConsumed = true;
+        const claimRows = await ctx.db
+          .query("selfViewClaims")
+          .withIndex("by_claimId", (q) => q.eq("claimId", claimId))
+          .take(1);
+        if (claimRows[0]) {
+          await ctx.db.patch(claimRows[0]._id, {
+            consumedByEventId: evt.eventId,
+            consumedAt: evt.timestamp,
+            consumedUa: evt.userAgent,
+            consumedIpHash: evt.ipHash,
+          });
         }
       }
     }
@@ -438,10 +461,6 @@ export const recordOpenEvent = internalMutation({
       if (c.consumedByEventId !== null) return false;
       const exp = Date.parse(c.expiresAt);
       if (Number.isFinite(exp) && exp <= now) return false;
-      const normClaimMsg = normalizeGmailId(c.gmailMessageId);
-      if (normClaimMsg && normEmailMsg) {
-        if (normClaimMsg !== normEmailMsg) return false;
-      }
       return true;
     });
 
@@ -458,62 +477,55 @@ export const recordOpenEvent = internalMutation({
 
     const activeClaim = validClaims[0] ?? null;
 
-    let finalClassification = args.classification || "UNKNOWN";
-    let suspectedSelfOpen = args.suspectedSelfOpen;
-    let confidence = args.confidence;
+    const recentConsumed = claims.find((c) => {
+      if (!c.consumedByEventId || !c.consumedAt) return false;
+      const consumedMs = Date.parse(c.consumedAt);
+      if (!Number.isFinite(consumedMs) || Math.abs(now - consumedMs) > 1000) return false;
+      return senderFingerprintMatches(
+        {
+          senderIpHash: c.senderIpHash || c.consumedIpHash,
+          senderUaFamily: c.senderUaFamily || normalizeUserAgentFamily(c.consumedUa),
+        },
+        { ipHash: args.ipHash, userAgent: args.userAgent },
+      );
+    });
 
-    if (activeClaim) {
-      // Consume claim atomically
+    let selfViewTs: number | null = null;
+    if (claims.length === 0) {
+      const events = await getAllEventsForEmail(ctx, args.trackingId);
+      const recentSelfView = events.find((e) => {
+        if (e.type !== "SELF_VIEW") return false;
+        const svMs = Date.parse(e.timestamp);
+        return isSelfViewCorrelated(now, svMs);
+      });
+      selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
+    }
+
+    const sentAtMs = email?.sentAt ? Date.parse(email.sentAt) : null;
+    const decision = decideTrackedOpen({
+      eventTs: now,
+      sentAt: sentAtMs != null && Number.isFinite(sentAtMs) ? sentAtMs : null,
+      userAgent: args.userAgent,
+      ipHash: args.ipHash,
+      selfViewTs: activeClaim || recentConsumed ? null : selfViewTs,
+      activeClaim: activeClaim
+        ? { senderIpHash: activeClaim.senderIpHash, senderUaFamily: activeClaim.senderUaFamily }
+        : null,
+      recentConsumedMatches: Boolean(recentConsumed),
+    });
+
+    if (decision.consumeClaim && activeClaim) {
       await ctx.db.patch(activeClaim._id, {
         consumedByEventId: args.eventId,
         consumedAt: args.timestamp,
         consumedUa: args.userAgent,
         consumedIpHash: args.ipHash,
       });
-      finalClassification = "SELF_LIKELY";
-      suspectedSelfOpen = true;
-      confidence = 1;
-    } else {
-      // Check for recent consumed claim within 1000ms grace period (duplicate render burst)
-      const recentConsumed = claims.find((c) => {
-        if (!c.consumedByEventId || !c.consumedAt) return false;
-        const consumedMs = Date.parse(c.consumedAt);
-        if (!Number.isFinite(consumedMs) || Math.abs(now - consumedMs) > 1000) return false;
-        if (args.userAgent && c.consumedUa && c.consumedUa !== args.userAgent) return false;
-        if (args.ipHash && c.consumedIpHash && c.consumedIpHash !== args.ipHash) return false;
-        return true;
-      });
-      if (recentConsumed) {
-        finalClassification = "SELF_LIKELY";
-        suspectedSelfOpen = true;
-        confidence = 1;
-      } else {
-        let selfViewTs: number | null = null;
-        if (claims.length === 0) {
-          const events = await getAllEventsForEmail(ctx, args.trackingId);
-          const recentSelfView = events.find((e) => {
-            if (e.type !== "SELF_VIEW") return false;
-            const svMs = Date.parse(e.timestamp);
-            return isSelfViewCorrelated(now, svMs);
-          });
-          selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
-        }
-        const sentAtMs = email?.sentAt ? Date.parse(email.sentAt) : null;
-        const verdict = classifyOpenEvent({
-          eventTs: now,
-          sentAt: sentAtMs,
-          userAgent: args.userAgent,
-          selfViewTs,
-          hasActiveSenderClaim: false,
-        });
-        finalClassification =
-          args.classification && args.classification !== "UNKNOWN"
-            ? args.classification
-            : verdict.classification;
-        suspectedSelfOpen = verdict.suspected;
-        confidence = verdict.confidence;
-      }
     }
+
+    const finalClassification = decision.classification;
+    const suspectedSelfOpen = decision.suspected;
+    const confidence = decision.confidence;
 
     await ctx.db.insert("trackingEvents", {
       eventId: args.eventId,

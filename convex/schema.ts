@@ -54,6 +54,8 @@ export default defineSchema({
     trackingId: v.string(),
     gmailMessageId: v.union(v.string(), v.null()),
     gmailThreadId: v.union(v.string(), v.null()),
+    senderIpHash: v.optional(v.union(v.string(), v.null())),
+    senderUaFamily: v.optional(v.union(v.string(), v.null())),
     firstObservedAt: v.string(),
     lastObservedAt: v.string(),
     expiresAt: v.string(),

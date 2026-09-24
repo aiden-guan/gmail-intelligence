@@ -10,6 +10,7 @@ type MockMessageViewOptions = {
   loaded?: boolean;
   state?: 'EXPANDED' | 'COLLAPSED' | 'HIDDEN';
   threadId?: string;
+  bodyHtml?: string;
 };
 
 function createMockMessageView(opts: MockMessageViewOptions = {}): InboxSdkMessageViewLike & {
@@ -35,6 +36,12 @@ function createMockMessageView(opts: MockMessageViewOptions = {}): InboxSdkMessa
     getMessageID: () => {
       if (!isLoaded) throw new Error('tried to get message id before message is loaded');
       return opts.id || 'msg-1';
+    },
+    getBodyElement: () => {
+      if (opts.bodyHtml == null) return null;
+      const body = document.createElement('div');
+      body.innerHTML = opts.bodyHtml;
+      return body;
     },
     getThreadView: () => ({
       getThreadIDAsync: async () => opts.threadId || 'thread-1',
@@ -402,5 +409,117 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     mv.setState('COLLAPSED');
     expect(onCollapsed).toHaveBeenCalledTimes(1);
     expect(onCollapsed).toHaveBeenCalledWith('trk_A', 'abc123');
+  });
+
+  it('resolves a changed Gmail message id from the pixel in the message body and reconciles it', async () => {
+    const onSelfView = vi.fn();
+    const onReconcile = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      getTrackerBaseUrl: () => 'https://track.example',
+      onSelfView,
+      onReconcile,
+    });
+    const mv = createMockMessageView({
+      id: 'def456',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml:
+        '<img src="https://ci3.googleusercontent.com/proxy#https://track.example/open/trk_A" width="1" height="1">',
+    });
+    handler.handleMessageView(mv);
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
+    expect(onReconcile).toHaveBeenCalledWith('trk_A', 'thread_X', 'def456');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'def456', expect.any(Number), 'MESSAGE_EXPANDED');
+  });
+
+  it('resolves a tracked message from the body pixel when the stored Gmail message id is null', async () => {
+    const onSelfView = vi.fn();
+    const onReconcile = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [{ ...trackedEmailA, gmailMessageId: null }],
+      getTrackerBaseUrl: () => 'https://track.example',
+      onSelfView,
+      onReconcile,
+    });
+    const mv = createMockMessageView({
+      id: 'fresh_id',
+      loaded: true,
+      state: 'EXPANDED',
+      bodyHtml: '<img data-src="https://track.example/open/trk_A.gif">',
+      threadId: 'thread_X',
+    });
+    handler.handleMessageView(mv);
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'fresh_id', expect.any(Number), 'MESSAGE_EXPANDED'));
+    expect(onReconcile).toHaveBeenCalledWith('trk_A', 'thread_X', 'fresh_id');
+  });
+
+  it('uses each message body pixel when one thread contains two tracked messages', async () => {
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA, trackedEmailB],
+      getTrackerBaseUrl: () => 'https://track.example',
+      onSelfView,
+    });
+    const mvA = createMockMessageView({
+      id: 'not_stored_a',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml: '<img src="https://track.example/open/trk_A">',
+    });
+    const mvB = createMockMessageView({
+      id: 'not_stored_b',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml: '<img src="https://track.example/open/trk_B">',
+    });
+    handler.handleMessageView(mvA);
+    handler.handleMessageView(mvB);
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(2));
+    expect(onSelfView).toHaveBeenNthCalledWith(1, 'trk_A', 'thread_X', 'not_stored_a', expect.any(Number), 'MESSAGE_EXPANDED');
+    expect(onSelfView).toHaveBeenNthCalledWith(2, 'trk_B', 'thread_X', 'not_stored_b', expect.any(Number), 'MESSAGE_EXPANDED');
+  });
+
+  it('does not guess when the Gmail id changed and the body has no tracking pixel', async () => {
+    const onSelfView = vi.fn();
+    const onDiagnostic = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA, trackedEmailB],
+      onSelfView,
+      onDiagnostic,
+    });
+    const mv = createMockMessageView({
+      id: 'brand_new',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml: '<p>No pixel here</p>',
+    });
+    handler.handleMessageView(mv);
+    await vi.waitFor(() => expect(onDiagnostic).toHaveBeenCalled());
+    expect(onSelfView).not.toHaveBeenCalled();
+  });
+
+  it('recovers the only recent tracked send in a thread when its Gmail message id was never stored', async () => {
+    const onSelfView = vi.fn();
+    const onReconcile = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [{ ...trackedEmailA, gmailMessageId: null, sentAt: new Date().toISOString() }],
+      onSelfView,
+      onReconcile,
+    });
+    const mv = createMockMessageView({
+      id: 'late_id',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml: '<p>Images are still loading</p>',
+    });
+    handler.handleMessageView(mv);
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'late_id', expect.any(Number), 'MESSAGE_EXPANDED'));
+    expect(onReconcile).toHaveBeenCalledWith('trk_A', 'thread_X', 'late_id');
   });
 });

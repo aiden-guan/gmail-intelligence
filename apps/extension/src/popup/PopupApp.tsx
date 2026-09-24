@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { requestExtensionReload } from '../reload-extension';
 
 type Diagnostics = {
   gmailTab?: string;
@@ -8,6 +9,7 @@ type Diagnostics = {
 
 export function PopupApp() {
   const [diag, setDiag] = useState<Diagnostics | null>(null);
+  const [reloading, setReloading] = useState(false);
 
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
@@ -49,8 +51,19 @@ export function PopupApp() {
             <button type="button" className="gi-btn gi-btn-ghost gi-btn-block" onClick={() => chrome.runtime.openOptionsPage()}>
               Settings
             </button>
+            <button
+              type="button"
+              className="gi-btn gi-btn-ghost gi-btn-block"
+              disabled={reloading}
+              onClick={() => {
+                setReloading(true);
+                void requestExtensionReload(chrome).catch(() => setReloading(false));
+              }}
+            >
+              {reloading ? 'Reloading…' : 'Reload extension'}
+            </button>
           </div>
-          <p className="gi-hint">⌘K in Gmail opens commands</p>
+          <p className="gi-hint">Reload restarts the extension and refreshes Gmail. ⌘K opens commands.</p>
         </div>
       </div>
     </div>

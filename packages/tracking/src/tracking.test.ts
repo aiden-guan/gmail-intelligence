@@ -359,9 +359,10 @@ describe('outgoing html', () => {
     expect(classifyOpenEvent({ eventTs: sv + 8000, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('SELF_LIKELY');
     expect(classifyOpenEvent({ eventTs: sv + 8001, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('RECIPIENT_LIKELY');
 
-    // Google image proxy fetch
+    // Google image proxy fetch, including one that overlaps a sender claim or self-view
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).classification).toBe('PROXY_LIKELY');
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).countsAsOpen).toBe(false);
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa, selfViewTs: sent + 1000, hasActiveSenderClaim: true }).classification).toBe('PROXY_LIKELY');
 
     // Security scanner fetch
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: scannerUa }).classification).toBe('MACHINE_LIKELY');

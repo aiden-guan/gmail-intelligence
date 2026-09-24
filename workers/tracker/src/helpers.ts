@@ -73,6 +73,76 @@ export function detectOpenRequestSource(userAgent?: string | null): OpenRequestS
   return 'unknown';
 }
 
+export function normalizeUserAgentFamily(userAgent?: string | null): string | null {
+  if (!userAgent || typeof userAgent !== 'string') return null;
+  const ua = userAgent.trim();
+  if (!ua) return null;
+  if (/(googleimageproxy|ggpht)/i.test(ua)) return 'google_image_proxy';
+  if (/(headless|lighthouse|chrome-lighthouse)/i.test(ua)) return 'headless';
+  if (/edg\/|edge\//i.test(ua)) return 'edge';
+  if (/firefox|fxios/i.test(ua)) return 'firefox';
+  if (/chrome|crios|chromium/i.test(ua)) return 'chrome';
+  if (/safari/i.test(ua)) return 'safari';
+  if (/mozilla\/\d/i.test(ua)) return 'mozilla';
+  return 'other';
+}
+
+export function uaFamiliesCompatible(left?: string | null, right?: string | null): boolean {
+  return Boolean(left && right && left === right);
+}
+
+export type SenderFingerprint = {
+  senderIpHash?: string | null;
+  senderUaFamily?: string | null;
+};
+
+export function senderFingerprintMatches(
+  claim: SenderFingerprint | null | undefined,
+  request: { ipHash?: string | null; userAgent?: string | null },
+): boolean {
+  if (!claim?.senderIpHash || !request.ipHash) return false;
+  if (claim.senderIpHash !== request.ipHash) return false;
+  return uaFamiliesCompatible(claim.senderUaFamily, normalizeUserAgentFamily(request.userAgent));
+}
+
+export function openEventMatchesSenderClaim(opts: {
+  eventType: string;
+  eventTs: number;
+  claimStartMs: number;
+  claimEndMs: number;
+  userAgent?: string | null;
+  ipHash?: string | null;
+  senderIpHash?: string | null;
+  senderUaFamily?: string | null;
+}): boolean {
+  if (opts.eventType !== 'OPEN' && opts.eventType !== 'CLICK') return false;
+  if (!Number.isFinite(opts.eventTs) || opts.eventTs < opts.claimStartMs || opts.eventTs > opts.claimEndMs) return false;
+  if (detectOpenRequestSource(opts.userAgent) !== 'browser_like') return false;
+  return senderFingerprintMatches(
+    { senderIpHash: opts.senderIpHash, senderUaFamily: opts.senderUaFamily },
+    { ipHash: opts.ipHash, userAgent: opts.userAgent },
+  );
+}
+
+function nonBrowserOpenVerdict(source: OpenRequestSource): {
+  classification: OpenClassification;
+  suspected: boolean;
+  confidence: number;
+  countsAsOpen: boolean;
+  source: OpenRequestSource;
+} | null {
+  if (source === 'google_image_proxy') {
+    return { classification: 'PROXY_LIKELY', suspected: true, confidence: 0.8, countsAsOpen: false, source };
+  }
+  if (source === 'headless' || source === 'scanner') {
+    return { classification: 'MACHINE_LIKELY', suspected: true, confidence: 0.9, countsAsOpen: false, source };
+  }
+  if (source === 'unknown') {
+    return { classification: 'UNKNOWN', suspected: true, confidence: 0.5, countsAsOpen: false, source };
+  }
+  return null;
+}
+
 export function classifyOpen(opts: {
   sentAt: string | null;
   now: number;
@@ -89,7 +159,6 @@ export function classifyOpen(opts: {
   const sentMs = opts.sentAt ? Date.parse(opts.sentAt) : Number.NaN;
   const source = detectOpenRequestSource(opts.ua);
 
-  // Pre-send fetches
   if (!opts.sentAt || !Number.isFinite(sentMs) || opts.now < sentMs) {
     return {
       classification: 'SELF_LIKELY',
@@ -100,7 +169,9 @@ export function classifyOpen(opts: {
     };
   }
 
-  // Active sender claim overrides everything
+  const machine = nonBrowserOpenVerdict(source);
+  if (machine) return machine;
+
   if (opts.hasActiveSenderClaim) {
     return {
       classification: 'SELF_LIKELY',
@@ -111,7 +182,6 @@ export function classifyOpen(opts: {
     };
   }
 
-  // Sender self-view correlation
   if (opts.selfViewTs != null && isSelfViewCorrelated(opts.now, opts.selfViewTs)) {
     return {
       classification: 'SELF_LIKELY',
@@ -122,38 +192,6 @@ export function classifyOpen(opts: {
     };
   }
 
-  // Machine / Proxy fetches
-  if (source === 'google_image_proxy') {
-    return {
-      classification: 'PROXY_LIKELY',
-      suspected: true,
-      confidence: 0.8,
-      countsAsOpen: false,
-      source,
-    };
-  }
-
-  if (source === 'headless' || source === 'scanner') {
-    return {
-      classification: 'MACHINE_LIKELY',
-      suspected: true,
-      confidence: 0.9,
-      countsAsOpen: false,
-      source,
-    };
-  }
-
-  if (source === 'unknown') {
-    return {
-      classification: 'UNKNOWN',
-      suspected: true,
-      confidence: 0.5,
-      countsAsOpen: false,
-      source,
-    };
-  }
-
-  // Genuine recipient open
   return {
     classification: 'RECIPIENT_LIKELY',
     suspected: false,
@@ -161,6 +199,58 @@ export function classifyOpen(opts: {
     countsAsOpen: true,
     source,
   };
+}
+
+export function decideTrackedOpen(opts: {
+  sentAt: string | null;
+  now: number;
+  ua: string | null;
+  ipHash?: string | null;
+  selfViewTs?: number | null;
+  activeClaim?: SenderFingerprint | null;
+  recentConsumedMatches?: boolean;
+}): ReturnType<typeof classifyOpen> & { consumeClaim: boolean } {
+  const plain = classifyOpen({
+    sentAt: opts.sentAt,
+    now: opts.now,
+    ua: opts.ua,
+    selfViewTs: null,
+    hasActiveSenderClaim: false,
+  });
+  if (plain.source !== 'browser_like' || plain.classification !== 'RECIPIENT_LIKELY') {
+    return { ...plain, consumeClaim: false };
+  }
+  if (senderFingerprintMatches(opts.activeClaim, { ipHash: opts.ipHash, userAgent: opts.ua })) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source: 'browser_like',
+      consumeClaim: true,
+    };
+  }
+  if (opts.recentConsumedMatches) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source: 'browser_like',
+      consumeClaim: false,
+    };
+  }
+  if (opts.selfViewTs != null) {
+    const correlated = classifyOpen({
+      sentAt: opts.sentAt,
+      now: opts.now,
+      ua: opts.ua,
+      selfViewTs: opts.selfViewTs,
+      hasActiveSenderClaim: false,
+    });
+    return { ...correlated, consumeClaim: false };
+  }
+  return { ...plain, consumeClaim: false };
 }
 
 export type ClickClassification =

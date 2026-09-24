@@ -24,6 +24,8 @@ create table if not exists public.tracking_self_view_claims (
   tracking_id text not null references public.tracked_emails(tracking_id) on delete cascade,
   gmail_message_id text,
   gmail_thread_id text,
+  sender_ip_hash text,
+  sender_ua_family text,
   first_observed_at timestamptz not null default now(),
   last_observed_at timestamptz not null default now(),
   expires_at timestamptz not null,

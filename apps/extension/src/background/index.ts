@@ -53,6 +53,7 @@ import {
   type TrackingSelfViewDiagnostic,
   type TrackingSendReport,
 } from '@gi/tracking';
+import { refreshGmailTabsAfterRestart } from '../reload-extension';
 import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
 import {
   forceRefreshChatGpt,
@@ -1386,6 +1387,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               gmailMessageId: normMessageId,
               source,
               selfViewEventId,
+              reconcileGmailIds: msg.reconcileGmailIds === true,
             });
             lastErr = null;
             break;
@@ -1577,6 +1579,13 @@ void loadSettings()
   .then(async () => {
     rebuildAgent();
     chrome.alarms.create('tracking_poll', { periodInMinutes: 1 });
+    await refreshGmailTabsAfterRestart({
+      storage: chrome.storage,
+      tabs: {
+        query: (query) => chrome.tabs.query(query),
+        reload: (tabId) => chrome.tabs.reload(tabId),
+      },
+    });
     await pollTracking();
   })
   .catch((err) => {

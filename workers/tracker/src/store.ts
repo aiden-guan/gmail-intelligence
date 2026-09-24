@@ -59,6 +59,8 @@ export type ClaimRow = {
   tracking_id: string;
   gmail_message_id: string | null;
   gmail_thread_id: string | null;
+  sender_ip_hash?: string | null;
+  sender_ua_family?: string | null;
   first_observed_at: string;
   last_observed_at: string;
   expires_at: string;
@@ -206,10 +208,6 @@ function memoryStore(): TrackerStore {
         if (c.consumed_by_event_id !== null) return false;
         const exp = Date.parse(c.expires_at);
         if (Number.isFinite(exp) && exp <= nowMs) return false;
-        const normClaimMsg = normalizeGmailId(c.gmail_message_id);
-        if (normClaimMsg && normQueryMsg) {
-          if (normClaimMsg !== normQueryMsg) return false;
-        }
         return true;
       });
       if (active.length === 0) return null;
@@ -362,9 +360,6 @@ function supabaseStore(url: string, serviceRoleKey: string): TrackerStore {
       if (normQueryMsg) {
         const exact = rows.find((r) => normalizeGmailId(r.gmail_message_id) === normQueryMsg);
         if (exact) return exact;
-        const unspecific = rows.find((r) => !normalizeGmailId(r.gmail_message_id));
-        if (unspecific) return unspecific;
-        return null;
       }
       return rows[0] ?? null;
     },

@@ -66,8 +66,94 @@ export function detectOpenRequestSource(userAgent?: string | null): OpenRequestS
   return 'unknown';
 }
 
+/** Coarse browser family used to compare a sender claim with a later pixel request. */
+export function normalizeUserAgentFamily(userAgent?: string | null): string | null {
+  if (!userAgent || typeof userAgent !== 'string') return null;
+  const ua = userAgent.trim();
+  if (!ua) return null;
+  if (/(googleimageproxy|ggpht)/i.test(ua)) return 'google_image_proxy';
+  if (/(headless|lighthouse|chrome-lighthouse)/i.test(ua)) return 'headless';
+  if (/edg\/|edge\//i.test(ua)) return 'edge';
+  if (/firefox|fxios/i.test(ua)) return 'firefox';
+  if (/chrome|crios|chromium/i.test(ua)) return 'chrome';
+  if (/safari/i.test(ua)) return 'safari';
+  if (/mozilla\/\d/i.test(ua)) return 'mozilla';
+  return 'other';
+}
+
+export function uaFamiliesCompatible(left?: string | null, right?: string | null): boolean {
+  return Boolean(left && right && left === right);
+}
+
+export type SenderFingerprint = {
+  senderIpHash?: string | null;
+  senderUaFamily?: string | null;
+};
+
+/** A claim matches only when both the sender IP hash and UA family agree. */
+export function senderFingerprintMatches(
+  claim: SenderFingerprint | null | undefined,
+  request: { ipHash?: string | null; userAgent?: string | null },
+): boolean {
+  if (!claim?.senderIpHash || !request.ipHash) return false;
+  if (claim.senderIpHash !== request.ipHash) return false;
+  return uaFamiliesCompatible(claim.senderUaFamily, normalizeUserAgentFamily(request.userAgent));
+}
+
+export function openEventMatchesSenderClaim(opts: {
+  eventType: string;
+  eventTs: number;
+  claimStartMs: number;
+  claimEndMs: number;
+  userAgent?: string | null;
+  ipHash?: string | null;
+  senderIpHash?: string | null;
+  senderUaFamily?: string | null;
+}): boolean {
+  if (opts.eventType !== 'OPEN' && opts.eventType !== 'CLICK') return false;
+  if (!Number.isFinite(opts.eventTs) || opts.eventTs < opts.claimStartMs || opts.eventTs > opts.claimEndMs) return false;
+  if (detectOpenRequestSource(opts.userAgent) !== 'browser_like') return false;
+  return senderFingerprintMatches(
+    { senderIpHash: opts.senderIpHash, senderUaFamily: opts.senderUaFamily },
+    { ipHash: opts.ipHash, userAgent: opts.userAgent },
+  );
+}
+
+function nonBrowserOpenVerdict(source: OpenRequestSource): OpenVerdict | null {
+  if (source === 'google_image_proxy') {
+    return {
+      classification: 'PROXY_LIKELY',
+      suspected: true,
+      confidence: 0.8,
+      countsAsOpen: false,
+      source,
+    };
+  }
+  if (source === 'headless' || source === 'scanner') {
+    return {
+      classification: 'MACHINE_LIKELY',
+      suspected: true,
+      confidence: 0.9,
+      countsAsOpen: false,
+      source,
+    };
+  }
+  if (source === 'unknown') {
+    return {
+      classification: 'UNKNOWN',
+      suspected: true,
+      confidence: 0.5,
+      countsAsOpen: false,
+      source,
+    };
+  }
+  return null;
+}
+
 /**
  * Classify a pixel fetch against the real send time and request source.
+ * Proxy, scanner, headless, and unknown requests are classified before any
+ * sender claim is considered, so those requests cannot consume the claim.
  */
 export function classifyOpenEvent(opts: {
   eventTs: number;
@@ -90,7 +176,10 @@ export function classifyOpenEvent(opts: {
     };
   }
 
-  // Active exact sender claim takes precedence over everything including proxies/browsers
+  const machine = nonBrowserOpenVerdict(source);
+  if (machine) return machine;
+
+  // Browser-like only. Caller sets this after the sender fingerprint matches.
   if (opts.hasActiveSenderClaim) {
     return {
       classification: 'SELF_LIKELY',
@@ -101,7 +190,7 @@ export function classifyOpenEvent(opts: {
     };
   }
 
-  // Correlated sender self-view takes precedence and MUST NOT count
+  // Legacy timestamp correlation for browser-like requests when no claim exists.
   if (opts.selfViewTs != null && isSelfViewCorrelated(opts.eventTs, opts.selfViewTs)) {
     return {
       classification: 'SELF_LIKELY',
@@ -112,38 +201,6 @@ export function classifyOpenEvent(opts: {
     };
   }
 
-  // Machine / Proxy fetches
-  if (source === 'google_image_proxy') {
-    return {
-      classification: 'PROXY_LIKELY',
-      suspected: true,
-      confidence: 0.8,
-      countsAsOpen: false,
-      source,
-    };
-  }
-
-  if (source === 'headless' || source === 'scanner') {
-    return {
-      classification: 'MACHINE_LIKELY',
-      suspected: true,
-      confidence: 0.9,
-      countsAsOpen: false,
-      source,
-    };
-  }
-
-  if (source === 'unknown') {
-    return {
-      classification: 'UNKNOWN',
-      suspected: true,
-      confidence: 0.5,
-      countsAsOpen: false,
-      source,
-    };
-  }
-
-  // Fast recipient open without SELF_VIEW or machine/proxy signals counts as recipient open
   return {
     classification: 'RECIPIENT_LIKELY',
     suspected: false,
@@ -351,6 +408,7 @@ export const TRACKER_SUPPORTED_FEATURES = [
   'self_view_claims',
   'event_reclassification',
   'classified_clicks',
+  'sender_fingerprint_claims',
 ] as const;
 
 export const CLAIM_TTL_MS = 25_000;
@@ -366,6 +424,8 @@ export type SelfViewClaim = {
   trackingId: string;
   gmailMessageId: string | null;
   gmailThreadId: string | null;
+  senderIpHash?: string | null;
+  senderUaFamily?: string | null;
   firstObservedAt: string;
   lastObservedAt: string;
   expiresAt: string;
