@@ -283,7 +283,9 @@ function mountSdkUi(sdk: InboxSdkLike): void {
   }
   try {
     sdk.Conversations.registerThreadViewHandler((threadView) => {
-      void mountSdkSidebar(threadView);
+      void mountSdkSidebar(threadView).catch((error) => {
+        console.warn('[gi] Sidebar mount error', error);
+      });
     });
   } catch {
     /* sidebar is optional */
@@ -308,13 +310,17 @@ function mountSdkUi(sdk: InboxSdkLike): void {
       ['Follow-ups', 'FOLLOW_UPS'],
     ];
     for (const [name, category] of splits) {
-      sdk.NavMenu?.addNavItem({
-        name,
-        routeID: `gi/${category.toLowerCase()}`,
-        onClick: () => {
-          void send({ type: 'OPEN_SPLIT', category });
-        },
-      });
+      try {
+        sdk.NavMenu?.addNavItem({
+          name,
+          routeID: `gi/${category.toLowerCase()}`,
+          onClick: () => {
+            void send({ type: 'OPEN_SPLIT', category });
+          },
+        });
+      } catch {
+        /* individual nav item injection optional */
+      }
     }
   } catch {
     /* nav is optional */
@@ -332,13 +338,18 @@ async function mountSdkSidebar(threadView: {
   el.setAttribute('data-gi-ui', 'thread-sidebar');
   el.style.padding = '0';
   el.style.background = 'transparent';
-  threadView.addSidebarContentPanel({
-    title: 'Intelligence',
-    iconUrl: chrome.runtime.getURL('icons/icon48.png'),
-    el,
-  });
-  currentThreadId = threadId;
-  await refreshPanel(el, threadId);
+  try {
+    threadView.addSidebarContentPanel({
+      title: 'Intelligence',
+      iconUrl: chrome.runtime.getURL('icons/icon48.png'),
+      el,
+    });
+    currentThreadId = threadId;
+    await refreshPanel(el, threadId);
+  } catch (error) {
+    console.warn('[gi] Failed to mount SDK sidebar panel, falling back to DOM panel', error);
+    showDomThreadPanel(threadId);
+  }
 }
 
 function placeFloatPanel(panel: HTMLElement): void {

@@ -107,6 +107,7 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
   ): Promise<{ data: T; usage?: UsageStats }> {
     const res = await fetch(`${trimSlash(this.config.endpoint)}/chat/completions`, {
       method: 'POST',
+      signal: AbortSignal.timeout(20_000),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.config.apiKey}`,
@@ -236,6 +237,7 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
   async embed(texts: string[]) {
     const res = await fetch(`${trimSlash(this.config.endpoint)}/embeddings`, {
       method: 'POST',
+      signal: AbortSignal.timeout(20_000),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.config.apiKey}`,
@@ -460,7 +462,13 @@ export class AIJobQueue {
         let attempt = 0;
         for (;;) {
           try {
-            const result = await fn();
+            const timeoutMs = 25_000;
+            const result = await Promise.race([
+              fn(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`AI job ${kind} timed out`)), timeoutMs),
+              ),
+            ]);
             if (fingerprint) this.setCached(fingerprint, kind, result);
             if (kind === 'classify') this.usageToday.classifications += 1;
             if (kind === 'summary') this.usageToday.summaries += 1;

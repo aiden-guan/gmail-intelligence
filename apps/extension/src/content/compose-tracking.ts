@@ -417,20 +417,31 @@ async function recoverSend(composeSessionId: string, view: SdkComposeView, deps:
 async function handleSent(
   session: ComposeTrackingSession,
   view: SdkComposeView,
-  event: { getMessageID?: () => Promise<string>; getThreadID?: () => Promise<string> } | undefined,
+  event: {
+    getMessageID?: () => Promise<string>;
+    getMessageIDAsync?: () => Promise<string>;
+    getThreadID?: () => Promise<string>;
+    getThreadIDAsync?: () => Promise<string>;
+  } | undefined,
   deps: ComposeTrackingDeps,
 ): Promise<void> {
   const trackingId = session.trackingId;
   let gmailThreadId: string | null = null;
   let gmailMessageId: string | null = null;
   try {
-    gmailThreadId = normalizeGmailId(await event?.getThreadID?.()) || normalizeGmailId(await readThreadId(view));
+    const rawThread = typeof event?.getThreadIDAsync === 'function'
+      ? await event.getThreadIDAsync()
+      : await event?.getThreadID?.();
+    gmailThreadId = normalizeGmailId(rawThread) || normalizeGmailId(await readThreadId(view));
   } catch (error) {
     session.lastError = errorMessage(error);
     gmailThreadId = normalizeGmailId(await readThreadId(view));
   }
   try {
-    gmailMessageId = normalizeGmailId(await event?.getMessageID?.());
+    const rawMessage = typeof event?.getMessageIDAsync === 'function'
+      ? await event.getMessageIDAsync()
+      : await event?.getMessageID?.();
+    gmailMessageId = normalizeGmailId(rawMessage);
   } catch (error) {
     session.lastError = errorMessage(error);
     gmailMessageId = null;

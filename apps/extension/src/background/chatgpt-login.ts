@@ -57,11 +57,11 @@ export function setChatGptSignedInHandler(
 export function installChatGptLoginListeners(): void {
   chrome.tabs.onUpdated.addListener((tabId, info) => {
     if (info.status !== 'complete') return;
-    void tryCompleteLogin(tabId);
+    void tryCompleteLogin(tabId).catch(() => undefined);
   });
   chrome.tabs.onRemoved.addListener((tabId) => {
     if (pageTabId === tabId) pageTabId = null;
-    void abandonIfPending(tabId);
+    void abandonIfPending(tabId).catch(() => undefined);
   });
 }
 

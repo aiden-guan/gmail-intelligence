@@ -30,8 +30,7 @@ export const SURFACE_CSS = `
 :host::-webkit-scrollbar,
 #gi-thread-panel::-webkit-scrollbar,
 .gi-shell::-webkit-scrollbar,
-.gi-core::-webkit-scrollbar,
-.gi-more::-webkit-scrollbar {
+.gi-core::-webkit-scrollbar {
   width: 0 !important;
   height: 0 !important;
   display: none !important;
@@ -183,40 +182,6 @@ export const SURFACE_CSS = `
   background: transparent;
   color: #f4f5f8;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
-}
-.gi-more {
-  margin-top: 12px;
-  padding-top: 12px;
-  max-height: 220px;
-  overflow: auto;
-  scrollbar-width: none;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08));
-  background-size: 100% 1px;
-  background-repeat: no-repeat;
-  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1), transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
-}
-.gi-more {
-  @starting-style {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-}
-.gi-eyebrow {
-  margin: 10px 0 6px;
-  color: #9aa3b8;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-.gi-more .gi-eyebrow:first-child { margin-top: 0; }
-.gi-reasoning-block { margin: 0 0 10px; }
-.gi-reasoning-text {
-  margin: 4px 0 0;
-  color: #c9cdd8;
-  font-size: 12px;
-  line-height: 1.5;
-  user-select: text;
 }
 .gi-points {
   margin: 10px 0 0;
@@ -551,7 +516,7 @@ export const SURFACE_CSS = `
   .gi-menu-row:hover { background: rgba(255, 255, 255, 0.05); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .gi-shell, .gi-pill, .gi-more, .gi-toast, .gi-action, .gi-icon, .gi-switch-knob {
+  .gi-shell, .gi-pill, .gi-toast, .gi-action, .gi-icon, .gi-switch-knob {
     animation: none;
     transition: opacity 120ms ease;
   }

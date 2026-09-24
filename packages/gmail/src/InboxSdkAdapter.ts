@@ -2,7 +2,7 @@ import type { GmailActionResult, GmailCapabilities } from '@gi/shared';
 import { EMPTY_CAPABILITIES } from './capabilities.js';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { queryFirst, SELECTORS } from './selectors.js';
-import { resolveThreadId, type ThreadIdView } from './thread-id.js';
+import { resolveMessageId, resolveThreadId, type MessageIdView, type ThreadIdView } from './thread-id.js';
 import type {
   ComposeViewState,
   CurrentThreadView,
@@ -83,9 +83,33 @@ export class InboxSdkAdapter implements GmailAdapter {
 
     try {
       sdk.Conversations.registerThreadViewHandler((threadView) => {
-        void mapThreadView(threadView).then((thread) => {
-          if (thread) emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
-        });
+        void mapThreadView(threadView)
+          .then((thread) => {
+            if (thread && generation === this.generation) {
+              emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
+            }
+          })
+          .catch((error) => {
+            console.warn('[gi] Failed to map thread view', error);
+          });
+      });
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      sdk.Conversations.registerMessageViewHandler?.((messageView) => {
+        if (generation !== this.generation) return;
+        const threadView = messageView.getThreadView?.();
+        if (threadView) {
+          void mapThreadView(threadView)
+            .then((thread) => {
+              if (thread && generation === this.generation) {
+                emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
+              }
+            })
+            .catch(() => {});
+        }
       });
     } catch {
       /* ignore */
@@ -99,12 +123,20 @@ export class InboxSdkAdapter implements GmailAdapter {
             this.activeComposeView = null;
           }
         });
-        void mapCompose(composeView).then((compose) => {
-          emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
-          composeView.on?.('sent', () => {
-            emit({ type: 'COMPOSE_SENT', compose, at: Date.now() });
+        void mapCompose(composeView)
+          .then((compose) => {
+            if (generation === this.generation) {
+              emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
+            }
+            composeView.on?.('sent', () => {
+              if (generation === this.generation) {
+                emit({ type: 'COMPOSE_SENT', compose, at: Date.now() });
+              }
+            });
+          })
+          .catch((error) => {
+            console.warn('[gi] Failed to map compose view', error);
           });
-        });
       });
     } catch {
       /* ignore */
@@ -315,41 +347,93 @@ async function mapThreadView(view: ThreadViewLike): Promise<CurrentThreadView | 
   if (!threadId) return null;
   const subject = view.getSubject?.() || '';
   const messageViews = view.getMessageViewsAll?.() || view.getMessageViews?.() || [];
+  const messages = await Promise.all(
+    messageViews.map(async (message, index) => {
+      const isLoaded = typeof message.isLoaded === 'function' ? message.isLoaded() : true;
+      let messageId: string | null = null;
+      let senderEmail = 'unknown@local';
+      let senderName: string | undefined;
+      let recipients: Array<{ email: string }> = [];
+      let bodyText = '';
+
+      if (isLoaded) {
+        messageId = await resolveMessageId(message);
+        try {
+          const sender = message.getSender?.();
+          if (sender?.emailAddress) senderEmail = sender.emailAddress;
+          if (sender?.name) senderName = sender.name;
+        } catch {
+          /* message may not be fully loaded in DOM */
+        }
+        try {
+          recipients = (message.getRecipientEmailAddresses?.() || []).map((email) => ({ email }));
+        } catch {
+          /* recipient list in flux */
+        }
+        try {
+          bodyText = message.getBodyElement?.()?.textContent?.trim() || '';
+        } catch {
+          /* body element in flux */
+        }
+      }
+
+      return {
+        messageId: messageId || `${threadId}-msg-${index}`,
+        threadId,
+        sender: {
+          email: senderEmail,
+          name: senderName,
+        },
+        recipients,
+        cc: [],
+        bodyText,
+        attachmentsMetadata: [],
+      };
+    }),
+  );
+
   return {
     threadId,
     subject,
     route: 'unknown',
-    messages: messageViews.map((message, index) => ({
-      messageId: message.getMessageID?.() || `${threadId}-msg-${index}`,
-      threadId,
-      sender: {
-        email: message.getSender?.()?.emailAddress || 'unknown@local',
-        name: message.getSender?.()?.name,
-      },
-      recipients: (message.getRecipientEmailAddresses?.() || []).map((email) => ({ email })),
-      cc: [],
-      bodyText: message.getBodyElement?.()?.textContent?.trim() || '',
-      attachmentsMetadata: [],
-    })),
+    messages,
   };
 }
 
 async function mapCompose(view: ComposeViewLike): Promise<ComposeViewState> {
   const threadId = await resolveThreadId(view as ThreadIdView);
+  let to: Array<{ email: string; name?: string }> = [];
+  let cc: Array<{ email: string; name?: string }> = [];
+  let bcc: Array<{ email: string; name?: string }> = [];
+  try {
+    to = (view.getToRecipients?.() || []).map((recipient) => ({
+      email: recipient.emailAddress,
+      name: recipient.name,
+    }));
+  } catch {
+    /* compose recipient DOM in flux */
+  }
+  try {
+    cc = (view.getCcRecipients?.() || []).map((recipient) => ({
+      email: recipient.emailAddress,
+      name: recipient.name,
+    }));
+  } catch {
+    /* compose cc DOM in flux */
+  }
+  try {
+    bcc = (view.getBccRecipients?.() || []).map((recipient) => ({
+      email: recipient.emailAddress,
+      name: recipient.name,
+    }));
+  } catch {
+    /* compose bcc DOM in flux */
+  }
   return {
     composeId: threadId || view.getElement?.()?.id || `compose-${Math.random().toString(36).slice(2, 8)}`,
-    to: (view.getToRecipients?.() || []).map((recipient) => ({
-      email: recipient.emailAddress,
-      name: recipient.name,
-    })),
-    cc: (view.getCcRecipients?.() || []).map((recipient) => ({
-      email: recipient.emailAddress,
-      name: recipient.name,
-    })),
-    bcc: (view.getBccRecipients?.() || []).map((recipient) => ({
-      email: recipient.emailAddress,
-      name: recipient.name,
-    })),
+    to,
+    cc,
+    bcc,
     subject: view.getSubject?.() || '',
     bodyText: view.getBodyElement?.()?.textContent || '',
     isReply: Boolean(threadId),
@@ -364,6 +448,7 @@ export type InboxSdkLike = {
   };
   Conversations: {
     registerThreadViewHandler: (cb: (tv: ThreadViewLike) => void) => void;
+    registerMessageViewHandler?: (cb: (mv: MessageViewLike) => void) => void;
   };
   Compose: {
     registerComposeViewHandler: (cb: (cv: ComposeViewLike) => void) => void;
@@ -392,11 +477,14 @@ type ThreadViewLike = ThreadIdView & {
   addSidebarContentPanel?: (desc: unknown) => { remove?: () => void };
 };
 
-type MessageViewLike = {
+type MessageViewLike = MessageIdView & {
+  isLoaded?: () => boolean;
   getMessageID?: () => string;
+  getMessageIDAsync?: () => string | Promise<string>;
   getSender?: () => { name?: string; emailAddress: string };
   getRecipientEmailAddresses?: () => string[];
   getBodyElement?: () => HTMLElement | null;
+  getThreadView?: () => ThreadViewLike;
 };
 
 type ComposeViewLike = ThreadIdView & {
