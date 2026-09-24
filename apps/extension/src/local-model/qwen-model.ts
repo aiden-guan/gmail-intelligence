@@ -39,7 +39,7 @@ export function releaseQwen(): void {
 
 async function downloadModel(modelId: string, onProgress: (fraction: number) => void): Promise<void> {
   const model = requireModel(modelId);
-  await configureRuntime(true);
+  await configureRuntime();
   const { pipeline } = await import('@huggingface/transformers');
   const generator = (await pipeline('text-generation', model.repo, {
     dtype: model.dtype,
@@ -60,12 +60,11 @@ async function generate(modelId: string, system: string, user: string): Promise<
   const model = requireModel(modelId);
   const downloaded = await listDownloadedModelIds();
   if (!downloaded.includes(model.id)) throw new Error('Download this model in Settings.');
-  await configureRuntime(false);
+  await configureRuntime();
   const { pipeline } = await import('@huggingface/transformers');
   const generator = (await pipeline('text-generation', model.repo, {
     dtype: model.dtype,
     device: 'wasm',
-    local_files_only: true,
   })) as Generator;
   try {
     const output = await generator(chatMessages(model, system, user), {
@@ -89,10 +88,10 @@ function chatMessages(model: LocalModel, system: string, user: string): ChatTurn
   ];
 }
 
-async function configureRuntime(allowRemote: boolean): Promise<void> {
+async function configureRuntime(): Promise<void> {
   const { env } = await import('@huggingface/transformers');
   env.allowLocalModels = false;
-  env.allowRemoteModels = allowRemote;
+  env.allowRemoteModels = true;
   env.useBrowserCache = true;
   env.useWasmCache = false;
   if (configured) return;
