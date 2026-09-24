@@ -113,6 +113,10 @@ export default {
         if (request.method === 'PATCH' && path.startsWith('/api/emails/')) {
           return handlePatchEmail(path.slice('/api/emails/'.length), request, store);
         }
+        if (request.method === 'POST' && path.startsWith('/api/emails/') && path.endsWith('/self-view')) {
+          const id = path.slice('/api/emails/'.length, -'/self-view'.length);
+          return handleSelfView(id, request, env, store);
+        }
         if (request.method === 'GET' && path.startsWith('/api/emails/') && path.endsWith('/events')) {
           const id = path.slice('/api/emails/'.length, -'/events'.length);
           return handleGetEvents(id, store);
@@ -252,6 +256,88 @@ async function handleRecentEvents(store: TrackerStore): Promise<Response> {
   return json(await store.recentEvents());
 }
 
+async function recomputeEmailStats(trackingId: string, store: TrackerStore): Promise<EmailRow | null> {
+  const events = await store.listEvents(trackingId);
+  const sorted = [...events].sort((a, b) => (a.timestamp > b.timestamp ? 1 : -1));
+  let openCount = 0;
+  let firstOpenedAt: string | null = null;
+  let lastOpenedAt: string | null = null;
+  let lastValidMs = 0;
+
+  for (const evt of sorted) {
+    if (evt.type === 'OPEN' && !evt.suspected_self_open && evt.classification !== 'SELF_LIKELY') {
+      const evtMs = Date.parse(evt.timestamp);
+      if (lastValidMs && Number.isFinite(evtMs) && evtMs >= lastValidMs && evtMs - lastValidMs < 800) {
+        continue;
+      }
+      openCount += 1;
+      lastValidMs = evtMs;
+      if (!firstOpenedAt) firstOpenedAt = evt.timestamp;
+      lastOpenedAt = evt.timestamp;
+    }
+  }
+
+  const patch: Partial<EmailRow> = {
+    open_count: openCount,
+    first_opened_at: firstOpenedAt,
+    last_opened_at: lastOpenedAt,
+  };
+  await store.updateEmail(trackingId, patch);
+  return store.getEmail(trackingId);
+}
+
+async function handleSelfView(
+  id: string,
+  request: Request,
+  _env: Env,
+  store: TrackerStore,
+): Promise<Response> {
+  if (!id || id.length > 80 || id.includes('/') || !/^[\w-]+$/.test(id)) {
+    return json({ error: 'bad_id' }, 400);
+  }
+  const existing = await store.getEmail(id);
+  if (!existing) return json({ error: 'not_found' }, 404);
+
+  const body = (await request.json().catch(() => ({}))) as { timestamp?: string; gmailThreadId?: string | null };
+  const ts = body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
+    ? new Date(body.timestamp).toISOString()
+    : new Date().toISOString();
+  const selfMs = Date.parse(ts);
+
+  if (body.gmailThreadId && !existing.gmail_thread_id) {
+    await store.updateEmail(id, { gmail_thread_id: body.gmailThreadId });
+  }
+
+  await store.insertEvent({
+    id: newId('evt'),
+    tracking_id: id,
+    type: 'SELF_VIEW',
+    timestamp: ts,
+    user_agent: request.headers.get('User-Agent'),
+    ip_hash: null,
+    suspected_self_open: true,
+    confidence: 1,
+    classification: 'SELF_LIKELY',
+  });
+
+  const events = await store.listEvents(id);
+  for (const evt of events) {
+    if (evt.type === 'OPEN') {
+      const openMs = Date.parse(evt.timestamp);
+      if (Number.isFinite(openMs) && Math.abs(openMs - selfMs) < 15_000) {
+        await store.updateEvent(evt.id, {
+          classification: 'SELF_LIKELY',
+          suspected_self_open: true,
+          confidence: 1,
+        });
+      }
+    }
+  }
+
+  const updated = await recomputeEmailStats(id, store);
+  return json({ ok: true, open_count: updated?.open_count ?? 0 });
+}
+
 async function handleOpen(
   trackingId: string,
   request: Request,
@@ -274,7 +360,14 @@ async function handleOpen(
         '';
       const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
       const now = Date.now();
-      const verdict = classifyOpen({ sentAt: email.sent_at, now, ua });
+
+      const events = await store.listEvents(trackingId);
+      const recentSelfView = events.find(
+        (e) => e.type === 'SELF_VIEW' && Math.abs(now - Date.parse(e.timestamp)) < 15_000,
+      );
+      const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
+
+      const verdict = classifyOpen({ sentAt: email.sent_at, now, ua, selfViewTs });
       const ts = new Date(now).toISOString();
       const lastMs = email.last_opened_at ? Date.parse(email.last_opened_at) : 0;
       const duplicate = verdict.countsAsOpen && lastMs && Number.isFinite(now) && now >= lastMs && now - lastMs < 800;

@@ -4,6 +4,7 @@ import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { queryFirst, SELECTORS } from './selectors.js';
 import { resolveMessageId, resolveThreadId, type MessageIdView, type ThreadIdView } from './thread-id.js';
 import type {
+  ComposeHandle,
   ComposeViewState,
   CurrentThreadView,
   GmailAdapter,
@@ -25,6 +26,8 @@ export class InboxSdkAdapter implements GmailAdapter {
   private rowTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingRows = new Map<string, VisibleThreadRow>();
   private activeComposeView: unknown = null;
+  private composeHandles = new Map<string, ComposeHandle>();
+  private currentThread: CurrentThreadView | null = null;
 
   constructor(
     private readonly appId: string,
@@ -83,9 +86,34 @@ export class InboxSdkAdapter implements GmailAdapter {
 
     try {
       sdk.Conversations.registerThreadViewHandler((threadView) => {
+        const attachMessageListeners = () => {
+          const mvs = threadView.getMessageViewsAll?.() || threadView.getMessageViews?.() || [];
+          for (const mv of mvs) {
+            mv.on?.('load', () => {
+              if (generation !== this.generation) return;
+              void mapThreadView(threadView)
+                .then((thread) => {
+                  if (thread && generation === this.generation) {
+                    this.currentThread = thread;
+                    emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
+                  }
+                })
+                .catch(() => {});
+            });
+          }
+        };
+        attachMessageListeners();
+
+        threadView.on?.('destroy', () => {
+          if (generation === this.generation && this.currentThread?.threadId === threadView.getThreadID?.()) {
+            this.currentThread = null;
+          }
+        });
+
         void mapThreadView(threadView)
           .then((thread) => {
             if (thread && generation === this.generation) {
+              this.currentThread = thread;
               emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
             }
           })
@@ -105,6 +133,7 @@ export class InboxSdkAdapter implements GmailAdapter {
           void mapThreadView(threadView)
             .then((thread) => {
               if (thread && generation === this.generation) {
+                this.currentThread = thread;
                 emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
               }
             })
@@ -118,13 +147,36 @@ export class InboxSdkAdapter implements GmailAdapter {
     try {
       sdk.Compose.registerComposeViewHandler((composeView) => {
         this.activeComposeView = composeView;
+        const composeId = `compose-${Math.random().toString(36).slice(2, 8)}`;
+        const handle: ComposeHandle = {
+          id: composeId,
+          threadId: undefined,
+          isReply: false,
+          view: composeView,
+          element: composeView.getElement?.() || null,
+        };
+        this.composeHandles.set(composeId, handle);
+
         composeView.on?.('destroy', () => {
+          this.composeHandles.delete(composeId);
           if (this.activeComposeView === composeView) {
             this.activeComposeView = null;
           }
         });
+
+        void resolveThreadId(composeView as ThreadIdView).then((tid) => {
+          if (tid) {
+            handle.threadId = tid;
+            handle.isReply = true;
+          }
+        });
+
         void mapCompose(composeView)
           .then((compose) => {
+            if (compose.threadId) {
+              handle.threadId = compose.threadId;
+              handle.isReply = compose.isReply;
+            }
             if (generation === this.generation) {
               emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
             }
@@ -171,6 +223,7 @@ export class InboxSdkAdapter implements GmailAdapter {
     if (this.rowTimer) clearTimeout(this.rowTimer);
     this.rowTimer = null;
     this.pendingRows.clear();
+    this.currentThread = null;
     this.started = false;
     await this.fallback.stop();
     this.handler = null;
@@ -196,6 +249,9 @@ export class InboxSdkAdapter implements GmailAdapter {
     return this.fallback.getVisibleThreadMetadata();
   }
   async getCurrentThread() {
+    if (this.currentThread) {
+      return { ...ok('getCurrentThread'), thread: this.currentThread };
+    }
     return this.fallback.getCurrentThread();
   }
   async getCurrentCompose() {
@@ -224,28 +280,51 @@ export class InboxSdkAdapter implements GmailAdapter {
   async starThread(threadId: string) {
     return this.fallback.starThread(threadId);
   }
-  async createReplyDraft(threadId: string) {
-    const fallbackRes = await this.fallback.createReplyDraft(threadId);
-    if (fallbackRes.success) return fallbackRes;
-
-    if (this.sdk?.Compose?.openNewComposeView) {
-      try {
-        const composeView = await this.sdk.Compose.openNewComposeView();
-        if (composeView) {
-          this.activeComposeView = composeView;
-          return { ...ok('createReplyDraft'), threadId };
-        }
-      } catch {
-        /* fall through */
+  async createReplyDraft(threadId: string): Promise<GmailActionResult & { composeHandle?: ComposeHandle }> {
+    // 1. Check if a compose handle already exists for this thread's reply
+    for (const handle of this.composeHandles.values()) {
+      if (handle.threadId === threadId && handle.isReply) {
+        return { ...ok('createReplyDraft'), threadId, composeHandle: handle };
       }
     }
+
+    // 2. Trigger reply via fallback (scoped to the thread)
+    const fallbackRes = await this.fallback.createReplyDraft(threadId);
+
+    // 3. Check composeHandles
+    for (const handle of this.composeHandles.values()) {
+      if (handle.threadId === threadId && handle.isReply) {
+        return { ...ok('createReplyDraft'), threadId, composeHandle: handle };
+      }
+    }
+
     return fallbackRes;
   }
-  async insertComposeBody(text: string) {
-    const view = this.activeComposeView as {
+
+  async insertComposeBody(text: string, target?: ComposeHandle | { threadId?: string }) {
+    let targetHandle: ComposeHandle | undefined;
+
+    if (target && 'view' in target && target.view) {
+      targetHandle = target as ComposeHandle;
+    } else if (target && target.threadId) {
+      for (const handle of this.composeHandles.values()) {
+        if (handle.threadId === target.threadId && handle.isReply) {
+          targetHandle = handle;
+          break;
+        }
+      }
+    }
+
+    if (!targetHandle && !target?.threadId && this.composeHandles.size === 1) {
+      const only = [...this.composeHandles.values()][0];
+      if (only.isReply) targetHandle = only;
+    }
+
+    const view = targetHandle?.view as {
       setBodyText?: (text: string) => void;
       insertTextIntoBodyAtCursor?: (text: string) => void;
     } | null;
+
     if (view) {
       try {
         if (typeof view.setBodyText === 'function') {
@@ -260,7 +339,7 @@ export class InboxSdkAdapter implements GmailAdapter {
         /* fall back to DOM */
       }
     }
-    return this.fallback.insertComposeBody(text);
+    return this.fallback.insertComposeBody(text, targetHandle || target);
   }
   async navigateToSearch(query: string) {
     if (this.sdk?.Router?.goto) {
@@ -388,6 +467,7 @@ async function mapThreadView(view: ThreadViewLike): Promise<CurrentThreadView | 
         cc: [],
         bodyText,
         attachmentsMetadata: [],
+        loaded: isLoaded,
       };
     }),
   );
@@ -475,6 +555,7 @@ type ThreadViewLike = ThreadIdView & {
   getMessageViews?: () => MessageViewLike[];
   getMessageViewsAll?: () => MessageViewLike[];
   addSidebarContentPanel?: (desc: unknown) => { remove?: () => void };
+  on?: (event: string, cb: () => void) => void;
 };
 
 type MessageViewLike = MessageIdView & {
@@ -485,6 +566,7 @@ type MessageViewLike = MessageIdView & {
   getRecipientEmailAddresses?: () => string[];
   getBodyElement?: () => HTMLElement | null;
   getThreadView?: () => ThreadViewLike;
+  on?: (event: string, cb: () => void) => void;
 };
 
 type ComposeViewLike = ThreadIdView & {

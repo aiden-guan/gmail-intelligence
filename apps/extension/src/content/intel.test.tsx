@@ -294,4 +294,26 @@ describe('reactive intelligence', () => {
     expect(host.textContent).not.toContain('Next steps');
     root.unmount();
   });
+
+  it('renders pending status with model name and preview fallback', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{
+            classification: { category: 'RESPOND', needsReply: true },
+          }}
+          pending="Analyzing with gpt-4o-mini…"
+          preview="A draft question about meeting times."
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.textContent).toContain('Analyzing with gpt-4o-mini…');
+    expect(host.textContent).toContain('A draft question about meeting times.');
+    root.unmount();
+  });
 });

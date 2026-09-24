@@ -18,13 +18,16 @@ export function classifyOpenEvent(opts: {
   eventTs: number;
   sentAt: number | null;
   userAgent?: string | null;
+  selfViewTs?: number | null;
 }): { classification: OpenClassification; suspected: boolean; confidence: number; countsAsOpen: boolean } {
   if (opts.sentAt == null || !Number.isFinite(opts.sentAt) || opts.eventTs < opts.sentAt) {
     return { classification: "SELF_LIKELY", suspected: true, confidence: 1, countsAsOpen: false };
   }
-  const delta = opts.eventTs - opts.sentAt;
-  if (delta < 5000) {
-    return { classification: "SELF_LIKELY", suspected: true, confidence: 0.5, countsAsOpen: true };
+  if (opts.selfViewTs != null && Number.isFinite(opts.selfViewTs)) {
+    const diff = Math.abs(opts.eventTs - opts.selfViewTs);
+    if (diff < 15_000) {
+      return { classification: "SELF_LIKELY", suspected: true, confidence: 1, countsAsOpen: false };
+    }
   }
   if (opts.userAgent && /Headless|Lighthouse/i.test(opts.userAgent)) {
     return { classification: "UNKNOWN", suspected: true, confidence: 0.3, countsAsOpen: true };

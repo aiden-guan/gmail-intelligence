@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ExtensionSettings } from '@gi/shared';
-import { DEFAULT_SETTINGS, localThreadSummary } from '@gi/shared';
+import { DEFAULT_SETTINGS, buildThreadSnapshot, localThreadSummary } from '@gi/shared';
 import {
   CompositeGmailAdapter,
   findComposeBody,
@@ -10,6 +10,8 @@ import {
   findThreadRows,
   normalizeOpenedThread,
   normalizeVisibleRow,
+  type ActionQueueResult,
+  type ComposeHandle,
   type NormalizedThread,
   selectorDiagnostics,
   verifyArchive,
@@ -163,11 +165,17 @@ async function boot(): Promise<void> {
     if (event.type === 'THREAD_OPENED' || event.type === 'THREAD_DATA_UPDATED') {
       currentThreadId = event.thread.threadId;
       const thread = normalizeOpenedThread(event.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
-      const bodyKey = `${thread.threadId}:${thread.messages.map((message) => message.bodyText.length).join(',')}`;
-      if (summaryKeys.get(thread.threadId) !== bodyKey) {
-        summaryKeys.set(thread.threadId, bodyKey);
-        void summarizeOpenThread(thread);
-      }
+      void (async () => {
+        const snapshot = await buildThreadSnapshot({
+          threadId: thread.threadId,
+          subject: thread.subject,
+          pageMessages: thread.messages,
+        });
+        if (summaryKeys.get(thread.threadId) !== snapshot.fingerprint) {
+          summaryKeys.set(thread.threadId, snapshot.fingerprint);
+          void summarizeOpenThread(thread);
+        }
+      })();
       if (!sdkReady) showDomThreadPanel(event.thread.threadId);
     }
     if (event.type === 'COMPOSE_OPENED' && !sdkOwnsCompose) {
@@ -193,6 +201,9 @@ async function boot(): Promise<void> {
     },
     onLink: (trackingId, gmailThreadId) => {
       linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
+    },
+    onSelfView: (trackingId, gmailThreadId) => {
+      void send({ type: 'TRACKING_SELF_VIEW', trackingId, gmailThreadId });
     },
   });
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -427,15 +438,13 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
   }
   const tracking = sentStatus?.openThreadStatus() ?? null;
   const note = summaryNotes.get(threadId);
-  const summaryLine = intel?.summary?.summary?.oneLine;
-  const preview = summaryLine ? null : note?.preview || null;
-  const pending = summaryLine
-    ? null
-    : preview
-      ? null
-      : note?.pending
-        ? 'Analyzing thread…'
-        : note?.reason || (intel?.classification ? null : 'Analyzing thread…');
+  const hasModelSummary = intel?.summary?.source === 'model' && intel?.summary?.aiStatus === 'success';
+  const summaryLine = hasModelSummary ? intel?.summary?.summary?.oneLine : undefined;
+  const preview = summaryLine ? null : note?.preview || intel?.summary?.summary?.oneLine || null;
+  const isAnalyzing = Boolean(note?.pending);
+  const pending = isAnalyzing
+    ? (settings.aiModel ? `Analyzing with ${settings.aiModel}…` : 'Analyzing email…')
+    : (intel?.summary?.aiStatus === 'failed' ? (intel?.summary?.aiError ? `AI summary failed: ${intel.summary.aiError}` : 'AI summary failed.') : (note?.reason || (intel?.classification || hasModelSummary ? null : 'Analyzing thread…')));
   root.render(
     createElement(ThreadIntelCard, {
       intel,
@@ -444,6 +453,7 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       preview,
       mode: currentIslandMode(),
       variant,
+      canDraft: true,
       onMode: (mode) => {
         islandMode = mode;
         try {
@@ -463,6 +473,14 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       },
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
+      onRetrySummary: () => {
+        void adapter.getCurrentThread().then((curr) => {
+          if (curr.thread) {
+            const normalized = normalizeOpenedThread(curr.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
+            void summarizeOpenThread(normalized, true);
+          }
+        });
+      },
     }),
   );
 }
@@ -476,11 +494,11 @@ function previewLine(thread: NormalizedThread): string | null {
   return line && line !== 'Empty message' ? line : null;
 }
 
-async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
+async function summarizeOpenThread(thread: NormalizedThread, force = false): Promise<void> {
   const hasBody = thread.messages.some((message) => message.bodyText.trim().length > 0);
   const preview = previewLine(thread);
   summaryNotes.set(thread.threadId, {
-    pending: hasBody && !preview,
+    pending: hasBody,
     reason: null,
     preview,
   });
@@ -499,23 +517,42 @@ async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
       await ingestPromise;
       return;
     }
-    const res = await send<{ ok?: boolean; oneLine?: string; reason?: string }>({
-      type: 'SUMMARIZE_THREAD',
+    const res = await send<{
+      ok?: boolean;
+      jobId?: string;
+      status?: string;
+      oneLine?: string;
+      reason?: string;
+      error?: string;
+    }>({
+      type: 'REQUEST_SUMMARY',
       threadId: thread.threadId,
       subject: thread.subject,
+      force,
       messages: thread.messages.map((message) => ({
+        messageId: message.messageId,
         sender: message.sender?.email || 'unknown@local',
+        recipients: message.recipients?.map((r) => r.email) || [],
         bodyText: message.bodyText,
         timestamp: message.timestamp || '',
+        loaded: message.loaded ?? (message.bodyText.trim().length > 0),
       })),
     });
-    const fallback = res?.ok ? null : (preview || previewLine(thread));
-    summaryNotes.set(thread.threadId, {
-      pending: false,
-      reason: res?.ok ? null : res?.reason || null,
-      preview: fallback,
-    });
-    await refreshThread(thread.threadId);
+    if (res?.status === 'succeeded' && res.oneLine) {
+      summaryNotes.set(thread.threadId, {
+        pending: false,
+        reason: null,
+        preview: res.oneLine,
+      });
+      await refreshThread(thread.threadId);
+    } else if (res && !res.ok) {
+      summaryNotes.set(thread.threadId, {
+        pending: false,
+        reason: res.reason || res.error || null,
+        preview: preview || previewLine(thread),
+      });
+      await refreshThread(thread.threadId);
+    }
     await ingestPromise;
   } catch (error) {
     console.warn('[gi] summarizeOpenThread error', error);
@@ -525,16 +562,6 @@ async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
       preview: preview || previewLine(thread),
     });
     await refreshThread(thread.threadId);
-  } finally {
-    const current = summaryNotes.get(thread.threadId);
-    if (current?.pending) {
-      summaryNotes.set(thread.threadId, {
-        pending: false,
-        reason: current.reason,
-        preview: current.preview || previewLine(thread),
-      });
-      await refreshThread(thread.threadId);
-    }
   }
 }
 
@@ -577,8 +604,13 @@ function linkTracked(link: { trackingId: string; gmailThreadId: string | null; g
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void (async () => {
-    if (message?.type === 'THREAD_INTELLIGENCE_UPDATED') {
-      await refreshThread(String(message.threadId || ''));
+    if (message?.type === 'THREAD_INTELLIGENCE_UPDATED' || message?.type === 'THREAD_SUMMARY_READY' || message?.type === 'THREAD_DRAFT_READY') {
+      const tid = String(message.threadId || '');
+      const note = summaryNotes.get(tid);
+      if (note?.pending) {
+        summaryNotes.set(tid, { ...note, pending: false });
+      }
+      await refreshThread(tid);
       sendResponse({ ok: true });
       return;
     }
@@ -663,21 +695,70 @@ async function waitForComposeBody(timeoutMs = 4000): Promise<boolean> {
 }
 
 async function insertDraft(threadId: string, text: string) {
-  const opened = await adapter.actions.enqueueAndWait({ kind: 'CREATE_REPLY_DRAFT', threadId });
+  const opened = (await adapter.actions.enqueueAndWait({ kind: 'CREATE_REPLY_DRAFT', threadId })) as ActionQueueResult & {
+    composeHandle?: ComposeHandle;
+  };
   if (!opened.success) {
     return { success: false, verified: false, action: 'CREATE_REPLY_DRAFT', threadId, reason: opened.reason || 'Could not open reply' };
   }
+  const handle = opened.composeHandle;
+  if (!handle || (handle.threadId && handle.threadId !== threadId)) {
+    return {
+      success: false,
+      verified: false,
+      action: 'CREATE_REPLY_DRAFT',
+      threadId,
+      reason: 'No matching compose handle for thread',
+    };
+  }
+
   await waitForComposeBody(4000);
-  await adapter.insertComposeBody(text);
+  if (!handle.element && typeof document !== 'undefined') {
+    const container = adapter.findThreadContainer(document, threadId);
+    if (container) {
+      handle.element = findComposeBody(container);
+    }
+  }
+
+  await adapter.insertComposeBody(text, handle);
   await wait(300);
-  const compose = await adapter.getCurrentCompose();
-  const thread = await adapter.getCurrentThread();
-  const currentBody = compose.compose?.bodyText || (typeof document !== 'undefined' ? findComposeBody(document)?.textContent || '' : '');
+
+  let composeOpen = false;
+  let currentBody = '';
+  const targetThreadId = handle.threadId || threadId;
+
+  if (handle.view) {
+    composeOpen = true;
+    const view = handle.view as {
+      getTextContent?: () => string;
+      getBodyElement?: () => HTMLElement | null;
+      getElement?: () => HTMLElement | null;
+    };
+    if (typeof view.getTextContent === 'function') {
+      currentBody = view.getTextContent() || '';
+    } else if (typeof view.getBodyElement === 'function') {
+      currentBody = view.getBodyElement()?.textContent || '';
+    } else if (typeof view.getElement === 'function') {
+      const el = view.getElement();
+      currentBody = el ? (findComposeBody(el)?.textContent || el.textContent || '') : '';
+    }
+  } else if (handle.element) {
+    composeOpen = true;
+    currentBody = (findComposeBody(handle.element)?.textContent || handle.element.textContent || '').trim();
+  } else if (typeof document !== 'undefined') {
+    const container = adapter.findThreadContainer(document, threadId);
+    const bodyEl = container ? findComposeBody(container) : null;
+    if (bodyEl) {
+      composeOpen = true;
+      currentBody = (bodyEl.textContent || '').trim();
+    }
+  }
+
   const check = verifyDraftInserted({
-    composeOpen: Boolean(compose.compose) || Boolean(typeof document !== 'undefined' && findComposeBody(document)),
+    composeOpen,
     bodyText: currentBody,
     expectedText: text,
-    activeThreadId: thread.thread?.threadId ?? null,
+    activeThreadId: targetThreadId,
     expectedThreadId: threadId,
   });
   return {
@@ -880,19 +961,12 @@ async function runCommand(id: string): Promise<void> {
   if (command === 'summarize') {
     showToast('Summarizing…');
     const current = await adapter.getCurrentThread();
-    const opened = current.thread;
-    const res = await send<{ ok?: boolean; oneLine?: string; reason?: string }>({
-      type: 'SUMMARIZE_THREAD',
-      threadId,
-      subject: opened?.subject || '',
-      messages: (opened?.messages || []).map((message) => ({
-        sender: message.sender?.email || 'unknown@local',
-        bodyText: message.bodyText,
-        timestamp: message.timestamp || '',
-      })),
-    });
-    showToast(res?.ok ? res.oneLine || 'Summary ready.' : res?.reason || 'Could not summarize.');
-    await refreshThread(threadId);
+    if (current.thread) {
+      const normalized = normalizeOpenedThread(current.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
+      await summarizeOpenThread(normalized, true);
+    } else {
+      showToast('Could not find active thread.');
+    }
     return;
   }
   if (command === 'draft') {
@@ -916,24 +990,84 @@ async function runCommand(id: string): Promise<void> {
 }
 
 async function draftReply(threadId: string): Promise<void> {
-  showToast('Drafting reply…');
+  const modelName = settings.aiModel;
+  showToast(modelName ? `Drafting reply with ${modelName}…` : 'Drafting reply…');
   const current = await adapter.getCurrentThread();
-  const thread = current.thread ? normalizeOpenedThread(current.thread, 'dom') : null;
-  const res = await send<{ ok?: boolean; body?: string; reason?: string }>({
-    type: 'DRAFT_REPLY',
+  const thread = current.thread ? normalizeOpenedThread(current.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom') : null;
+  const messages = thread?.messages.map((m) => ({
+    messageId: m.messageId,
+    sender: m.sender.email,
+    recipients: m.recipients.map((r) => r.email),
+    bodyText: m.bodyText,
+    timestamp: m.timestamp || '',
+    loaded: m.loaded ?? (m.bodyText.trim().length > 0),
+  }));
+
+  const res = await send<{
+    ok?: boolean;
+    jobId?: string;
+    status?: string;
+    body?: string;
+    reason?: string;
+    error?: string;
+  }>({
+    type: 'REQUEST_DRAFT',
     threadId,
     subject: thread?.subject,
-    messages: thread?.messages.map((m) => ({
-      sender: m.sender.email,
-      bodyText: m.bodyText,
-      timestamp: m.timestamp || '',
-    })),
+    messages,
   });
-  if (!res?.ok || !res.body) {
-    showToast(res?.reason || 'Could not draft a reply.');
+
+  let draftBody: string | undefined = res?.body;
+
+  if (res?.ok && !draftBody && (res.status === 'queued' || res.status === 'running')) {
+    const jobId = res.jobId;
+    const start = Date.now();
+    const timeoutMs = 60_000;
+    while (Date.now() - start < timeoutMs) {
+      await wait(400);
+      const checkRes = await send<{
+        ok?: boolean;
+        job?: { status: string; error?: string };
+        body?: string;
+      }>({ type: 'GET_AI_JOB_STATUS', jobId });
+      if (checkRes?.job?.status === 'succeeded' && checkRes.body) {
+        draftBody = checkRes.body;
+        break;
+      }
+      if (checkRes?.job?.status === 'failed') {
+        showToast(checkRes.job.error || 'Could not draft a reply.');
+        return;
+      }
+      const intelRes = await send<{ draft?: { suggestion?: { body?: string } } }>({
+        type: 'GET_THREAD_INTEL',
+        threadId,
+      });
+      if (intelRes?.draft?.suggestion?.body) {
+        draftBody = intelRes.draft.suggestion.body;
+        break;
+      }
+    }
+  } else if (!res?.ok) {
+    // If REQUEST_DRAFT failed to queue, fallback to synchronous DRAFT_REPLY with operation-specific timeout (60s)
+    const fallbackRes = await send<{ ok?: boolean; body?: string; reason?: string }>({
+      type: 'DRAFT_REPLY',
+      threadId,
+      subject: thread?.subject,
+      messages,
+    }, 60_000);
+    if (!fallbackRes?.ok || !fallbackRes.body) {
+      showToast(fallbackRes?.reason || res?.reason || res?.error || 'Could not draft a reply.');
+      return;
+    }
+    draftBody = fallbackRes.body;
+  }
+
+  if (!draftBody) {
+    showToast('Drafting timed out. Please try again.');
     return;
   }
-  const inserted = await insertDraft(threadId, res.body);
+
+  const inserted = await insertDraft(threadId, draftBody);
   if (!inserted.success) showToast(inserted.reason || 'Could not insert the draft.', () => void draftReply(threadId));
   else showToast('Draft inserted. It was not sent.');
 }

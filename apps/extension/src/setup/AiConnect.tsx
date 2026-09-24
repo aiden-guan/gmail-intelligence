@@ -8,7 +8,7 @@ import {
   isChatGptModel,
 } from '@gi/ai';
 import { useEffect, useRef, useState } from 'react';
-import type { ExtensionSettings } from '@gi/shared';
+import { getProviderRequiredOrigin, type ExtensionSettings } from '@gi/shared';
 import { deleteCachedModel, listDownloadedModelIds } from '../local-model/cache';
 import {
   getOnDeviceAvailability,
@@ -429,8 +429,8 @@ export function AiConnect({
                   <option value="openai">OpenAI API key</option>
                   <option value="openai-compatible">OpenAI-compatible</option>
                   <option value="ollama">Ollama on this computer</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="gemini">Gemini API</option>
+                  <option value="anthropic" disabled>Anthropic (Not supported)</option>
+                  <option value="gemini" disabled>Gemini API (Not supported)</option>
                 </select>
               </label>
               <label className="block text-xs gi-muted">
@@ -462,18 +462,36 @@ export function AiConnect({
               )}
               <button
                 className={primaryClass}
-                onClick={() =>
+                onClick={async () => {
+                  setAuthError(null);
+                  const origin = getProviderRequiredOrigin(advanced.provider, advanced.endpoint);
+                  if (origin && hasRuntime() && chrome.permissions?.request) {
+                    try {
+                      const granted = await chrome.permissions.request({ origins: [origin] });
+                      if (!granted) {
+                        setAuthError(`Host permission for ${origin} was not granted. Please approve to connect.`);
+                        return;
+                      }
+                    } catch (err) {
+                      setAuthError(err instanceof Error ? err.message : 'Could not request host permission.');
+                      return;
+                    }
+                  } else if (advanced.provider === 'openai-compatible' && !origin) {
+                    setAuthError('Invalid endpoint URL. Please enter a valid http/https URL.');
+                    return;
+                  }
                   onPatch({
                     aiMode: advanced.provider === 'ollama' ? 'local' : 'remote',
                     aiProvider: advanced.provider,
                     aiModel: advanced.model,
                     aiEndpoint: advanced.endpoint,
                     aiApiKey: advanced.apiKey,
-                  })
-                }
+                  });
+                }}
               >
                 Use this connection
               </button>
+              {authError ? <p className="mt-2 text-xs gi-danger">{authError}</p> : null}
               <p className="text-xs gi-muted">
                 The key stays in extension storage. Anthropic and Gemini API adapters are not finished; use an
                 OpenAI-compatible endpoint for those.

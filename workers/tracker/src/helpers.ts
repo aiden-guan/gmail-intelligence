@@ -14,6 +14,7 @@ export function classifyOpen(opts: {
   sentAt: string | null;
   now: number;
   ua: string | null;
+  selfViewTs?: number | null;
 }): {
   classification: 'RECIPIENT_LIKELY' | 'SELF_LIKELY' | 'UNKNOWN';
   suspected: boolean;
@@ -24,9 +25,11 @@ export function classifyOpen(opts: {
   if (!opts.sentAt || !Number.isFinite(sentMs) || opts.now < sentMs) {
     return { classification: 'SELF_LIKELY', suspected: true, confidence: 1, countsAsOpen: false };
   }
-  const delta = opts.now - sentMs;
-  if (delta < 5000) {
-    return { classification: 'SELF_LIKELY', suspected: true, confidence: 0.5, countsAsOpen: true };
+  if (opts.selfViewTs != null && Number.isFinite(opts.selfViewTs)) {
+    const diff = Math.abs(opts.now - opts.selfViewTs);
+    if (diff < 15_000) {
+      return { classification: 'SELF_LIKELY', suspected: true, confidence: 1, countsAsOpen: false };
+    }
   }
   if (opts.ua && /Headless|Lighthouse/i.test(opts.ua)) {
     return { classification: 'UNKNOWN', suspected: true, confidence: 0.3, countsAsOpen: true };

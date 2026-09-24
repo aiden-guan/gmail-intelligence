@@ -48,7 +48,7 @@ export function verifyDraftInserted(input: {
 }): VerifyResult {
   const needle = input.expectedText.trim().slice(0, 80);
   const bodyOk = needle.length > 0 && input.bodyText.includes(needle);
-  const threadOk = input.activeThreadId == null || input.activeThreadId === input.expectedThreadId;
+  const threadOk = input.activeThreadId != null && input.activeThreadId === input.expectedThreadId;
   if (input.composeOpen && bodyOk && threadOk) {
     return { verified: true, reason: 'Reply draft contains the expected text' };
   }

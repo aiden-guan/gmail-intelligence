@@ -6,6 +6,11 @@ export type IslandMode = 'docked' | 'open' | 'expanded';
 export type ThreadIntelData = {
   classification?: { category?: string; needsReply?: boolean; reason?: string };
   summary?: {
+    source?: 'model' | 'message';
+    aiStatus?: 'queued' | 'running' | 'success' | 'failed';
+    aiError?: string;
+    model?: string;
+    provider?: string;
     summary?: {
       reasoning?: string;
       oneLine?: string;
@@ -36,15 +41,18 @@ export function ThreadIntelCard(props: {
   tracking?: ThreadTrackingStatus | null;
   mode?: IslandMode;
   variant?: 'float' | 'sidebar';
+  canDraft?: boolean;
   onMode?: (mode: IslandMode) => void;
   onDraft: () => void;
   onRemind: () => void;
+  onRetrySummary?: () => void;
 }) {
   const [uncontrolled, setUncontrolled] = useState<IslandMode>('open');
   const mode = props.mode ?? uncontrolled;
   const category = categoryLabel(props.intel?.classification?.category);
   const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
+  const canDraft = props.canDraft ?? needsReply;
   const brief = props.intel?.summary?.summary;
   const points = sanitizeList(brief?.keyPoints || []);
   const dates = sanitizeDateTags(brief?.dates || []);
@@ -102,8 +110,26 @@ export function ThreadIntelCard(props: {
         <div className="gi-catrow">
           <div className="gi-cat">{category || 'Inbox'}</div>
           {props.intel?.manual ? <span className="gi-you">Set by you</span> : null}
+          {props.pending && !waiting && /analyzing/i.test(props.pending) ? (
+            <span className="gi-pending-tag" style={{ fontSize: '11px', opacity: 0.7, marginLeft: 'auto' }}>
+              {props.pending}
+            </span>
+          ) : null}
         </div>
         <p className={waiting ? 'gi-sum is-wait' : 'gi-sum'}>{line}</p>
+        {props.intel?.summary?.aiStatus === 'failed' && props.onRetrySummary ? (
+          <div className="gi-retry-row" style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '4px 0', fontSize: '11px' }}>
+            <span style={{ color: '#e06c75' }}>Model summary failed</span>
+            <button
+              type="button"
+              className="gi-action is-ghost"
+              style={{ padding: '2px 6px', fontSize: '11px' }}
+              onClick={props.onRetrySummary}
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
         {dates.length ? (
           <div className="gi-dates">
             {dates.map((date) => (
@@ -129,12 +155,20 @@ export function ThreadIntelCard(props: {
           </div>
         ) : null}
         <div className="gi-actions">
-          {needsReply ? (
-            <button type="button" className="gi-action" onClick={props.onDraft}>
+          {canDraft ? (
+            <button
+              type="button"
+              className={needsReply ? 'gi-action' : 'gi-action is-ghost'}
+              onClick={props.onDraft}
+            >
               Draft reply
             </button>
           ) : null}
-          <button type="button" className={needsReply ? 'gi-action is-ghost' : 'gi-action'} onClick={props.onRemind}>
+          <button
+            type="button"
+            className={canDraft && !needsReply ? 'gi-action' : 'gi-action is-ghost'}
+            onClick={props.onRemind}
+          >
             Remind
           </button>
         </div>

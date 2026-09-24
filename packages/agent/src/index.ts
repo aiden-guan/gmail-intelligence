@@ -7,6 +7,7 @@ import {
   isPastedSummary,
   localThreadSummary,
   tightenSummary,
+  type AIJobStatus,
   type ClassificationResult,
   type ExtensionSettings,
 } from '@gi/shared';
@@ -45,7 +46,21 @@ export type AgentLoopDeps = {
  */
 export class AgentLoop {
   private lastClassifierRun: number | null = null;
-  private summaryAttempts = new Set<string>();
+  private inFlightJobs = new Map<
+    string,
+    {
+      jobId: string;
+      status: AIJobStatus;
+      promise: Promise<{
+        ok: boolean;
+        oneLine?: string;
+        body?: string;
+        source?: 'model' | 'message';
+        aiStatus?: 'success' | 'failed';
+        error?: string;
+      }>;
+    }
+  >();
 
   constructor(private readonly deps: AgentLoopDeps) {}
 
@@ -237,23 +252,92 @@ export class AgentLoop {
     });
   }
 
-  private async summarizeIfNeeded(input: {
+  async startSummaryJob(input: {
     threadId: string;
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
-  }): Promise<void> {
-    const existing = await this.deps.db.thread_summaries.get(input.threadId);
+    force?: boolean;
+  }): Promise<{
+    ok: boolean;
+    jobId: string;
+    status: AIJobStatus;
+    oneLine?: string;
+    source?: 'model' | 'message';
+    aiStatus?: 'queued' | 'running' | 'success' | 'failed';
+    error?: string;
+    reason?: string;
+  }> {
+    if (!input.messages.some((message) => message.bodyText.trim())) {
+      return { ok: false, jobId: '', status: 'failed', reason: 'Open the thread so the message can be read.' };
+    }
     const fingerprint = `${input.fingerprint}:sum6`;
+    const existing = await this.deps.db.thread_summaries.get(input.threadId);
     const storedLine = existing?.summary.oneLine || '';
     const stalePaste = Boolean(storedLine) && isPastedSummary(storedLine, input.messages);
-    if (existing?.fingerprint === fingerprint && existing.source === 'model' && !stalePaste) return;
+
+    if (!input.force && existing?.fingerprint === fingerprint && existing.source === 'model' && existing.aiStatus === 'success' && !stalePaste) {
+      return {
+        ok: true,
+        jobId: 'completed',
+        status: 'succeeded',
+        oneLine: existing.summary.oneLine,
+        source: 'model',
+        aiStatus: 'success',
+      };
+    }
+
+    const key = `summary:${input.threadId}:${fingerprint}`;
+    const inFlight = this.inFlightJobs.get(key);
+    if (!input.force && inFlight) {
+      return { ok: true, jobId: inFlight.jobId, status: inFlight.status };
+    }
 
     const aiReady = Boolean(this.deps.ai) && this.deps.settings().aiMode !== 'disabled';
-    const attemptKey = `${input.threadId}:${fingerprint}`;
-    if (aiReady && !this.summaryAttempts.has(attemptKey)) {
-      this.summaryAttempts.add(attemptKey);
+    if (!aiReady) {
+      const summary = localThreadSummary(input);
+      await this.deps.db.thread_summaries.put({
+        threadId: input.threadId,
+        fingerprint,
+        summary,
+        createdAt: Date.now(),
+        source: 'message',
+      });
+      await this.deps.log({
+        type: 'summarize',
+        threadId: input.threadId,
+        detail: summary.oneLine,
+        tier: AgentSafetyTier.READ_ONLY,
+      });
+      this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
+      this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+      return {
+        ok: true,
+        jobId: 'local',
+        status: 'succeeded',
+        oneLine: summary.oneLine,
+        source: 'message',
+      };
+    }
+
+    const jobId = `job_sum_${input.threadId}_${Date.now()}`;
+    await this.deps.db.ai_jobs?.put({
+      id: jobId,
+      kind: 'summary',
+      threadId: input.threadId,
+      fingerprint,
+      status: 'queued',
+      provider: this.deps.settings().aiProvider,
+      model: this.deps.settings().aiModel,
+      createdAt: Date.now(),
+    }).catch(() => {});
+
+    const p = (async () => {
       try {
+        await this.deps.db.ai_jobs?.update(jobId, { status: 'running', startedAt: Date.now() }).catch(() => {});
+        const active = this.inFlightJobs.get(key);
+        if (active) active.status = 'running';
+
         const { result } = await this.deps.queue.enqueue('summary', fingerprint, () =>
           this.deps.ai!.summarizeThread({
             subject: input.subject,
@@ -261,46 +345,168 @@ export class AgentLoop {
           }),
         );
         const summary = tightenSummary(result, input);
-        if (summary.oneLine) {
-          await this.deps.db.thread_summaries.put({
-            threadId: input.threadId,
-            fingerprint,
-            summary,
-            createdAt: Date.now(),
-            source: 'model',
-          });
-          await this.deps.log({
-            type: 'summarize',
-            threadId: input.threadId,
-            detail: summary.oneLine,
-            tier: AgentSafetyTier.READ_ONLY,
-          });
-          this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
-          this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
-          return;
-        }
-      } catch {
-        /* Keep a summary of the text on screen when the model fails. */
+        await this.deps.db.thread_summaries.put({
+          threadId: input.threadId,
+          fingerprint,
+          summary,
+          createdAt: Date.now(),
+          source: 'model',
+          aiStatus: 'success',
+          provider: this.deps.settings().aiProvider,
+          model: this.deps.settings().aiModel,
+        });
+        await this.deps.db.ai_jobs?.update(jobId, {
+          status: 'succeeded',
+          completedAt: Date.now(),
+        }).catch(() => {});
+        await this.deps.log({
+          type: 'summarize',
+          threadId: input.threadId,
+          detail: summary.oneLine,
+          tier: AgentSafetyTier.READ_ONLY,
+        });
+        this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
+        this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+        return { ok: true, oneLine: summary.oneLine, source: 'model' as const, aiStatus: 'success' as const };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const fallback = existing?.summary || localThreadSummary(input);
+        await this.deps.db.thread_summaries.put({
+          threadId: input.threadId,
+          fingerprint,
+          summary: fallback,
+          createdAt: Date.now(),
+          source: 'message',
+          aiStatus: 'failed',
+          aiError: errorMsg,
+          provider: this.deps.settings().aiProvider,
+          model: this.deps.settings().aiModel,
+        });
+        await this.deps.db.ai_jobs?.update(jobId, {
+          status: 'failed',
+          completedAt: Date.now(),
+          error: errorMsg,
+        }).catch(() => {});
+        this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+        return { ok: false, error: errorMsg, source: 'message' as const, aiStatus: 'failed' as const, oneLine: fallback.oneLine };
+      } finally {
+        this.inFlightJobs.delete(key);
       }
+    })();
+
+    this.inFlightJobs.set(key, { jobId, status: 'queued', promise: p });
+    return { ok: true, jobId, status: 'queued' };
+  }
+
+  async startDraftJob(input: {
+    threadId: string;
+    fingerprint: string;
+    subject: string;
+    messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
+    force?: boolean;
+    insertIntoGmail?: boolean;
+  }): Promise<{
+    ok: boolean;
+    jobId: string;
+    status: AIJobStatus;
+    body?: string;
+    error?: string;
+    reason?: string;
+  }> {
+    if (!this.deps.ai || this.deps.settings().aiMode === 'disabled') {
+      return { ok: false, jobId: '', status: 'failed', reason: 'Turn on AI in Settings to draft a reply.' };
+    }
+    if (!input.messages.some((message) => message.bodyText.trim())) {
+      return { ok: false, jobId: '', status: 'failed', reason: 'Open the thread so a reply can be drafted.' };
     }
 
-    if (existing?.fingerprint === fingerprint && !stalePaste) return;
-    const summary = localThreadSummary(input);
-    await this.deps.db.thread_summaries.put({
+    const drafts = await this.deps.db.draft_suggestions.where('threadId').equals(input.threadId).toArray();
+    const existing = drafts.find((d) => d.fingerprint === input.fingerprint);
+    if (!input.force && existing?.suggestion?.body) {
+      return { ok: true, jobId: 'completed', status: 'succeeded', body: existing.suggestion.body };
+    }
+
+    const key = `draft:${input.threadId}:${input.fingerprint}`;
+    const inFlight = this.inFlightJobs.get(key);
+    if (!input.force && inFlight) {
+      return { ok: true, jobId: inFlight.jobId, status: inFlight.status };
+    }
+
+    const jobId = `job_draft_${input.threadId}_${Date.now()}`;
+    await this.deps.db.ai_jobs?.put({
+      id: jobId,
+      kind: 'draft',
       threadId: input.threadId,
-      fingerprint,
-      summary,
+      fingerprint: input.fingerprint,
+      status: 'queued',
+      provider: this.deps.settings().aiProvider,
+      model: this.deps.settings().aiModel,
       createdAt: Date.now(),
-      source: 'message',
-    });
-    await this.deps.log({
-      type: 'summarize',
-      threadId: input.threadId,
-      detail: summary.oneLine,
-      tier: AgentSafetyTier.READ_ONLY,
-    });
-    this.deps.onIntel?.(input.threadId, 'THREAD_SUMMARY_READY');
-    this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+    }).catch(() => {});
+
+    const p = (async () => {
+      try {
+        await this.deps.db.ai_jobs?.update(jobId, { status: 'running', startedAt: Date.now() }).catch(() => {});
+        const active = this.inFlightJobs.get(key);
+        if (active) active.status = 'running';
+
+        const { result } = await this.deps.queue.enqueue('draft', input.fingerprint, () =>
+          this.deps.ai!.draftReply({
+            subject: input.subject,
+            messages: input.messages,
+            voice: this.deps.settings().voiceProfile,
+            mode: 'direct',
+            kind: 'reply',
+          }),
+        );
+        const placeholders = detectPlaceholders(result.body);
+        const suggestion = { ...result, placeholders };
+        const id = `draft_${input.threadId}_${Date.now()}`;
+        await this.deps.db.draft_suggestions.put({
+          id,
+          threadId: input.threadId,
+          fingerprint: input.fingerprint,
+          suggestion,
+          insertedIntoGmail: false,
+          createdAt: Date.now(),
+        });
+        await this.deps.db.ai_jobs?.update(jobId, {
+          status: 'succeeded',
+          completedAt: Date.now(),
+        }).catch(() => {});
+
+        let inserted = false;
+        if (input.insertIntoGmail) {
+          const res = await this.deps.insertDraftViaGmail(input.threadId, suggestion.body);
+          inserted = res.success;
+          if (inserted) await this.deps.db.draft_suggestions.update(id, { insertedIntoGmail: true });
+        }
+        await this.deps.log({
+          type: 'draft',
+          threadId: input.threadId,
+          detail: inserted ? 'Draft inserted into Gmail' : 'Draft saved locally',
+          tier: AgentSafetyTier.DRAFT_WRITE,
+          undoable: true,
+        });
+        this.deps.onIntel?.(input.threadId, 'THREAD_DRAFT_READY');
+        this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+        return { ok: true, body: result.body };
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : 'Could not draft a reply.';
+        await this.deps.db.ai_jobs?.update(jobId, {
+          status: 'failed',
+          completedAt: Date.now(),
+          error: errorMsg,
+        }).catch(() => {});
+        this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
+        return { ok: false, error: errorMsg };
+      } finally {
+        this.inFlightJobs.delete(key);
+      }
+    })();
+
+    this.inFlightJobs.set(key, { jobId, status: 'queued', promise: p });
+    return { ok: true, jobId, status: 'queued' };
   }
 
   async requestSummary(input: {
@@ -308,14 +514,48 @@ export class AgentLoop {
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
-  }): Promise<{ ok: boolean; oneLine?: string; reason?: string }> {
+    force?: boolean;
+  }): Promise<{ ok: boolean; oneLine?: string; source?: 'model' | 'message'; aiStatus?: 'queued' | 'running' | 'success' | 'failed'; reason?: string; error?: string }> {
     if (!input.messages.some((message) => message.bodyText.trim())) {
       return { ok: false, reason: 'Open the thread so the message can be read.' };
     }
-    await this.summarizeIfNeeded(input);
-    const summary = await this.deps.db.thread_summaries.get(input.threadId);
-    if (!summary) return { ok: false, reason: 'Could not summarize this thread.' };
-    return { ok: true, oneLine: summary.summary.oneLine };
+    const launched = await this.startSummaryJob(input);
+    if (launched.status === 'succeeded') {
+      return {
+        ok: true,
+        oneLine: launched.oneLine,
+        source: launched.source,
+        aiStatus: launched.aiStatus || 'success',
+      };
+    }
+    if (launched.status === 'failed') {
+      return {
+        ok: false,
+        reason: launched.reason || launched.error,
+        error: launched.error,
+        source: 'message',
+        aiStatus: 'failed',
+        oneLine: launched.oneLine,
+      };
+    }
+    const fingerprint = `${input.fingerprint}:sum6`;
+    const key = `summary:${input.threadId}:${fingerprint}`;
+    const job = this.inFlightJobs.get(key);
+    if (job) {
+      const res = await job.promise;
+      if (res.ok) {
+        return { ok: true, oneLine: res.oneLine, source: 'model', aiStatus: 'success' };
+      }
+      return {
+        ok: false,
+        oneLine: res.oneLine,
+        source: 'message',
+        aiStatus: 'failed',
+        error: res.error,
+        reason: res.error,
+      };
+    }
+    return { ok: false, reason: 'Summary job not found' };
   }
 
   async requestDraft(input: {
@@ -323,74 +563,73 @@ export class AgentLoop {
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
-  }): Promise<{ ok: boolean; body?: string; reason?: string }> {
-    if (!this.deps.ai || this.deps.settings().aiMode === 'disabled') {
-      return { ok: false, reason: 'Turn on AI in Settings to draft a reply.' };
+    force?: boolean;
+  }): Promise<{ ok: boolean; body?: string; reason?: string; error?: string }> {
+    const launched = await this.startDraftJob(input);
+    if (launched.status === 'succeeded' && launched.body) {
+      return { ok: true, body: launched.body };
     }
-    if (!input.messages.some((message) => message.bodyText.trim())) {
-      return { ok: false, reason: 'Open the thread so a reply can be drafted.' };
+    if (launched.status === 'failed') {
+      return { ok: false, reason: launched.reason || launched.error, error: launched.error };
     }
-    const failure = await this.draftResponse(input, false);
-    const drafts = await this.deps.db.draft_suggestions.where('threadId').equals(input.threadId).toArray();
-    const draft = drafts.sort((a, b) => b.createdAt - a.createdAt)[0];
-    if (!draft?.suggestion.body || (failure && draft.fingerprint !== input.fingerprint)) {
-      return { ok: false, reason: failure || 'Could not draft a reply.' };
+    const key = `draft:${input.threadId}:${input.fingerprint}`;
+    const job = this.inFlightJobs.get(key);
+    if (job) {
+      const res = await job.promise;
+      if (res.ok && res.body) return { ok: true, body: res.body };
+      return { ok: false, reason: res.error || 'Could not draft a reply.', error: res.error };
     }
-    return { ok: true, body: draft.suggestion.body };
+    return { ok: false, reason: 'Draft job not found' };
   }
 
-  private async draftResponse(input: {
+  private async summarizeIfNeeded(input: {
     threadId: string;
     fingerprint: string;
     subject: string;
-    messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
-  }, insertIntoGmail = false): Promise<string | null> {
-    const existing = await this.deps.db.draft_suggestions
-      .where('threadId')
-      .equals(input.threadId)
-      .first();
-    if (existing?.fingerprint === input.fingerprint) return null;
-    if (!this.deps.ai) return 'Turn on AI in Settings to draft a reply.';
-    try {
-      const { result } = await this.deps.queue.enqueue('draft', input.fingerprint, () =>
-        this.deps.ai!.draftReply({
-          subject: input.subject,
-          messages: input.messages,
-          voice: this.deps.settings().voiceProfile,
-          mode: 'direct',
-          kind: 'reply',
-        }),
-      );
-      const placeholders = detectPlaceholders(result.body);
-      const suggestion = { ...result, placeholders };
-      const id = `draft_${input.threadId}_${Date.now()}`;
-      await this.deps.db.draft_suggestions.put({
-        id,
-        threadId: input.threadId,
-        fingerprint: input.fingerprint,
-        suggestion,
-        insertedIntoGmail: false,
-        createdAt: Date.now(),
-      });
+    messages: Array<{ sender?: string; bodyText: string; timestamp?: string }>;
+  }): Promise<void> {
+    const launched = await this.startSummaryJob({
+      threadId: input.threadId,
+      fingerprint: input.fingerprint,
+      subject: input.subject,
+      messages: input.messages.map((m) => ({
+        sender: m.sender || 'unknown@local',
+        bodyText: m.bodyText,
+        timestamp: m.timestamp || '',
+      })),
+    });
+    if (launched.status === 'queued') {
+      const fingerprint = `${input.fingerprint}:sum6`;
+      const key = `summary:${input.threadId}:${fingerprint}`;
+      const job = this.inFlightJobs.get(key);
+      if (job) await job.promise;
+    }
+  }
 
-      let inserted = false;
-      if (insertIntoGmail) {
-        const result = await this.deps.insertDraftViaGmail(input.threadId, suggestion.body);
-        inserted = result.success;
-        if (inserted) await this.deps.db.draft_suggestions.update(id, { insertedIntoGmail: true });
-      }
-      await this.deps.log({
-        type: 'draft',
-        threadId: input.threadId,
-        detail: inserted ? 'Draft inserted into Gmail' : 'Draft saved locally',
-        tier: AgentSafetyTier.DRAFT_WRITE,
-        undoable: true,
-      });
-      this.deps.onIntel?.(input.threadId, 'THREAD_DRAFT_READY');
-      this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : 'Could not draft a reply.';
+  private async draftResponse(
+    input: {
+      threadId: string;
+      fingerprint: string;
+      subject: string;
+      messages: Array<{ sender?: string; bodyText: string; timestamp?: string }>;
+    },
+    autoInsert = false,
+  ): Promise<void> {
+    const launched = await this.startDraftJob({
+      threadId: input.threadId,
+      fingerprint: input.fingerprint,
+      subject: input.subject,
+      messages: input.messages.map((m) => ({
+        sender: m.sender || 'unknown@local',
+        bodyText: m.bodyText,
+        timestamp: m.timestamp || '',
+      })),
+      insertIntoGmail: autoInsert,
+    });
+    if (launched.status === 'queued') {
+      const key = `draft:${input.threadId}:${input.fingerprint}`;
+      const job = this.inFlightJobs.get(key);
+      if (job) await job.promise;
     }
   }
 

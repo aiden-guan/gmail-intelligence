@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { DEFAULT_SETTINGS, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
+import { DEFAULT_SETTINGS, getProviderRequiredOrigin, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
 import { trackerHealthLabel, trackerPermissionOrigin, type TrackerHealthStatus } from '@gi/tracking';
 import { AiConnect } from '../setup/AiConnect';
 
@@ -51,7 +51,9 @@ export function SettingsApp() {
   }, []);
 
   function save() {
-    const origin = trackerPermissionOrigin(settings.trackerBaseUrl);
+    const trackerOrigin = trackerPermissionOrigin(settings.trackerBaseUrl);
+    const aiOrigin = getProviderRequiredOrigin(settings.aiProvider, settings.aiEndpoint);
+    const origins = [trackerOrigin, aiOrigin].filter((o): o is string => Boolean(o));
     const persist = () => {
       chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings }, (res?: { settings?: ExtensionSettings }) => {
         if (res?.settings) {
@@ -61,8 +63,8 @@ export function SettingsApp() {
         }
       });
     };
-    if (origin && chrome.permissions?.request) {
-      chrome.permissions.request({ origins: [origin] }, () => persist());
+    if (origins.length > 0 && chrome.permissions?.request) {
+      chrome.permissions.request({ origins }, () => persist());
       return;
     }
     persist();

@@ -119,6 +119,10 @@ export type SummaryRow = {
   createdAt: number;
   /** `message` is read from the open email. A later model result can replace it. */
   source?: 'model' | 'message';
+  aiStatus?: 'queued' | 'running' | 'success' | 'failed';
+  aiError?: string;
+  provider?: string;
+  model?: string;
 };
 
 export type DraftRow = {
@@ -128,6 +132,20 @@ export type DraftRow = {
   suggestion: DraftSuggestion;
   insertedIntoGmail: boolean;
   createdAt: number;
+};
+
+export type AIJobRow = {
+  id: string;
+  kind: 'summary' | 'draft';
+  threadId: string;
+  fingerprint: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  provider?: string;
+  model?: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
 };
 
 export type ReminderRow = {

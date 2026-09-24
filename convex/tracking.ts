@@ -149,7 +149,7 @@ export const getLink = internalQuery({
 const eventArgs = {
   eventId: v.string(),
   trackingId: v.string(),
-  type: v.union(v.literal("OPEN"), v.literal("CLICK")),
+  type: v.union(v.literal("OPEN"), v.literal("CLICK"), v.literal("SELF_VIEW")),
   timestamp: v.string(),
   userAgent: v.union(v.string(), v.null()),
   ipHash: v.union(v.string(), v.null()),
@@ -159,6 +159,92 @@ const eventArgs = {
   clickId: v.union(v.string(), v.null()),
   destination: v.union(v.string(), v.null()),
 };
+
+export const recordSelfView = internalMutation({
+  args: {
+    eventId: v.string(),
+    trackingId: v.string(),
+    timestamp: v.string(),
+    userAgent: v.union(v.string(), v.null()),
+    gmailThreadId: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, args) => {
+    const emailRows = await ctx.db
+      .query("trackedEmails")
+      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
+      .take(1);
+    const email = emailRows[0];
+    if (!email) return { ok: false };
+
+    if (args.gmailThreadId && !email.gmailThreadId) {
+      await ctx.db.patch(email._id, { gmailThreadId: args.gmailThreadId });
+    }
+
+    await ctx.db.insert("trackingEvents", {
+      eventId: args.eventId,
+      trackingId: args.trackingId,
+      type: "SELF_VIEW",
+      timestamp: args.timestamp,
+      userAgent: args.userAgent,
+      ipHash: null,
+      suspectedSelfOpen: true,
+      confidence: 1,
+      classification: "SELF_LIKELY",
+      clickId: null,
+      destination: null,
+    });
+
+    const selfMs = Date.parse(args.timestamp);
+    const events = await ctx.db
+      .query("trackingEvents")
+      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
+      .take(200);
+
+    for (const evt of events) {
+      if (evt.type === "OPEN") {
+        const openMs = Date.parse(evt.timestamp);
+        if (Number.isFinite(openMs) && Math.abs(openMs - selfMs) < 15_000) {
+          await ctx.db.patch(evt._id, {
+            classification: "SELF_LIKELY",
+            suspectedSelfOpen: true,
+            confidence: 1,
+          });
+        }
+      }
+    }
+
+    const allEvents = await ctx.db
+      .query("trackingEvents")
+      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
+      .take(200);
+    const sorted = allEvents.sort((a, b) => (a.timestamp > b.timestamp ? 1 : -1));
+    let openCount = 0;
+    let firstOpenedAt: string | null = null;
+    let lastOpenedAt: string | null = null;
+    let lastValidMs = 0;
+
+    for (const evt of sorted) {
+      if (evt.type === "OPEN" && !evt.suspectedSelfOpen && evt.classification !== "SELF_LIKELY") {
+        const evtMs = Date.parse(evt.timestamp);
+        if (lastValidMs && Number.isFinite(evtMs) && evtMs >= lastValidMs && evtMs - lastValidMs < 800) {
+          continue;
+        }
+        openCount += 1;
+        lastValidMs = evtMs;
+        if (!firstOpenedAt) firstOpenedAt = evt.timestamp;
+        lastOpenedAt = evt.timestamp;
+      }
+    }
+
+    await ctx.db.patch(email._id, {
+      openCount,
+      firstOpenedAt,
+      lastOpenedAt,
+    });
+
+    return { ok: true, openCount };
+  },
+});
 
 export const recordOpen = internalMutation({
   args: eventArgs,

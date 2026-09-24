@@ -29,7 +29,7 @@ export default defineSchema({
   trackingEvents: defineTable({
     eventId: v.string(),
     trackingId: v.string(),
-    type: v.union(v.literal("OPEN"), v.literal("CLICK")),
+    type: v.union(v.literal("OPEN"), v.literal("CLICK"), v.literal("SELF_VIEW")),
     timestamp: v.string(),
     userAgent: v.union(v.string(), v.null()),
     ipHash: v.union(v.string(), v.null()),

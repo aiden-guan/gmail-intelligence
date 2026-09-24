@@ -178,7 +178,9 @@ describe('manual classification and drafts', () => {
         timestamp: '',
       }],
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.source).toBe('message');
+    expect(result.aiStatus).toBe('failed');
     expect(result.oneLine).toMatch(/weekend sale starts Friday/i);
     expect((await db.thread_summaries.get('t3'))?.source).toBe('message');
     const again = await agent.requestSummary({
@@ -191,6 +193,96 @@ describe('manual classification and drafts', () => {
         timestamp: '',
       }],
     });
+    expect(again.ok).toBe(false);
+    expect(again.source).toBe('message');
+    expect(again.aiStatus).toBe('failed');
     expect(again.oneLine).toMatch(/weekend sale starts Friday/i);
+  });
+
+  it('retries AI summarize after transient failure without permanent lockout and matches draft by fingerprint', async () => {
+    const db = getMailboxDb('agent_' + Math.random());
+    let aiCalls = 0;
+    const ai = {
+      summarizeThread: async () => {
+        aiCalls += 1;
+        if (aiCalls === 1) throw new Error('Network timeout');
+        return {
+          result: {
+            reasoning: '',
+            oneLine: 'Sale starts Friday.',
+            keyPoints: [],
+            decisions: [],
+            unansweredQuestions: [],
+            commitments: [],
+            dates: [],
+            actionItems: [],
+          },
+        };
+      },
+      draftReply: async () => ({
+        result: { mode: 'direct' as const, body: 'Reply to updated fingerprint', placeholders: [] },
+      }),
+    } as unknown as AIProvider;
+
+    const agent = new AgentLoop({
+      db,
+      ai,
+      queue: new AIJobQueue(),
+      settings: () => ({ ...DEFAULT_SETTINGS, aiMode: 'remote', autoSummarize: true }),
+      archiveViaGmail: async () => ({ success: false }),
+      insertDraftViaGmail: async () => ({ success: true }),
+      log: async () => 'log',
+    });
+
+    const msg = {
+      sender: 'deals@shop.test',
+      bodyText: 'Our sale starts Friday.',
+      timestamp: '',
+    };
+
+    // First attempt fails -> fallback
+    const first = await agent.requestSummary({
+      threadId: 't4',
+      fingerprint: 'fp4',
+      subject: 'Sale',
+      messages: [msg],
+    });
+    expect(aiCalls).toBe(1);
+    expect(first.ok).toBe(false);
+    expect(first.source).toBe('message');
+    expect(first.aiStatus).toBe('failed');
+    expect(first.error).toBe('Network timeout');
+
+    // Second attempt after failure: MUST invoke AI again instead of being permanently suppressed!
+    const second = await agent.requestSummary({
+      threadId: 't4',
+      fingerprint: 'fp4',
+      subject: 'Sale',
+      messages: [msg],
+    });
+    expect(aiCalls).toBe(2);
+    expect(second.ok).toBe(true);
+    expect(second.oneLine).toBe('Sale starts Friday.');
+    expect((await db.thread_summaries.get('t4'))?.source).toBe('model');
+
+    // Seed an older draft in db for t4 with fingerprint fp-old
+    await db.draft_suggestions.put({
+      id: 'draft_t4_old',
+      threadId: 't4',
+      fingerprint: 'fp-old',
+      suggestion: { mode: 'direct', body: 'Old stale draft' },
+      confidence: 0.8,
+      createdAt: 1000,
+    });
+
+    // Requesting draft for fp-new must generate new draft, NOT reuse old draft
+    const draftRes = await agent.requestDraft({
+      threadId: 't4',
+      fingerprint: 'fp-new',
+      subject: 'Sale',
+      messages: [msg],
+    });
+    expect(draftRes.ok).toBe(true);
+    expect(draftRes.body).toBe('Reply to updated fingerprint');
   });
 });

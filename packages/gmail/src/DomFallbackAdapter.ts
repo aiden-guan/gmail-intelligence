@@ -14,13 +14,13 @@ import {
   logSelectorMiss,
   messageText,
   threadIdFromLocation,
-  queryAll,
   queryFirst,
   readAttr,
   SELECTORS,
   selectorDiagnostics,
 } from './selectors.js';
 import type {
+  ComposeHandle,
   ComposeViewState,
   CurrentThreadView,
   GmailAdapter,
@@ -328,15 +328,58 @@ export class DomFallbackAdapter implements GmailAdapter {
     return { ...this.clickToolbar(SELECTORS.starButton, 'starThread'), threadId };
   }
 
-  async createReplyDraft(threadId: string) {
-    if (typeof document !== 'undefined' && findComposeBody(document)) {
-      return { ...ok('createReplyDraft'), threadId };
+  findThreadContainer(root: ParentNode, threadId?: string): HTMLElement | null {
+    if (!threadId) return findMain(root);
+    if ('querySelector' in root) {
+      const match = (root as Element).querySelector<HTMLElement>(
+        `[data-thread-id="${threadId}"], [data-legacy-thread-id="${threadId}"], [data-thread-perm-id="${threadId}"]`,
+      );
+      if (match) {
+        return (
+          match.closest<HTMLElement>(
+            '[data-legacy-thread-id].nH, [data-thread-id], [data-legacy-thread-id], [data-thread-perm-id], table[role="presentation"], .adn, .if',
+          ) || match
+        );
+      }
+    }
+    return null;
+  }
+
+  async createReplyDraft(threadId: string): Promise<GmailActionResult & { composeHandle?: ComposeHandle }> {
+    if (typeof document !== 'undefined') {
+      const threadContainer = this.findThreadContainer(document, threadId);
+      const existing = threadContainer ? findComposeBody(threadContainer) : null;
+      if (existing) {
+        return {
+          ...ok('createReplyDraft'),
+          threadId,
+          composeHandle: {
+            id: `dom-${threadId}`,
+            threadId,
+            isReply: true,
+            element: existing,
+          },
+        };
+      }
     }
     const result = this.clickToolbar(SELECTORS.replyButton, 'createReplyDraft');
-    if (result.success) return { ...result, threadId };
+    if (result.success) {
+      const threadContainer = typeof document !== 'undefined' ? this.findThreadContainer(document, threadId) : null;
+      const element = threadContainer ? findComposeBody(threadContainer) : null;
+      return {
+        ...result,
+        threadId,
+        composeHandle: {
+          id: `dom-${threadId}`,
+          threadId,
+          isReply: true,
+          element,
+        },
+      };
+    }
 
     if (typeof document !== 'undefined') {
-      const main = findMain(document) || document;
+      const main = this.findThreadContainer(document, threadId) || findMain(document) || document;
       const candidates = Array.from(main.querySelectorAll<HTMLElement>('span, div, button'));
       const replyEl = candidates.find((el) => {
         const text = el.textContent?.trim();
@@ -353,15 +396,35 @@ export class DomFallbackAdapter implements GmailAdapter {
       });
       if (replyEl) {
         replyEl.click();
-        return { ...ok('createReplyDraft'), threadId };
+        const element = findComposeBody(main);
+        return {
+          ...ok('createReplyDraft'),
+          threadId,
+          composeHandle: {
+            id: `dom-${threadId}`,
+            threadId,
+            isReply: true,
+            element,
+          },
+        };
       }
     }
     return { ...result, threadId };
   }
 
-  async insertComposeBody(text: string) {
+  async insertComposeBody(text: string, target?: ComposeHandle | { threadId?: string }) {
     if (typeof document === 'undefined') return fail('insertComposeBody', 'no document');
-    const body = findComposeBody(document);
+    let body: HTMLElement | null = null;
+    const hasExplicitTarget = Boolean(target && (('element' in target && target.element) || target.threadId));
+    if (target && 'element' in target && target.element) {
+      body = target.element;
+    } else if (target && target.threadId) {
+      const container = this.findThreadContainer(document, target.threadId);
+      if (container) body = findComposeBody(container);
+    }
+    if (!body && !hasExplicitTarget) {
+      body = findComposeBody(document);
+    }
     if (!body) {
       logSelectorMiss('insertComposeBody', SELECTORS.composeBody);
       return fail('insertComposeBody', 'compose body not found', true);

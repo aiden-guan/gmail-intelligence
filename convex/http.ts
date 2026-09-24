@@ -162,10 +162,16 @@ http.route({
         const now = Date.now();
         const ua = request.headers.get("User-Agent");
         const sentMs = email.sentAt ? Date.parse(email.sentAt) : null;
+        const events = await ctx.runQuery(internal.tracking.listEvents, { trackingId });
+        const recentSelfView = events.find(
+          (e) => e.type === "SELF_VIEW" && Math.abs(now - Date.parse(e.timestamp)) < 15_000,
+        );
+        const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
         const verdict = classifyOpenEvent({
           eventTs: now,
           sentAt: sentMs != null && Number.isFinite(sentMs) ? sentMs : null,
           userAgent: ua,
+          selfViewTs,
         });
         const event = {
           eventId: newId("evt"),
@@ -325,6 +331,38 @@ http.route({
       sent_at: null,
       rewritten_links: rewritten,
     });
+  }),
+});
+
+http.route({
+  pathPrefix: "/api/emails/",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!authorized(request)) return json({ error: "unauthorized" }, 401);
+    const path = new URL(request.url).pathname;
+    if (!path.endsWith("/self-view")) return json({ error: "not_found" }, 404);
+    const id = decodeURIComponent(path.slice("/api/emails/".length, -"/self-view".length));
+    if (!validId(id) || id.includes("/")) return json({ error: "bad_id" }, 400);
+
+    const body = (await request.json().catch(() => ({}))) as {
+      timestamp?: string;
+      gmailThreadId?: string | null;
+    };
+    const ts = body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
+      ? new Date(body.timestamp).toISOString()
+      : new Date().toISOString();
+    const ua = request.headers.get("User-Agent");
+
+    const result = await ctx.runMutation(internal.tracking.recordSelfView, {
+      eventId: newId("evt"),
+      trackingId: id,
+      timestamp: ts,
+      userAgent: ua,
+      gmailThreadId: typeof body.gmailThreadId === "string" ? body.gmailThreadId.slice(0, 128) : null,
+    });
+
+    if (!result.ok) return json({ error: "not_found" }, 404);
+    return json({ ok: true, open_count: result.openCount });
   }),
 });
 

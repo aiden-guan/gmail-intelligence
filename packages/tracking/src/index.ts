@@ -31,7 +31,7 @@ export type TrackedEmail = z.infer<typeof TrackedEmailSchema>;
 export const TrackingEventSchema = z.object({
   id: z.string(),
   tracking_id: z.string(),
-  type: z.enum(['OPEN', 'CLICK']),
+  type: z.enum(['OPEN', 'CLICK', 'SELF_VIEW']),
   timestamp: z.string(),
   user_agent: z.string().optional(),
   ip_hash: z.string().optional(),
@@ -136,6 +136,19 @@ export class TrackingClient {
     });
     if (!res.ok) throw new Error(`tracking link failed: ${res.status}`);
     return res.json() as Promise<TrackedEmail>;
+  }
+
+  async recordSelfView(
+    id: string,
+    data?: { timestamp?: string; gmailThreadId?: string | null },
+  ): Promise<{ ok: boolean; open_count?: number }> {
+    const res = await fetch(`${trim(this.baseUrl)}/api/emails/${encodeURIComponent(id)}/self-view`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify(data || {}),
+    });
+    if (!res.ok) throw new Error(`tracking self-view failed: ${res.status}`);
+    return res.json() as Promise<{ ok: boolean; open_count?: number }>;
   }
 }
 
@@ -304,8 +317,12 @@ export function summaryFromRemote(
   const status: TrackedEmailStatus = localAhead ? 'SENT' : remoteStatus;
   const sentAt = status === 'PENDING' ? null : row.sent_at || local?.sentAt || null;
   const recipients = asStringList(row.recipients);
-  const openCount = Math.max(row.open_count || 0, local?.openCount || 0);
-  const clickCount = Math.max(row.click_count || 0, local?.clickCount || 0);
+  const openCount = localAhead
+    ? (local?.openCount || 0)
+    : (typeof row.open_count === 'number' ? row.open_count : (local?.openCount || 0));
+  const clickCount = localAhead
+    ? (local?.clickCount || 0)
+    : (typeof row.click_count === 'number' ? row.click_count : (local?.clickCount || 0));
   return {
     trackingId: row.tracking_id,
     status,
@@ -316,8 +333,8 @@ export function summaryFromRemote(
     gmailMessageId: row.gmail_message_id || local?.gmailMessageId || null,
     createdAt: row.created_at || local?.createdAt || null,
     sentAt,
-    firstOpenedAt: openCount === 0 ? null : earlierIso(row.first_opened_at, local?.firstOpenedAt),
-    lastOpenedAt: openCount === 0 ? null : laterIso(row.last_opened_at, local?.lastOpenedAt),
+    firstOpenedAt: openCount === 0 ? null : (row.first_opened_at || local?.firstOpenedAt || null),
+    lastOpenedAt: openCount === 0 ? null : (row.last_opened_at || local?.lastOpenedAt || null),
     openCount,
     clickCount,
     notifyIfNoReply: local?.notifyIfNoReply ?? false,
@@ -658,18 +675,6 @@ function isDeliveredTrackedEmail(email: TrackedEmailSummary): boolean {
 function asStatus(status: string | null | undefined, sentAt: string | null | undefined): TrackedEmailStatus {
   if (status === 'PENDING' || status === 'SENT' || status === 'CANCELLED' || status === 'FAILED') return status;
   return sentAt ? 'SENT' : 'PENDING';
-}
-
-function earlierIso(a?: string | null, b?: string | null): string | null {
-  if (!a) return b || null;
-  if (!b) return a;
-  return a < b ? a : b;
-}
-
-function laterIso(a?: string | null, b?: string | null): string | null {
-  if (!a) return b || null;
-  if (!b) return a;
-  return a > b ? a : b;
 }
 
 function canonicalDestination(url: string): string {

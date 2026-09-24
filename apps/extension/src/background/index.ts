@@ -31,7 +31,10 @@ import {
   DEFAULT_SETTINGS,
   RuntimeMessageSchema,
   addBusinessDays,
+  buildThreadSnapshot,
+  getProviderRequiredOrigin,
   type ExtensionSettings,
+  type RawSnapshotMessage,
 } from '@gi/shared';
 import {
   TrackingClient,
@@ -351,7 +354,123 @@ async function runDiagnostics() {
     composeHook: trackingSnapshot?.composeHookAttached ? 'attached' : 'not attached',
     last: trackingSnapshot?.last || null,
   };
-  const aiStatus = settings.aiMode === 'disabled' ? 'disabled' : getAI() ? 'ready' : 'error';
+  let aiStatus: 'ready' | 'disabled' | 'not_signed_in' | 'missing_permissions' | 'missing_key' | 'error' = 'ready';
+  let configStatus: string = 'provider selected';
+  let aiDetail: string | null = null;
+  if (settings.aiMode === 'disabled') {
+    aiStatus = 'disabled';
+    configStatus = 'AI disabled';
+  } else if (settings.aiProvider === 'chatgpt') {
+    const status = await getChatGptPublicStatus();
+    if (!status.signedIn) {
+      aiStatus = 'not_signed_in';
+      configStatus = 'ChatGPT session expired';
+      aiDetail = status.lastError || 'Sign in to ChatGPT required';
+    } else {
+      aiStatus = 'ready';
+      configStatus = 'provider reachable';
+    }
+  } else if (settings.aiProvider === 'openai' || settings.aiProvider === 'openai-compatible' || settings.aiProvider === 'ollama') {
+    if (!settings.aiApiKey && settings.aiProvider !== 'ollama') {
+      aiStatus = 'missing_key';
+      configStatus = 'credentials missing';
+      aiDetail = 'API key required';
+    } else {
+      const requiredOrigin = getProviderRequiredOrigin(settings.aiProvider, settings.aiEndpoint);
+      if (requiredOrigin && chrome.permissions?.contains) {
+        try {
+          const hasPerm = await chrome.permissions.contains({ origins: [requiredOrigin] });
+          if (!hasPerm) {
+            aiStatus = 'missing_permissions';
+            configStatus = 'host permission missing';
+            aiDetail = `Missing host permission for ${requiredOrigin}`;
+          } else if (settings.aiProvider === 'ollama') {
+            try {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 1200);
+              const ep = settings.aiEndpoint || 'http://127.0.0.1:11434/v1';
+              const probeUrl = ep.replace(/\/v1\/?$/, '') + '/api/tags';
+              const probeRes = await fetch(probeUrl, { signal: controller.signal }).catch(() => null);
+              clearTimeout(timer);
+              if (probeRes?.ok) {
+                aiStatus = 'ready';
+                configStatus = 'provider reachable';
+              } else {
+                aiStatus = 'ready';
+                configStatus = 'provider selected';
+              }
+            } catch {
+              aiStatus = 'ready';
+              configStatus = 'provider selected';
+            }
+          } else {
+            aiStatus = 'ready';
+            configStatus = 'provider selected';
+          }
+        } catch {
+          aiStatus = 'ready';
+          configStatus = 'provider selected';
+        }
+      } else {
+        aiStatus = 'ready';
+        configStatus = 'provider selected';
+      }
+    }
+  } else if (settings.aiProvider === 'anthropic' || settings.aiProvider === 'gemini') {
+    aiStatus = 'error';
+    configStatus = 'unsupported';
+    aiDetail = `${settings.aiProvider === 'anthropic' ? 'Anthropic' : 'Gemini'} is currently unavailable. Use an OpenAI-compatible endpoint.`;
+  } else if (!getAI()) {
+    aiStatus = 'error';
+    configStatus = 'credentials missing';
+    aiDetail = 'Model configuration error';
+  }
+
+  let lastOperation: string | null = null;
+  let lastError: string | null = null;
+  let lastSuccessTimestamp: number | null = null;
+  try {
+    const recentJobs = await db.ai_jobs?.orderBy('createdAt').reverse().limit(20).toArray();
+    if (recentJobs && recentJobs.length > 0) {
+      lastOperation = recentJobs[0].kind;
+      const lastJob = recentJobs[0];
+      if (lastJob.status === 'succeeded') {
+        configStatus = 'last inference succeeded';
+      }
+      const lastFailed = recentJobs.find((j) => j.status === 'failed' && j.error);
+      if (lastFailed) {
+        lastError = lastFailed.error || null;
+        if (lastJob.status === 'failed' && lastFailed.error) {
+          const err = lastFailed.error.toLowerCase();
+          if (/timeout|timed out/.test(err)) {
+            configStatus = 'inference timed out';
+          } else if (/parse|json/.test(err)) {
+            configStatus = 'response parse failure';
+          } else if (/auth|401|403|unauthorized|api key/.test(err)) {
+            configStatus = 'provider authentication failed';
+          } else if (/model|rejected|not found/.test(err)) {
+            configStatus = 'model rejected';
+          }
+        }
+      }
+      const lastSuccess = recentJobs.find((j) => j.status === 'succeeded' && j.completedAt);
+      if (lastSuccess) lastSuccessTimestamp = lastSuccess.completedAt || null;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  let permissionStatus: 'granted' | 'missing' | 'not_required' | 'unknown' = 'not_required';
+  const requiredOrigin = getProviderRequiredOrigin(settings.aiProvider, settings.aiEndpoint);
+  if (requiredOrigin && chrome.permissions?.contains) {
+    try {
+      const hasPerm = await chrome.permissions.contains({ origins: [requiredOrigin] });
+      permissionStatus = hasPerm ? 'granted' : 'missing';
+    } catch {
+      permissionStatus = 'unknown';
+    }
+  }
+
   let workerTab: 'ready' | 'inactive' | 'unavailable' = 'inactive';
   const workerId = workerTabs.getTabId();
   if (workerId != null) {
@@ -371,7 +490,23 @@ async function runDiagnostics() {
     mailboxDb,
     indexedThreads,
     currentThreadId: runtime?.currentThreadId || null,
-    ai: { provider: settings.aiProvider, mode: settings.aiMode, status: aiStatus },
+    ai: {
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      mode: settings.aiMode,
+      status: aiStatus,
+      configurationStatus: configStatus,
+      'configuration status': configStatus,
+      permissionStatus,
+      'permission status': permissionStatus,
+      lastOperation,
+      'last AI operation': lastOperation,
+      lastError,
+      'last AI error': lastError,
+      lastSuccessTimestamp,
+      'last success timestamp': lastSuccessTimestamp,
+      detail: aiDetail,
+    },
     tracking,
     trackingReport: formatTrackingReport(trackingDiagnostics),
     trackingDetail: trackingDiagnostics,
@@ -485,6 +620,7 @@ async function pollTracking(): Promise<void> {
   try {
     const fresh = [...byId.values()];
     for (const ev of events) {
+      if (ev.type === 'SELF_VIEW' || ev.classification === 'SELF_LIKELY') continue;
       if (notifiedEventIds.has(ev.id)) continue;
       if (settings.hideSuspectedSelfOpens && ev.suspected_self_open) continue;
       if (!(await markEventNotified(ev.id))) continue;
@@ -670,26 +806,97 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, category });
         return;
       }
-      if (message?.type === 'SUMMARIZE_THREAD' || message?.type === 'DRAFT_REPLY') {
+      if (message?.type === 'REQUEST_SUMMARY' || message?.type === 'REQUEST_DRAFT') {
         const threadId = String(message.threadId || '');
         const thread = threadId ? await db.threads.get(threadId) : null;
         const stored = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
         const pageMessages = pageMessagesFrom(message.messages);
-        const storedMessages = stored.map((row) => ({
+        const storedMessages: RawSnapshotMessage[] = stored.map((row) => ({
+          messageId: row.messageId,
           sender: row.sender.email,
+          recipients: row.recipients?.map((r) => r.email) || [],
           bodyText: row.bodyText,
           timestamp: row.timestamp,
+          loaded: (row.bodyText || '').trim().length > 0,
         }));
-        const messages = longerMessages(storedMessages, pageMessages);
-        if ((!thread && !messages.length) || !agent) {
+        const snapshot = await buildThreadSnapshot({
+          threadId,
+          subject: thread?.subject || String(message.subject || ''),
+          pageMessages,
+          storedMessages,
+        });
+        if ((!thread && !snapshot.messages.length) || !agent) {
           sendResponse({ ok: false, reason: 'Open the thread first.' });
           return;
         }
         const input = {
           threadId,
-          fingerprint: thread?.contentFingerprint || `page:${threadId}`,
+          fingerprint: snapshot.fingerprint || thread?.contentFingerprint || `page:${threadId}`,
+          subject: snapshot.subject,
+          messages: snapshot.messages.map((m) => ({
+            sender: m.sender,
+            bodyText: m.bodyText,
+            timestamp: m.timestamp,
+          })),
+          force: Boolean(message.force),
+        };
+        const result = message.type === 'REQUEST_SUMMARY'
+          ? await agent.startSummaryJob(input)
+          : await agent.startDraftJob(input);
+        sendResponse(result);
+        return;
+      }
+      if (message?.type === 'GET_AI_JOB_STATUS') {
+        const jobId = String(message.jobId || '');
+        const job = await db.ai_jobs?.get(jobId);
+        let body: string | undefined;
+        let oneLine: string | undefined;
+        if (job?.status === 'succeeded') {
+          if (job.kind === 'draft') {
+            const drafts = await db.draft_suggestions.where('threadId').equals(job.threadId).toArray();
+            const matching = drafts.find((d) => d.fingerprint === job.fingerprint);
+            body = matching?.suggestion?.body;
+          } else if (job.kind === 'summary') {
+            const summary = await db.thread_summaries.get(job.threadId);
+            oneLine = summary?.summary?.oneLine;
+          }
+        }
+        sendResponse({ ok: Boolean(job), job: job || null, body, oneLine });
+        return;
+      }
+      if (message?.type === 'SUMMARIZE_THREAD' || message?.type === 'DRAFT_REPLY') {
+        const threadId = String(message.threadId || '');
+        const thread = threadId ? await db.threads.get(threadId) : null;
+        const stored = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
+        const pageMessages = pageMessagesFrom(message.messages);
+        const storedMessages: RawSnapshotMessage[] = stored.map((row) => ({
+          messageId: row.messageId,
+          sender: row.sender.email,
+          recipients: row.recipients?.map((r) => r.email) || [],
+          bodyText: row.bodyText,
+          timestamp: row.timestamp,
+          loaded: (row.bodyText || '').trim().length > 0,
+        }));
+        const snapshot = await buildThreadSnapshot({
+          threadId,
           subject: thread?.subject || String(message.subject || ''),
-          messages,
+          pageMessages,
+          storedMessages,
+        });
+        if ((!thread && !snapshot.messages.length) || !agent) {
+          sendResponse({ ok: false, reason: 'Open the thread first.' });
+          return;
+        }
+        const input = {
+          threadId,
+          fingerprint: snapshot.fingerprint || thread?.contentFingerprint || `page:${threadId}`,
+          subject: snapshot.subject,
+          messages: snapshot.messages.map((m) => ({
+            sender: m.sender,
+            bodyText: m.bodyText,
+            timestamp: m.timestamp,
+          })),
+          force: Boolean(message.force),
         };
         const result = message.type === 'SUMMARIZE_THREAD' ? await agent.requestSummary(input) : await agent.requestDraft(input);
         sendResponse(result);
@@ -891,13 +1098,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const ids = (message.type === 'GET_THREAD_INTEL_MANY' ? message.threadIds : [message.threadId]) as string[];
         const intel: Record<string, unknown> = {};
         for (const threadId of (ids || []).filter((id) => typeof id === 'string').slice(0, 40)) {
-          const [classification, summary, draft, override] = await Promise.all([
+          const [threadRow, classification, summary, drafts, override] = await Promise.all([
+            db.threads.get(threadId),
             db.thread_classifications.get(threadId),
             db.thread_summaries.get(threadId),
-            db.draft_suggestions.where('threadId').equals(threadId).first(),
+            db.draft_suggestions.where('threadId').equals(threadId).toArray(),
             db.thread_overrides.get(threadId),
           ]);
-          intel[threadId] = { classification, summary, draft, manual: Boolean(override) };
+          const currentFingerprint = summary?.fingerprint?.replace(/:sum6$/, '') || threadRow?.contentFingerprint;
+          const matchingDraft = currentFingerprint
+            ? drafts.find((d) => d.fingerprint === currentFingerprint) || null
+            : drafts.sort((a, b) => b.createdAt - a.createdAt)[0] || null;
+          intel[threadId] = { classification, summary, draft: matchingDraft, manual: Boolean(override) };
         }
         sendResponse(message.type === 'GET_THREAD_INTEL_MANY' ? { intel } : intel[ids[0]] || {});
         return;
@@ -1062,6 +1274,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await pollTracking();
         sendResponse({ ok: true });
         break;
+      case 'TRACKING_SELF_VIEW': {
+        if (settings.trackerBaseUrl && settings.personalApiToken && msg.trackingId) {
+          const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+          try {
+            await client.recordSelfView(msg.trackingId, {
+              timestamp: msg.timestamp || new Date().toISOString(),
+              gmailThreadId: msg.gmailThreadId || null,
+            });
+            await pollTracking();
+          } catch (e) {
+            console.error('tracking self-view failed', e);
+          }
+        }
+        sendResponse({ ok: true });
+        break;
+      }
       case 'CHATGPT_LOGIN':
         sendResponse(await startChatGptLogin());
         break;
@@ -1140,28 +1368,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-function pageMessagesFrom(value: unknown): Array<{ sender: string; bodyText: string; timestamp: string }> {
+function pageMessagesFrom(value: unknown): RawSnapshotMessage[] {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, 20).flatMap((item) => {
+  return value.slice(0, 50).flatMap((item) => {
     if (!item || typeof item !== 'object') return [];
-    const row = item as { sender?: unknown; bodyText?: unknown; timestamp?: unknown };
+    const row = item as {
+      messageId?: unknown;
+      sender?: unknown;
+      recipients?: unknown;
+      bodyText?: unknown;
+      timestamp?: unknown;
+      loaded?: unknown;
+    };
     const bodyText = typeof row.bodyText === 'string' ? row.bodyText.slice(0, 20_000) : '';
-    if (!bodyText.trim()) return [];
+    const messageId = typeof row.messageId === 'string' ? row.messageId : undefined;
+    const sender = typeof row.sender === 'string' ? row.sender.slice(0, 200) : 'unknown@local';
+    const recipients = Array.isArray(row.recipients)
+      ? row.recipients.filter((r): r is string => typeof r === 'string').map((r) => r.slice(0, 200))
+      : [];
+    const timestamp = typeof row.timestamp === 'string' ? row.timestamp.slice(0, 80) : '';
+    const loaded = typeof row.loaded === 'boolean' ? row.loaded : bodyText.trim().length > 0;
     return [{
-      sender: typeof row.sender === 'string' ? row.sender.slice(0, 200) : 'unknown',
+      messageId,
+      sender,
+      recipients,
       bodyText,
-      timestamp: typeof row.timestamp === 'string' ? row.timestamp.slice(0, 80) : '',
+      timestamp,
+      loaded,
     }];
   });
-}
-
-function longerMessages(
-  stored: Array<{ sender: string; bodyText: string; timestamp: string }>,
-  page: Array<{ sender: string; bodyText: string; timestamp: string }>,
-): Array<{ sender: string; bodyText: string; timestamp: string }> {
-  const length = (rows: Array<{ bodyText: string }>) => rows.reduce((sum, row) => sum + row.bodyText.trim().length, 0);
-  if (length(page) > length(stored)) return page;
-  return stored.length ? stored : page;
 }
 
 setChatGptSignedInHandler(async () => {

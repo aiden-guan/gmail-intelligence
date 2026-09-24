@@ -30,18 +30,28 @@ export function installSentStatus(opts: {
   onNotify: (trackingId: string, enabled: boolean) => void;
   onStatus?: () => void;
   onLink?: (trackingId: string, gmailThreadId: string) => void;
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null) => void;
 }): SentStatusController {
   let emails = opts.emails || [];
   let trackerBaseUrl = opts.trackerBaseUrl || '';
   let observer: MutationObserver | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let statusSignature = '';
+  const recentSelfViews = new Map<string, number>();
   ensureStyles();
   setTrackerBaseAttribute(trackerBaseUrl);
 
+  const reportSelfView = (trackingId: string, gmailThreadId?: string | null) => {
+    const last = recentSelfViews.get(trackingId) || 0;
+    if (Date.now() - last > 10_000) {
+      recentSelfViews.set(trackingId, Date.now());
+      opts.onSelfView?.(trackingId, gmailThreadId);
+    }
+  };
+
   const paint = () => {
-    paintRows(document, emails, trackerBaseUrl, opts.onNotify);
-    paintConversation(document, emails, trackerBaseUrl, opts.onNotify, opts.onLink);
+    paintRows(document, emails, trackerBaseUrl, opts.onNotify, reportSelfView);
+    paintConversation(document, emails, trackerBaseUrl, opts.onNotify, opts.onLink, reportSelfView);
     refreshOpenCard(emails, trackerBaseUrl);
     const next = statusSignatureFor(document, emails, trackerBaseUrl);
     if (next !== statusSignature) {
@@ -105,6 +115,7 @@ export function paintRows(
   emails: TrackedEmailSummary[],
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null) => void,
 ): void {
   ensureStyles();
   threadRows(root).forEach((row) => {
@@ -119,6 +130,13 @@ export function paintRows(
     const slot = placeRowSlot(row, existing instanceof HTMLElement ? existing : null);
     renderSlot(slot, match, trackerBaseUrl, onNotify, false, statusColor(row, match.openCount > 0 || match.clickCount > 0));
     row.dataset.giTracked = match.openCount > 0 || match.clickCount > 0 ? 'opened' : 'pending';
+    if (!row.dataset.giSelfBound) {
+      row.dataset.giSelfBound = 'true';
+      row.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement)?.closest('.gi-track-btn')) return;
+        onSelfView?.(match.trackingId, match.gmailThreadId);
+      });
+    }
   });
 }
 
@@ -166,6 +184,7 @@ export function paintConversation(
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
   onLink?: (trackingId: string, gmailThreadId: string) => void,
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null) => void,
 ): void {
   const heading = conversationHeading(root);
   if (!heading) return;
@@ -181,6 +200,7 @@ export function paintConversation(
     match.gmailThreadId = hashId;
     onLink(match.trackingId, hashId);
   }
+  onSelfView?.(match.trackingId, match.gmailThreadId || hashId);
   const slot = existing || createSlotAfter(heading);
   const opened = match.openCount > 0 || match.clickCount > 0;
   renderSlot(slot, match, trackerBaseUrl, onNotify, true, statusColor(heading, opened));

@@ -19,18 +19,23 @@ export function classifyOpenEvent(opts: {
   eventTs: number;
   sentAt: number | null;
   userAgent?: string | null;
+  selfViewTs?: number | null;
 }): OpenVerdict {
   const sentAt = opts.sentAt;
   if (sentAt == null || !Number.isFinite(sentAt) || opts.eventTs < sentAt) {
     return { classification: 'SELF_LIKELY', suspected: true, confidence: 1, countsAsOpen: false };
   }
-  const delta = opts.eventTs - sentAt;
-  if (delta < 5_000) {
-    return { classification: 'SELF_LIKELY', suspected: true, confidence: 0.5, countsAsOpen: true };
+  // Correlated sender self-view takes precedence and MUST NOT count
+  if (opts.selfViewTs != null && Number.isFinite(opts.selfViewTs)) {
+    const diff = Math.abs(opts.eventTs - opts.selfViewTs);
+    if (diff < 15_000) {
+      return { classification: 'SELF_LIKELY', suspected: true, confidence: 1, countsAsOpen: false };
+    }
   }
   if (opts.userAgent && /Headless|Lighthouse|Chrome-Lighthouse/i.test(opts.userAgent)) {
     return { classification: 'UNKNOWN', suspected: true, confidence: 0.3, countsAsOpen: true };
   }
+  // Fast recipient open without SELF_VIEW must count as recipient open
   return { classification: 'RECIPIENT_LIKELY', suspected: false, confidence: 0, countsAsOpen: true };
 }
 

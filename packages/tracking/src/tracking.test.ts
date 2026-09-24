@@ -320,7 +320,9 @@ describe('outgoing html', () => {
   it('does not count a fetch from before sentAt as a recipient open', () => {
     const sent = Date.parse('2026-09-23T12:00:00.000Z');
     expect(classifyOpenEvent({ eventTs: sent - 1, sentAt: sent }).countsAsOpen).toBe(false);
-    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).classification).toBe('SELF_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, selfViewTs: sent + 1000 }).classification).toBe('SELF_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, selfViewTs: sent + 1000 }).countsAsOpen).toBe(false);
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).classification).toBe('RECIPIENT_LIKELY');
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).countsAsOpen).toBe(true);
     expect(classifyOpenEvent({ eventTs: sent + 60_000, sentAt: sent }).classification).toBe('RECIPIENT_LIKELY');
   });
@@ -391,5 +393,35 @@ describe('outgoing html', () => {
       trackedLinks: 1,
     });
     expect(inspectTrackedMime('Hello there').pixelFound).toBe(false);
+  });
+
+  it('filters out SELF_VIEW and SELF_LIKELY events from triggering desktop notifications', () => {
+    const events = [
+      { id: 'ev_1', type: 'OPEN', classification: 'NORMAL', suspected_self_open: false, tracking_id: 'trk_1' },
+      { id: 'ev_2', type: 'SELF_VIEW', classification: 'SELF_CONFIRMED', suspected_self_open: true, tracking_id: 'trk_1' },
+      { id: 'ev_3', type: 'OPEN', classification: 'SELF_LIKELY', suspected_self_open: true, tracking_id: 'trk_1' },
+      { id: 'ev_4', type: 'CLICK', classification: 'NORMAL', suspected_self_open: false, tracking_id: 'trk_1' },
+    ];
+
+    const notified: Array<{ id: string; type: string; title: string }> = [];
+    const notifiedEventIds = new Set<string>();
+
+    for (const ev of events) {
+      if (ev.type === 'SELF_VIEW' || ev.classification === 'SELF_LIKELY') continue;
+      if (notifiedEventIds.has(ev.id)) continue;
+      notifiedEventIds.add(ev.id);
+      notified.push({
+        id: ev.id,
+        type: ev.type,
+        title: ev.type === 'OPEN' ? 'Open detected' : 'Link click detected',
+      });
+    }
+
+    expect(notified).toEqual([
+      { id: 'ev_1', type: 'OPEN', title: 'Open detected' },
+      { id: 'ev_4', type: 'CLICK', title: 'Link click detected' },
+    ]);
+    expect(notified.find((n) => n.id === 'ev_2')).toBeUndefined();
+    expect(notified.find((n) => n.id === 'ev_3')).toBeUndefined();
   });
 });

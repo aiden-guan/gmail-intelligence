@@ -88,6 +88,21 @@ describe('action verification', () => {
       activeThreadId: 't1',
       expectedThreadId: 't1',
     }).verified).toBe(false);
+    // Strict thread matching: null or mismatched activeThreadId must fail
+    expect(verifyDraftInserted({
+      composeOpen: true,
+      bodyText: 'Thursday afternoon works.',
+      expectedText: 'Thursday afternoon works.',
+      activeThreadId: null,
+      expectedThreadId: 't1',
+    }).verified).toBe(false);
+    expect(verifyDraftInserted({
+      composeOpen: true,
+      bodyText: 'Thursday afternoon works.',
+      expectedText: 'Thursday afternoon works.',
+      activeThreadId: 'unrelated-thread',
+      expectedThreadId: 't1',
+    }).verified).toBe(false);
     expect(verifyNavigation('#search/in%3Ainbox', 'in:inbox').verified).toBe(true);
     expect(verifyNavigation('#inbox', 'from:sarah').verified).toBe(false);
   });

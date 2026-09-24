@@ -35,6 +35,7 @@ export type ThreadMessageView = {
   bodyText: string;
   bodyHtml?: string;
   attachmentsMetadata: { filename: string; mimeType?: string; sizeBytes?: number }[];
+  loaded?: boolean;
 };
 
 export type CurrentThreadView = {
@@ -53,6 +54,14 @@ export type ComposeViewState = {
   bodyText: string;
   isReply: boolean;
   threadId?: string;
+};
+
+export type ComposeHandle = {
+  id: string;
+  threadId?: string;
+  isReply: boolean;
+  view?: unknown;
+  element?: HTMLElement | null;
 };
 
 export type MailboxEvent =
@@ -87,8 +96,8 @@ export interface GmailAdapter {
   markRead(threadId: string): Promise<GmailActionResult>;
   markUnread(threadId: string): Promise<GmailActionResult>;
   starThread(threadId: string): Promise<GmailActionResult>;
-  createReplyDraft(threadId: string): Promise<GmailActionResult>;
-  insertComposeBody(text: string): Promise<GmailActionResult>;
+  createReplyDraft(threadId: string): Promise<GmailActionResult & { composeHandle?: ComposeHandle }>;
+  insertComposeBody(text: string, target?: ComposeHandle | { threadId?: string }): Promise<GmailActionResult>;
   navigateToSearch(query: string): Promise<GmailActionResult>;
   navigateToInbox(): Promise<GmailActionResult>;
 }

@@ -146,14 +146,17 @@ export class CompositeGmailAdapter implements GmailAdapter {
   async createReplyDraft(threadId: string) {
     return this.primary.createReplyDraft(threadId);
   }
-  async insertComposeBody(text: string) {
-    return this.primary.insertComposeBody(text);
+  async insertComposeBody(text: string, target?: import('./types.js').ComposeHandle | { threadId?: string }) {
+    return this.primary.insertComposeBody(text, target);
   }
   async navigateToSearch(query: string) {
     return this.primary.navigateToSearch(query);
   }
   async navigateToInbox() {
     return this.primary.navigateToInbox();
+  }
+  findThreadContainer(root: ParentNode, threadId?: string): HTMLElement | null {
+    return this.dom.findThreadContainer(root, threadId);
   }
 }
 

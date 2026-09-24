@@ -150,4 +150,285 @@ describe('local memory tracker', () => {
     const emails = (await list.json()) as Array<{ tracking_id: string }>;
     expect(emails.map((email) => email.tracking_id)).toContain(tracking_id);
   });
+
+  it('Case A — pre-send fetch: OPEN before sentAt does not count', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Case A', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    // 1. Pixel opens while status is still PENDING
+    await worker.fetch(new Request(pixel_url), env);
+
+    const emailPending = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number; status: string };
+    expect(emailPending.status).toBe('PENDING');
+    expect(emailPending.open_count).toBe(0);
+
+    // 2. Event inserted before sentAt timestamp
+    const futureSent = new Date(Date.now() + 60_000).toISOString();
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: futureSent }),
+      }),
+      env,
+    );
+
+    // Fetch pixel when now < sentAt
+    await worker.fetch(new Request(pixel_url), env);
+    const emailFuture = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(emailFuture.open_count).toBe(0);
+  });
+
+  it('Case B — legitimate fast recipient: sentAt = T, OPEN = T + 1 second, no SELF_VIEW -> recipient open count = 1', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Case B', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    // sentAt = 1 second ago
+    const sentAt = new Date(Date.now() - 1000).toISOString();
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: sentAt }),
+      }),
+      env,
+    );
+
+    // Recipient opens fast (1 second after send), no SELF_VIEW
+    await worker.fetch(new Request(pixel_url), env);
+
+    const email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(email.open_count).toBe(1);
+
+    const events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ classification: string }>;
+    expect(events[0]?.classification).toBe('RECIPIENT_LIKELY');
+  });
+
+  it('Case C — sender views own message: SELF_VIEW = T + 30 seconds, OPEN = SELF_VIEW + small delta -> classified SELF_LIKELY -> recipient open count remains 0', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Case C', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    // Sent 30 seconds ago
+    const sentAt = new Date(Date.now() - 30_000).toISOString();
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: sentAt }),
+      }),
+      env,
+    );
+
+    // Sender views own message: SELF_VIEW reported
+    const selfViewTime = new Date().toISOString();
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ timestamp: selfViewTime }),
+      }),
+      env,
+    );
+
+    // Pixel loads right after (small delta)
+    await worker.fetch(new Request(pixel_url), env);
+
+    const email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(email.open_count).toBe(0);
+
+    const events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ type: string; classification: string }>;
+    const openEvt = events.find((e) => e.type === 'OPEN');
+    expect(openEvt?.classification).toBe('SELF_LIKELY');
+  });
+
+  it('Case D — race: OPEN arrives, SELF_VIEW arrives shortly afterward -> reclassification occurs -> final aggregate recipient open count = 0', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Case D', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 10_000).toISOString() }),
+      }),
+      env,
+    );
+
+    // Pixel fetched before self-view
+    await worker.fetch(new Request(pixel_url), env);
+    const emailBefore = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(emailBefore.open_count).toBe(1);
+
+    // Self-view arrives shortly afterward (within correlation window)
+    const selfViewRes = await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ timestamp: new Date().toISOString() }),
+      }),
+      env,
+    );
+    expect(selfViewRes.status).toBe(200);
+
+    const emailAfter = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(emailAfter.open_count).toBe(0);
+  });
+
+  it('Case E — sender view after recipient open: recipient OPEN -> count = 1, later SELF_VIEW + own pixel fetch -> count remains 1', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Case E', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 120_000).toISOString() }),
+      }),
+      env,
+    );
+
+    // Recipient opens email
+    const openRes = await worker.fetch(new Request(pixel_url), env);
+    expect(openRes.status).toBe(200);
+
+    const emailAfterRecipient = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(emailAfterRecipient.open_count).toBe(1);
+
+    // Later (>15s after recipient open), sender views own message
+    const laterSelfViewTime = new Date(Date.now() + 30_000).toISOString();
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ timestamp: laterSelfViewTime }),
+      }),
+      env,
+    );
+
+    const emailAfterSelfView = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(emailAfterSelfView.open_count).toBe(1);
+  });
+
+  it('Case F — repeated sender opens: Multiple sender self-views must not inflate recipient count', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Case F', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 60_000).toISOString() }),
+      }),
+      env,
+    );
+
+    // Sender views repeatedly (3 times)
+    for (let i = 0; i < 3; i++) {
+      const now = new Date(Date.now() + i * 20_000).toISOString();
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ timestamp: now }),
+        }),
+        env,
+      );
+      await worker.fetch(new Request(pixel_url), env);
+    }
+
+    const email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    // None of the sender self-views should inflate recipient open count
+    expect(email.open_count).toBe(0);
+  });
+
+  it('Self-view reported with gmailThreadId links to email', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Link Thread', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id } = (await created.json()) as { tracking_id: string };
+
+    const selfViewRes = await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ timestamp: new Date().toISOString(), gmailThreadId: 'thread-xyz' }),
+      }),
+      env,
+    );
+    expect(selfViewRes.status).toBe(200);
+
+    const email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { gmail_thread_id: string };
+    expect(email.gmail_thread_id).toBe('thread-xyz');
+  });
 });

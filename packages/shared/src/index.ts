@@ -145,11 +145,8 @@ export function sanitizeEmailHtml(html: string): string {
   return stripHtml(withoutDangerous);
 }
 
-export async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
+import { hashBody, sha256Hex } from './crypto.js';
+export { hashBody, sha256Hex };
 
 export async function contentFingerprint(parts: {
   gmailThreadId: string;
@@ -160,11 +157,6 @@ export async function contentFingerprint(parts: {
   return sha256Hex(
     `${parts.gmailThreadId}|${parts.latestMessageId}|${parts.latestTimestamp}|${parts.normalizedBodyHash}`,
   );
-}
-
-export async function hashBody(text: string): Promise<string> {
-  const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
-  return sha256Hex(normalized);
 }
 
 /**
@@ -249,6 +241,30 @@ export const RuntimeMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('TRACKING_POLL'),
   }),
   z.object({
+    type: z.literal('TRACKING_SELF_VIEW'),
+    trackingId: z.string(),
+    timestamp: z.string().optional(),
+    gmailThreadId: z.string().nullable().optional(),
+  }),
+  z.object({
+    type: z.literal('REQUEST_SUMMARY'),
+    threadId: z.string(),
+    subject: z.string().optional(),
+    messages: z.array(z.record(z.unknown())).optional(),
+    force: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal('REQUEST_DRAFT'),
+    threadId: z.string(),
+    subject: z.string().optional(),
+    messages: z.array(z.record(z.unknown())).optional(),
+    force: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal('GET_AI_JOB_STATUS'),
+    jobId: z.string(),
+  }),
+  z.object({
     type: z.literal('WRITE_WITH_AI'),
     mode: z.string(),
     text: z.string(),
@@ -263,6 +279,32 @@ export const RuntimeMessageSchema = z.discriminatedUnion('type', [
   }),
 ]);
 export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
+
+export function getProviderRequiredOrigin(provider: string, endpoint?: string): string | null {
+  if (provider === 'openai') {
+    return 'https://api.openai.com/*';
+  }
+  if (provider === 'ollama') {
+    if (!endpoint) return 'http://127.0.0.1:11434/*';
+    try {
+      const u = new URL(endpoint);
+      return `${u.protocol}//${u.host}/*`;
+    } catch {
+      return 'http://127.0.0.1:11434/*';
+    }
+  }
+  if (provider === 'openai-compatible') {
+    if (!endpoint) return null;
+    try {
+      const u = new URL(endpoint);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return `${u.protocol}//${u.host}/*`;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 
 export type AiProcessingMode = 'disabled' | 'remote' | 'local';
 
@@ -369,3 +411,31 @@ export function addBusinessDays(from: Date, days: number): Date {
   }
   return d;
 }
+
+export type AIJobKind = 'summary' | 'draft';
+export type AIJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+
+export type AIJobRecord = {
+  id: string;
+  kind: AIJobKind;
+  threadId: string;
+  fingerprint: string;
+  status: AIJobStatus;
+  provider?: string;
+  model?: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+};
+
+export {
+  buildThreadSnapshot,
+  computeThreadSnapshotFingerprint,
+  normalizeSnapshotMessageId,
+} from './thread-snapshot.js';
+export type {
+  RawSnapshotMessage,
+  ThreadSnapshot,
+  ThreadSnapshotMessage,
+} from './thread-snapshot.js';

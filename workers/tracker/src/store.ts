@@ -42,7 +42,7 @@ export type LinkRow = {
 export type EventRow = {
   id: string;
   tracking_id: string;
-  type: 'OPEN' | 'CLICK';
+  type: 'OPEN' | 'CLICK' | 'SELF_VIEW';
   timestamp: string;
   user_agent: string | null;
   ip_hash: string | null;
@@ -62,6 +62,7 @@ export interface TrackerStore {
   listEvents(trackingId: string): Promise<EventRow[]>;
   recentEvents(): Promise<EventRow[]>;
   insertEvent(row: EventRow): Promise<void>;
+  updateEvent(id: string, patch: Partial<EventRow>): Promise<void>;
   updateEmail(id: string, patch: Partial<EmailRow>): Promise<void>;
   getLink(clickId: string): Promise<LinkRow | null>;
 }
@@ -134,6 +135,12 @@ function memoryStore(): TrackerStore {
     async insertEvent(row) {
       state.events.push({ ...row });
     },
+    async updateEvent(id, patch) {
+      const idx = state.events.findIndex((e) => e.id === id);
+      if (idx >= 0) {
+        state.events[idx] = { ...state.events[idx]!, ...patch };
+      }
+    },
     async updateEmail(id, patch) {
       const current = state.emails.get(id);
       if (!current) return;
@@ -200,6 +207,10 @@ function supabaseStore(url: string, serviceRoleKey: string): TrackerStore {
     },
     async insertEvent(row) {
       const { error } = await supabase.from('tracking_events').insert(row);
+      if (error) throw new StoreError(error.message);
+    },
+    async updateEvent(id, patch) {
+      const { error } = await supabase.from('tracking_events').update(patch).eq('id', id);
       if (error) throw new StoreError(error.message);
     },
     async updateEmail(id, patch) {
