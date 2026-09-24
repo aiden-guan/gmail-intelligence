@@ -30,7 +30,7 @@ export function installSentStatus(opts: {
   onNotify: (trackingId: string, enabled: boolean) => void;
   onStatus?: () => void;
   onLink?: (trackingId: string, gmailThreadId: string) => void;
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null) => void;
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null) => void;
 }): SentStatusController {
   let emails = opts.emails || [];
   let trackerBaseUrl = opts.trackerBaseUrl || '';
@@ -41,17 +41,22 @@ export function installSentStatus(opts: {
   ensureStyles();
   setTrackerBaseAttribute(trackerBaseUrl);
 
-  const reportSelfView = (trackingId: string, gmailThreadId?: string | null) => {
-    const last = recentSelfViews.get(trackingId) || 0;
+  const reportSelfView = (
+    trackingId: string,
+    gmailThreadId?: string | null,
+    gmailMessageId?: string | null,
+  ) => {
+    const key = gmailMessageId ? `${trackingId}:${gmailMessageId}` : trackingId;
+    const last = recentSelfViews.get(key) || 0;
     if (Date.now() - last > 10_000) {
-      recentSelfViews.set(trackingId, Date.now());
-      opts.onSelfView?.(trackingId, gmailThreadId);
+      recentSelfViews.set(key, Date.now());
+      opts.onSelfView?.(trackingId, gmailThreadId, gmailMessageId);
     }
   };
 
   const paint = () => {
     paintRows(document, emails, trackerBaseUrl, opts.onNotify, reportSelfView);
-    paintConversation(document, emails, trackerBaseUrl, opts.onNotify, opts.onLink, reportSelfView);
+    paintConversation(document, emails, trackerBaseUrl, opts.onNotify, opts.onLink);
     refreshOpenCard(emails, trackerBaseUrl);
     const next = statusSignatureFor(document, emails, trackerBaseUrl);
     if (next !== statusSignature) {
@@ -99,15 +104,35 @@ export function installSentStatus(opts: {
   };
 }
 
+function collectMessageIds(row: Element): string[] {
+  const ids = new Set<string>();
+  const attrs = ['data-legacy-message-id', 'data-message-id', 'data-legacy-last-message-id'];
+  const nodes = [row, ...row.querySelectorAll(attrs.map((a) => `[${a}]`).join(','))];
+  for (const node of nodes) {
+    for (const attr of attrs) {
+      const value = node.getAttribute(attr);
+      if (value) ids.add(value);
+    }
+  }
+  return [...ids];
+}
+
 export function readRowQuery(row: Element): TrackingRowQuery {
   const threadIds = collectThreadIds(row);
+  const messageIds = collectMessageIds(row);
   const subject = readSubject(row);
   const emails = new Set<string>();
   row.querySelectorAll('[email], [data-hovercard-id]').forEach((node) => {
     const email = node.getAttribute('email') || node.getAttribute('data-hovercard-id') || '';
     if (email.includes('@')) emails.add(email);
   });
-  return { threadIds, subject, emails: [...emails] };
+  return {
+    threadIds,
+    messageId: messageIds[0] || null,
+    messageIds,
+    subject,
+    emails: [...emails],
+  };
 }
 
 export function paintRows(
@@ -115,7 +140,7 @@ export function paintRows(
   emails: TrackedEmailSummary[],
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null) => void,
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null) => void,
 ): void {
   ensureStyles();
   threadRows(root).forEach((row) => {
@@ -125,16 +150,27 @@ export function paintRows(
     if (!match) {
       existing?.remove();
       if (row.dataset.giTracked) delete row.dataset.giTracked;
+      delete row.dataset.giTrackingId;
+      delete row.dataset.giTrackingThreadId;
+      delete row.dataset.giTrackingMessageId;
       return;
     }
     const slot = placeRowSlot(row, existing instanceof HTMLElement ? existing : null);
     renderSlot(slot, match, trackerBaseUrl, onNotify, false, statusColor(row, match.openCount > 0 || match.clickCount > 0));
     row.dataset.giTracked = match.openCount > 0 || match.clickCount > 0 ? 'opened' : 'pending';
+    row.dataset.giTrackingId = match.trackingId;
+    row.dataset.giTrackingThreadId = match.gmailThreadId || '';
+    row.dataset.giTrackingMessageId = match.gmailMessageId || '';
+
     if (!row.dataset.giSelfBound) {
       row.dataset.giSelfBound = 'true';
       row.addEventListener('click', (e) => {
         if ((e.target as HTMLElement)?.closest('.gi-track-btn')) return;
-        onSelfView?.(match.trackingId, match.gmailThreadId);
+        const currentTrackingId = row.dataset.giTrackingId;
+        if (!currentTrackingId) return;
+        const currentThreadId = row.dataset.giTrackingThreadId || null;
+        const currentMessageId = row.dataset.giTrackingMessageId || null;
+        onSelfView?.(currentTrackingId, currentThreadId, currentMessageId);
       });
     }
   });
@@ -184,7 +220,6 @@ export function paintConversation(
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
   onLink?: (trackingId: string, gmailThreadId: string) => void,
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null) => void,
 ): void {
   const heading = conversationHeading(root);
   if (!heading) return;
@@ -200,7 +235,6 @@ export function paintConversation(
     match.gmailThreadId = hashId;
     onLink(match.trackingId, hashId);
   }
-  onSelfView?.(match.trackingId, match.gmailThreadId || hashId);
   const slot = existing || createSlotAfter(heading);
   const opened = match.openCount > 0 || match.clickCount > 0;
   renderSlot(slot, match, trackerBaseUrl, onNotify, true, statusColor(heading, opened));

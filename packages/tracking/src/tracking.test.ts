@@ -216,12 +216,32 @@ describe('sent mail status', () => {
     expect(copy.markLabel).toBe('Sent');
   });
 
-  it('shows an opened copy when a newer duplicate on the same thread is still unread', () => {
-    const opened = { ...base, openCount: 1, lastOpenedAt: '2026-09-22T15:05:00.000Z' };
-    const newer = { ...base, trackingId: 'trk_new', openCount: 0, sentAt: '2026-09-22T18:00:00.000Z' };
-    expect(
-      matchTrackedEmail({ threadIds: ['thread-1'], subject: 'Hello', emails: ['a@b.com'] }, [newer, opened])?.trackingId,
-    ).toBe('trk_1');
+  it('shows the newest tracked send even when an older message in the same thread was opened', () => {
+    const opened = { ...base, openCount: 1, lastOpenedAt: '2026-09-22T15:05:00.000Z', sentAt: '2026-09-22T15:00:00.000Z' };
+    const newer = { ...base, trackingId: 'trk_new', openCount: 0, sentAt: '2026-09-22T18:00:00.000Z', firstOpenedAt: null, lastOpenedAt: null };
+    const match = matchTrackedEmail({ threadIds: ['thread-1'], subject: 'Hello', emails: ['a@b.com'] }, [newer, opened]);
+    expect(match?.trackingId).toBe('trk_new');
+    expect(match?.openCount).toBe(0);
+    const copy = describeTrackingStatus(match!);
+    expect(copy.markLabel).toBe('Sent');
+    expect(copy.countLabel).toBe('Not opened yet');
+  });
+
+  it('shows the newest opened send when the older send is unopened', () => {
+    const older = { ...base, openCount: 0, sentAt: '2026-09-22T15:00:00.000Z', firstOpenedAt: null, lastOpenedAt: null };
+    const newerOpened = { ...base, trackingId: 'trk_new', openCount: 1, sentAt: '2026-09-22T18:00:00.000Z', lastOpenedAt: '2026-09-22T18:05:00.000Z' };
+    const match = matchTrackedEmail({ threadIds: ['thread-1'], subject: 'Hello', emails: ['a@b.com'] }, [newerOpened, older]);
+    expect(match?.trackingId).toBe('trk_new');
+    expect(match?.openCount).toBe(1);
+    const copy = describeTrackingStatus(match!);
+    expect(copy.markLabel).toBe('Opened');
+  });
+
+  it('matches by exact gmailMessageId when available over thread fallback', () => {
+    const msg1 = { ...base, trackingId: 'trk_msg1', gmailMessageId: 'msg-1', openCount: 1, sentAt: '2026-09-22T15:00:00.000Z' };
+    const msg2 = { ...base, trackingId: 'trk_msg2', gmailMessageId: 'msg-2', openCount: 0, sentAt: '2026-09-22T18:00:00.000Z' };
+    const match = matchTrackedEmail({ threadIds: ['thread-1'], messageId: 'msg-1', subject: 'Hello', emails: ['a@b.com'] }, [msg1, msg2]);
+    expect(match?.trackingId).toBe('trk_msg1');
   });
 
   it('raises a zero open count when a recent open event exists', () => {
@@ -319,12 +339,46 @@ describe('outgoing html', () => {
 
   it('does not count a fetch from before sentAt as a recipient open', () => {
     const sent = Date.parse('2026-09-23T12:00:00.000Z');
-    expect(classifyOpenEvent({ eventTs: sent - 1, sentAt: sent }).countsAsOpen).toBe(false);
-    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, selfViewTs: sent + 1000 }).classification).toBe('SELF_LIKELY');
-    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, selfViewTs: sent + 1000 }).countsAsOpen).toBe(false);
-    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).classification).toBe('RECIPIENT_LIKELY');
-    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).countsAsOpen).toBe(true);
-    expect(classifyOpenEvent({ eventTs: sent + 60_000, sentAt: sent }).classification).toBe('RECIPIENT_LIKELY');
+    const browserUa = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    const proxyUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy';
+    const scannerUa = 'Barracuda Sentinel Scanner/1.0';
+    const headlessUa = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/120.0';
+
+    // Pre-send
+    expect(classifyOpenEvent({ eventTs: sent - 1, sentAt: sent, userAgent: browserUa }).countsAsOpen).toBe(false);
+    expect(classifyOpenEvent({ eventTs: sent - 1, sentAt: sent, userAgent: browserUa }).classification).toBe('SELF_LIKELY');
+
+    // Self-view correlated
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: browserUa, selfViewTs: sent + 1000 }).classification).toBe('SELF_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: browserUa, selfViewTs: sent + 1000 }).countsAsOpen).toBe(false);
+
+    // Self-view boundary checks: [-3s, +8s]
+    const sv = sent + 10_000;
+    expect(classifyOpenEvent({ eventTs: sv - 3000, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('SELF_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sv - 3001, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('RECIPIENT_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sv + 8000, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('SELF_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sv + 8001, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('RECIPIENT_LIKELY');
+
+    // Google image proxy fetch
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).classification).toBe('PROXY_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).countsAsOpen).toBe(false);
+
+    // Security scanner fetch
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: scannerUa }).classification).toBe('MACHINE_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: scannerUa }).countsAsOpen).toBe(false);
+
+    // Headless / Lighthouse
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: headlessUa }).classification).toBe('MACHINE_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: headlessUa }).countsAsOpen).toBe(false);
+
+    // Unknown UA
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: '' }).classification).toBe('UNKNOWN');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: '' }).countsAsOpen).toBe(false);
+
+    // Genuine recipient open with browser UA
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: browserUa }).classification).toBe('RECIPIENT_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: browserUa }).countsAsOpen).toBe(true);
+    expect(classifyOpenEvent({ eventTs: sent + 60_000, sentAt: sent, userAgent: browserUa }).classification).toBe('RECIPIENT_LIKELY');
   });
 
   it('keeps a local sent linkage when the tracker still says pending', () => {

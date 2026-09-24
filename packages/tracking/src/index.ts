@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { detectOpenRequestSource, normalizeGmailId } from './lifecycle.js';
 
 /**
  * Tracking client — talks ONLY to the tracker worker.
@@ -37,7 +38,7 @@ export const TrackingEventSchema = z.object({
   ip_hash: z.string().optional(),
   suspected_self_open: z.boolean().optional(),
   confidence: z.number().optional(),
-  classification: z.enum(['RECIPIENT_LIKELY', 'SELF_LIKELY', 'UNKNOWN']).optional(),
+  classification: z.enum(['RECIPIENT_LIKELY', 'SELF_LIKELY', 'PROXY_LIKELY', 'MACHINE_LIKELY', 'UNKNOWN']).optional(),
   click_id: z.string().optional(),
   destination: z.string().optional(),
 });
@@ -140,7 +141,7 @@ export class TrackingClient {
 
   async recordSelfView(
     id: string,
-    data?: { timestamp?: string; gmailThreadId?: string | null },
+    data?: { timestamp?: string; gmailThreadId?: string | null; gmailMessageId?: string | null },
   ): Promise<{ ok: boolean; open_count?: number }> {
     const res = await fetch(`${trim(this.baseUrl)}/api/emails/${encodeURIComponent(id)}/self-view`, {
       method: 'POST',
@@ -345,20 +346,42 @@ export type TrackingRowQuery = {
   threadIds: string[];
   subject: string;
   emails: string[];
+  messageId?: string | null;
+  messageIds?: string[];
 };
 
-/** Latest tracked send that belongs to this Gmail row. */
+/** Latest tracked send that belongs to this Gmail row or message. */
 export function matchTrackedEmail(
   row: TrackingRowQuery,
   emails: TrackedEmailSummary[],
 ): TrackedEmailSummary | null {
   const delivered = emails.filter(isDeliveredTrackedEmail);
+
+  // 1. Exact Gmail message ID match (strongest identity)
+  const candidateMsgIds = [
+    ...(row.messageId ? [row.messageId] : []),
+    ...(row.messageIds || []),
+  ]
+    .map(normalizeGmailId)
+    .filter(Boolean);
+
+  if (candidateMsgIds.length > 0) {
+    const msgIdSet = new Set(candidateMsgIds);
+    const byMessage = delivered.find((email) => {
+      const emailMsgId = normalizeGmailId(email.gmailMessageId);
+      return emailMsgId && msgIdSet.has(emailMsgId);
+    });
+    if (byMessage) return byMessage;
+  }
+
+  // 2. Exact Gmail thread ID + latest tracked send
   const ids = new Set(row.threadIds.map((id) => id.trim()).filter(Boolean));
   if (ids.size > 0) {
     const byThread = delivered.filter((email) => threadIdsMatch(email.gmailThreadId, ids));
-    if (byThread.length > 0) return preferOpened(byThread);
+    if (byThread.length > 0) return mostRecent(byThread);
   }
 
+  // 3. Careful subject/recipient fallback
   const subject = normalizeSubject(row.subject);
   if (!subject) return null;
   const rowEmails = new Set(row.emails.map(normalizeEmail).filter(Boolean));
@@ -373,28 +396,56 @@ export function matchTrackedEmail(
   const sameThread = candidates.filter(
     (email) => !email.gmailThreadId || ids.size === 0 || threadIdsMatch(email.gmailThreadId, ids),
   );
-  return sameThread.length > 0 ? preferOpened(sameThread) : null;
+  return sameThread.length > 0 ? mostRecent(sameThread) : null;
 }
 
 /**
  * Recent open events can be ahead of the email row when the counter write failed.
- * Never lower a count the row already has.
+ * Only genuine recipient opens count. Never resurrect false/reclassified opens.
  */
 export function applyRecentOpens(
   emails: TrackedEmailSummary[],
-  events: Array<{ tracking_id: string; type: string; timestamp: string; classification?: string }>,
+  events: Array<{
+    tracking_id: string;
+    type: string;
+    timestamp: string;
+    classification?: string;
+    suspected_self_open?: boolean;
+    user_agent?: string | null;
+  }>,
 ): TrackedEmailSummary[] {
   const byId = new Map(emails.map((email) => [email.trackingId, email]));
-  const opens = new Map<string, { count: number; first: string; last: string }>();
-  for (const event of events) {
+  const opens = new Map<string, { count: number; first: string; last: string; lastValidMs: number }>();
+  const sorted = [...events].sort((a, b) => (a.timestamp > b.timestamp ? 1 : a.timestamp < b.timestamp ? -1 : 0));
+
+  for (const event of sorted) {
     if (event.type !== 'OPEN' || !event.tracking_id || !event.timestamp) continue;
-    if (event.classification === 'SELF_LIKELY') continue;
-    const slot = opens.get(event.tracking_id) || { count: 0, first: event.timestamp, last: event.timestamp };
+    if (
+      event.classification === 'SELF_LIKELY' ||
+      event.classification === 'PROXY_LIKELY' ||
+      event.classification === 'MACHINE_LIKELY' ||
+      event.classification === 'UNKNOWN' ||
+      event.suspected_self_open
+    ) {
+      continue;
+    }
+    if (event.user_agent) {
+      const src = detectOpenRequestSource(event.user_agent);
+      if (src !== 'browser_like') continue;
+    }
+
+    const evtMs = Date.parse(event.timestamp);
+    const slot = opens.get(event.tracking_id) || { count: 0, first: event.timestamp, last: event.timestamp, lastValidMs: 0 };
+    if (slot.lastValidMs && Number.isFinite(evtMs) && evtMs >= slot.lastValidMs && evtMs - slot.lastValidMs < 800) {
+      continue;
+    }
     slot.count += 1;
+    slot.lastValidMs = evtMs;
     if (event.timestamp < slot.first) slot.first = event.timestamp;
     if (event.timestamp > slot.last) slot.last = event.timestamp;
     opens.set(event.tracking_id, slot);
   }
+
   for (const [id, slot] of opens) {
     const current = byId.get(id);
     if (!current || slot.count <= current.openCount) continue;
@@ -659,11 +710,18 @@ function asStringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 function mostRecent(emails: TrackedEmailSummary[]): TrackedEmailSummary {
-  return [...emails].sort((a, b) => (sentStamp(a) < sentStamp(b) ? 1 : sentStamp(a) > sentStamp(b) ? -1 : 0))[0];
+  return [...emails].sort((a, b) => {
+    const aTime = sentStamp(a);
+    const bTime = sentStamp(b);
+    if (aTime !== bTime) {
+      return aTime < bTime ? 1 : -1;
+    }
+    return b.trackingId.localeCompare(a.trackingId);
+  })[0];
 }
 
 function sentStamp(email: TrackedEmailSummary): string {
-  return email.sentAt || '';
+  return email.sentAt || email.createdAt || '';
 }
 
 function isDeliveredTrackedEmail(email: TrackedEmailSummary): boolean {
@@ -687,10 +745,6 @@ function canonicalDestination(url: string): string {
   }
 }
 
-function preferOpened(emails: TrackedEmailSummary[]): TrackedEmailSummary {
-  const opened = emails.filter((email) => email.openCount > 0 || email.clickCount > 0);
-  return mostRecent(opened.length > 0 ? opened : emails);
-}
 function formatSpan(delta: number, ago: boolean): string {
   if (!Number.isFinite(delta)) return ago ? 'recently' : 'after you sent';
   if (delta < 60_000) return ago ? 'less than a minute ago' : 'less than a minute';
@@ -719,18 +773,27 @@ function clickCountLabel(count: number): string {
 
 export {
   classifyOpenEvent,
+  deriveTrackingStats,
+  detectOpenRequestSource,
   formatTrackingReport,
   inspectTrackedMime,
+  isSelfViewCorrelated,
   normalizeGmailId,
   probeTracker,
+  SELF_VIEW_POST_WINDOW_MS,
+  SELF_VIEW_PRE_WINDOW_MS,
   trackerHealthLabel,
 } from './lifecycle.js';
 export type {
+  DerivedTrackingStats,
   MimeTrackingInspection,
   OpenClassification,
+  OpenRequestSource,
   OpenVerdict,
   TrackerHealthStatus,
   TrackerProbe,
   TrackingDiagnosticsReport,
+  TrackingEventLike,
+  TrackingPixelEventDiagnostic,
   TrackingSendReport,
 } from './lifecycle.js';

@@ -143,4 +143,41 @@ describe('sent mail open status', () => {
     document.querySelector<HTMLButtonElement>('.gi-track-btn')?.click();
     expect(document.querySelector('[data-gi-ui="track-card"]')?.textContent).toMatch(/cannot reach this computer/);
   });
+
+  it('updates row dataset and avoids stale closure when row is recycled', () => {
+    row('thread-1', 'aiden@example.com', 'Hello');
+    const onSelfView = vi.fn();
+    // First paint with opened email
+    paintRows(document, [opened], 'https://track.example', () => undefined, onSelfView);
+    const rowEl = document.querySelector<HTMLTableRowElement>('.zA')!;
+    expect(rowEl.dataset.giTrackingId).toBe('trk_open');
+
+    // Simulate Gmail recycling the row for a different thread
+    rowEl.setAttribute('data-legacy-thread-id', 'thread-2');
+    rowEl.querySelector('[email]')?.setAttribute('email', 'sam@example.com');
+    rowEl.querySelector('.bog')!.textContent = 'Follow up';
+
+    // Repaint with waiting email
+    paintRows(document, [waiting], 'https://track.example', () => undefined, onSelfView);
+    expect(rowEl.dataset.giTrackingId).toBe('trk_wait');
+
+    // Click the recycled row - must report trk_wait, NOT trk_open!
+    rowEl.click();
+    expect(onSelfView).toHaveBeenCalledTimes(1);
+    expect(onSelfView).toHaveBeenCalledWith('trk_wait', 'thread-2', 'msg-1');
+  });
+
+  it('paintConversation does not emit self-view', () => {
+    document.body.innerHTML = `
+      <div>
+        <h2 class="hP">Hello</h2>
+        <span email="aiden@example.com">Aiden</span>
+      </div>
+    `;
+    const onNotify = vi.fn();
+    const onLink = vi.fn();
+    paintConversation(document, [opened], 'https://track.example', onNotify, onLink);
+    // paintConversation should render the slot without triggering any self view
+    expect(document.querySelector('.gi-track-slot')).not.toBeNull();
+  });
 });

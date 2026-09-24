@@ -39,12 +39,14 @@ import {
 import {
   TrackingClient,
   applyRecentOpens,
+  detectOpenRequestSource,
   formatSentTrackingBadge,
   formatTrackingReport,
   probeTracker,
   summaryFromRemote,
   type TrackedEmailSummary,
   type TrackingDiagnosticsReport,
+  type TrackingPixelEventDiagnostic,
   type TrackingSendReport,
 } from '@gi/tracking';
 import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
@@ -345,6 +347,7 @@ async function runDiagnostics() {
     pageWorldReady?: boolean;
     last?: TrackingSendReport | null;
   } | null;
+  const storedPixel = (await chrome.storage.session.get('lastPixelEvent'))?.lastPixelEvent as TrackingPixelEventDiagnostic | undefined;
   const trackingDiagnostics: TrackingDiagnosticsReport = {
     health: tracking === 'disabled' ? 'disabled' : trackingProbe?.status || (tracking === 'not_configured' ? 'missing' : 'unreachable'),
     endpoint: trackingProbe?.status === 'healthy' || trackingProbe?.status === 'unauthorized' ? 'reachable' : trackingProbe?.status === 'invalid_url' ? 'invalid URL' : trackingProbe ? 'unreachable' : 'not configured',
@@ -353,6 +356,7 @@ async function runDiagnostics() {
     pageWorld: trackingSnapshot?.pageWorldReady ? 'ready' : trackingSnapshot?.pageWorldInjected ? 'injected' : 'not confirmed',
     composeHook: trackingSnapshot?.composeHookAttached ? 'attached' : 'not attached',
     last: trackingSnapshot?.last || null,
+    lastPixelEvent: storedPixel || null,
   };
   let aiStatus: 'ready' | 'disabled' | 'not_signed_in' | 'missing_permissions' | 'missing_key' | 'error' = 'ready';
   let configStatus: string = 'provider selected';
@@ -612,7 +616,31 @@ async function pollTracking(): Promise<void> {
   try {
     await loadNotifiedEvents();
     events = await client.getRecentEvents();
-    for (const email of applyRecentOpens([...byId.values()], events)) byId.set(email.trackingId, email);
+    if (!sawRemote && events.length) {
+      for (const email of applyRecentOpens([...byId.values()], events)) byId.set(email.trackingId, email);
+    }
+    const latestOpen = events.find((ev) => ev.type === 'OPEN');
+    if (latestOpen) {
+      const source = detectOpenRequestSource(latestOpen.user_agent);
+      const isCounted =
+        (latestOpen.classification === 'RECIPIENT_LIKELY' || !latestOpen.classification) &&
+        !latestOpen.suspected_self_open &&
+        source === 'browser_like';
+
+      const email = byId.get(latestOpen.tracking_id);
+      const diagnostic: TrackingPixelEventDiagnostic = {
+        trackingId: latestOpen.tracking_id,
+        eventType: latestOpen.type,
+        classification: (latestOpen.classification || (source === 'browser_like' ? 'RECIPIENT_LIKELY' : 'UNKNOWN')) as any,
+        requestSource: source,
+        userAgentCategory: source,
+        timestamp: latestOpen.timestamp,
+        sentAt: email?.sentAt || null,
+        selfViewCorrelated: Boolean(latestOpen.suspected_self_open || latestOpen.classification === 'SELF_LIKELY'),
+        countsAsOpen: isCounted,
+      };
+      await chrome.storage.session.set({ lastPixelEvent: diagnostic });
+    }
   } catch (e) {
     console.warn('[gi] tracking poll failed', e);
   }
@@ -620,7 +648,19 @@ async function pollTracking(): Promise<void> {
   try {
     const fresh = [...byId.values()];
     for (const ev of events) {
-      if (ev.type === 'SELF_VIEW' || ev.classification === 'SELF_LIKELY') continue;
+      if (
+        ev.type === 'SELF_VIEW' ||
+        ev.classification === 'SELF_LIKELY' ||
+        ev.classification === 'PROXY_LIKELY' ||
+        ev.classification === 'MACHINE_LIKELY' ||
+        ev.classification === 'UNKNOWN' ||
+        ev.suspected_self_open
+      ) {
+        continue;
+      }
+      if (ev.type === 'OPEN' && ev.classification && ev.classification !== 'RECIPIENT_LIKELY') {
+        continue;
+      }
       if (notifiedEventIds.has(ev.id)) continue;
       if (settings.hideSuspectedSelfOpens && ev.suspected_self_open) continue;
       if (!(await markEventNotified(ev.id))) continue;
@@ -1281,6 +1321,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await client.recordSelfView(msg.trackingId, {
               timestamp: msg.timestamp || new Date().toISOString(),
               gmailThreadId: msg.gmailThreadId || null,
+              gmailMessageId: msg.gmailMessageId || null,
             });
             await pollTracking();
           } catch (e) {

@@ -7,6 +7,7 @@ import {
   findComposeBody,
   findNotice,
   resolveThreadId,
+  resolveMessageId,
   findThreadRows,
   normalizeOpenedThread,
   normalizeVisibleRow,
@@ -41,6 +42,26 @@ let islandMode: IslandMode | null = null;
 let currentThreadId: string | null = null;
 const summaryNotes = new Map<string, { pending: boolean; reason: string | null; preview: string | null }>();
 const summaryKeys = new Map<string, string>();
+let cachedTrackedEmails: TrackedEmailSummary[] = [];
+const recentContentSelfViews = new Map<string, number>();
+
+function reportTrackingSelfView(
+  trackingId: string,
+  gmailThreadId?: string | null,
+  gmailMessageId?: string | null,
+): void {
+  const key = gmailMessageId ? `${trackingId}:${gmailMessageId}` : trackingId;
+  const last = recentContentSelfViews.get(key) || 0;
+  if (Date.now() - last > 10_000) {
+    recentContentSelfViews.set(key, Date.now());
+    void send({
+      type: 'TRACKING_SELF_VIEW',
+      trackingId,
+      gmailThreadId,
+      gmailMessageId,
+    });
+  }
+}
 
 function runtimeAlive(): boolean {
   try {
@@ -187,11 +208,16 @@ async function boot(): Promise<void> {
     }
     reportRuntime();
   });
+  const updateCachedEmails = (emails: TrackedEmailSummary[]) => {
+    cachedTrackedEmails = emails;
+    sentStatus?.setEmails(emails);
+  };
+
   sentStatus = installSentStatus({
     trackerBaseUrl: settings.trackerBaseUrl,
     onNotify: (trackingId, enabled) => {
       void send<{ emails?: TrackedEmailSummary[] }>({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }).then((res) => {
-        if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
+        if (Array.isArray(res?.emails)) updateCachedEmails(res.emails);
       });
     },
     onStatus: () => {
@@ -202,8 +228,8 @@ async function boot(): Promise<void> {
     onLink: (trackingId, gmailThreadId) => {
       linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
     },
-    onSelfView: (trackingId, gmailThreadId) => {
-      void send({ type: 'TRACKING_SELF_VIEW', trackingId, gmailThreadId });
+    onSelfView: (trackingId, gmailThreadId, gmailMessageId) => {
+      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId);
     },
   });
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -212,7 +238,7 @@ async function boot(): Promise<void> {
       sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
     }
     if (area === 'local' && Array.isArray(changes.trackedEmails?.newValue)) {
-      sentStatus?.setEmails(changes.trackedEmails.newValue as TrackedEmailSummary[]);
+      updateCachedEmails(changes.trackedEmails.newValue as TrackedEmailSummary[]);
     }
     if (area === 'session' && changes.intelPulse?.newValue?.threadId) {
       const threadId = String(changes.intelPulse.newValue.threadId);
@@ -220,7 +246,7 @@ async function boot(): Promise<void> {
     }
   });
   void send<{ emails?: TrackedEmailSummary[] }>({ type: 'GET_TRACKED_EMAILS' }).then((res) => {
-    if (Array.isArray(res?.emails)) sentStatus?.setEmails(res.emails);
+    if (Array.isArray(res?.emails)) updateCachedEmails(res.emails);
   });
   setupCommandPalette();
   const pullTracking = () => {
@@ -300,6 +326,36 @@ function mountSdkUi(sdk: InboxSdkLike): void {
     });
   } catch {
     /* sidebar is optional */
+  }
+  try {
+    const inspectMessageView = async (messageView: unknown) => {
+      try {
+        const messageId = await resolveMessageId(messageView as any);
+        if (!messageId) return;
+        const threadView =
+          typeof (messageView as { getThreadView?: () => unknown }).getThreadView === 'function'
+            ? (messageView as { getThreadView: () => unknown }).getThreadView()
+            : null;
+        const threadId = threadView ? await resolveThreadId(threadView as any) : null;
+        const match = cachedTrackedEmails.find((item) => item.gmailMessageId === messageId);
+        if (match) {
+          reportTrackingSelfView(match.trackingId, threadId || match.gmailThreadId, messageId);
+        }
+      } catch {
+        /* message view inspection is optional */
+      }
+    };
+
+    sdk.Conversations?.registerMessageViewHandler?.((messageView) => {
+      void inspectMessageView(messageView);
+      if (typeof (messageView as { on?: (event: string, cb: () => void) => void }).on === 'function') {
+        (messageView as { on: (event: string, cb: () => void) => void }).on('load', () => {
+          void inspectMessageView(messageView);
+        });
+      }
+    });
+  } catch {
+    /* message view handler is optional */
   }
   try {
     sdk.Compose.registerComposeViewHandler((composeView) => {

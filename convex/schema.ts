@@ -35,7 +35,15 @@ export default defineSchema({
     ipHash: v.union(v.string(), v.null()),
     suspectedSelfOpen: v.boolean(),
     confidence: v.number(),
-    classification: v.optional(v.union(v.literal("RECIPIENT_LIKELY"), v.literal("SELF_LIKELY"), v.literal("UNKNOWN"))),
+    classification: v.optional(
+      v.union(
+        v.literal("RECIPIENT_LIKELY"),
+        v.literal("SELF_LIKELY"),
+        v.literal("PROXY_LIKELY"),
+        v.literal("MACHINE_LIKELY"),
+        v.literal("UNKNOWN"),
+      ),
+    ),
     clickId: v.union(v.string(), v.null()),
     destination: v.union(v.string(), v.null()),
   })

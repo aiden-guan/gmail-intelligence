@@ -48,7 +48,7 @@ export type EventRow = {
   ip_hash: string | null;
   suspected_self_open: boolean;
   confidence: number;
-  classification?: 'RECIPIENT_LIKELY' | 'SELF_LIKELY' | 'UNKNOWN';
+  classification?: 'RECIPIENT_LIKELY' | 'SELF_LIKELY' | 'PROXY_LIKELY' | 'MACHINE_LIKELY' | 'UNKNOWN' | null;
   click_id?: string | null;
   destination?: string | null;
 };

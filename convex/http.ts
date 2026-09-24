@@ -1,7 +1,7 @@
 import { httpRouter } from "convex/server";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
-import { publicTrackerOrigin, trackingIdFromUrl, classifyOpenEvent } from "./openRequest";
+import { publicTrackerOrigin, trackingIdFromUrl, classifyOpenEvent, isSelfViewCorrelated } from "./openRequest";
 
 const TRANSPARENT_GIF = Uint8Array.from(
   atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"),
@@ -94,13 +94,13 @@ type EmailDoc = {
 type EventDoc = {
   eventId: string;
   trackingId: string;
-  type: "OPEN" | "CLICK";
+  type: "OPEN" | "CLICK" | "SELF_VIEW";
   timestamp: string;
   userAgent: string | null;
   ipHash: string | null;
   suspectedSelfOpen: boolean;
   confidence: number;
-  classification?: "RECIPIENT_LIKELY" | "SELF_LIKELY" | "UNKNOWN";
+  classification?: "RECIPIENT_LIKELY" | "SELF_LIKELY" | "PROXY_LIKELY" | "MACHINE_LIKELY" | "UNKNOWN";
   clickId: string | null;
   destination: string | null;
 };
@@ -164,7 +164,7 @@ http.route({
         const sentMs = email.sentAt ? Date.parse(email.sentAt) : null;
         const events = await ctx.runQuery(internal.tracking.listEvents, { trackingId });
         const recentSelfView = events.find(
-          (e) => e.type === "SELF_VIEW" && Math.abs(now - Date.parse(e.timestamp)) < 15_000,
+          (e) => e.type === "SELF_VIEW" && isSelfViewCorrelated(now, Date.parse(e.timestamp)),
         );
         const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
         const verdict = classifyOpenEvent({
@@ -186,22 +186,10 @@ http.route({
           clickId: null,
           destination: null,
         };
-        if (!verdict.countsAsOpen) {
-          try {
-            await ctx.runMutation(internal.tracking.recordOpenEvent, event);
-          } catch (error) {
-            console.error("open event insert failed", error);
-          }
-        } else {
-          // Count first, in its own mutation. A failed event insert must not roll the count back.
-          const recorded = await ctx.runMutation(internal.tracking.recordOpen, event);
-          if (recorded.recorded) {
-            try {
-              await ctx.runMutation(internal.tracking.recordOpenEvent, event);
-            } catch (error) {
-              console.error("open event insert failed", error);
-            }
-          }
+        try {
+          await ctx.runMutation(internal.tracking.recordOpenEvent, event);
+        } catch (error) {
+          console.error("open event insert failed", error);
         }
       }
     } catch (error) {
@@ -347,18 +335,24 @@ http.route({
     const body = (await request.json().catch(() => ({}))) as {
       timestamp?: string;
       gmailThreadId?: string | null;
+      gmail_thread_id?: string | null;
+      gmailMessageId?: string | null;
+      gmail_message_id?: string | null;
     };
     const ts = body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
       ? new Date(body.timestamp).toISOString()
       : new Date().toISOString();
     const ua = request.headers.get("User-Agent");
+    const threadId = body.gmailThreadId ?? body.gmail_thread_id ?? null;
+    const messageId = body.gmailMessageId ?? body.gmail_message_id ?? null;
 
     const result = await ctx.runMutation(internal.tracking.recordSelfView, {
       eventId: newId("evt"),
       trackingId: id,
       timestamp: ts,
       userAgent: ua,
-      gmailThreadId: typeof body.gmailThreadId === "string" ? body.gmailThreadId.slice(0, 128) : null,
+      gmailThreadId: typeof threadId === "string" ? threadId.slice(0, 128) : null,
+      gmailMessageId: typeof messageId === "string" ? messageId.slice(0, 128) : null,
     });
 
     if (!result.ok) return json({ error: "not_found" }, 404);

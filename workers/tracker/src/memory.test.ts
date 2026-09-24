@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from './index';
 import { resetMemoryStore } from './store';
 
@@ -10,6 +10,20 @@ function authHeaders(): HeadersInit {
   return {
     Authorization: 'Bearer test-token',
     'Content-Type': 'application/json',
+  };
+}
+
+function browserHeaders(extra?: Record<string, string>): HeadersInit {
+  return {
+    'User-Agent':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    ...extra,
+  };
+}
+
+function proxyHeaders(): HeadersInit {
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy',
   };
 }
 
@@ -76,7 +90,7 @@ describe('local memory tracker', () => {
     );
     expect(marked.status).toBe(200);
 
-    const pixel = await worker.fetch(new Request(body.pixel_url), env);
+    const pixel = await worker.fetch(new Request(body.pixel_url, { headers: browserHeaders() }), env);
     expect(pixel.status).toBe(200);
     expect(pixel.headers.get('Content-Type')).toContain('image/gif');
 
@@ -213,7 +227,7 @@ describe('local memory tracker', () => {
     );
 
     // Recipient opens fast (1 second after send), no SELF_VIEW
-    await worker.fetch(new Request(pixel_url), env);
+    await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
 
     const email = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
@@ -260,7 +274,7 @@ describe('local memory tracker', () => {
     );
 
     // Pixel loads right after (small delta)
-    await worker.fetch(new Request(pixel_url), env);
+    await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
 
     const email = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
@@ -295,7 +309,7 @@ describe('local memory tracker', () => {
     );
 
     // Pixel fetched before self-view
-    await worker.fetch(new Request(pixel_url), env);
+    await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
     const emailBefore = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
     ).json()) as { open_count: number };
@@ -339,7 +353,7 @@ describe('local memory tracker', () => {
     );
 
     // Recipient opens email
-    const openRes = await worker.fetch(new Request(pixel_url), env);
+    const openRes = await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
     expect(openRes.status).toBe(200);
 
     const emailAfterRecipient = (await (
@@ -365,11 +379,61 @@ describe('local memory tracker', () => {
   });
 
   it('Case F — repeated sender opens: Multiple sender self-views must not inflate recipient count', async () => {
+    vi.useFakeTimers();
+    try {
+      const baseTime = Date.parse('2026-09-24T10:00:00.000Z');
+      vi.setSystemTime(baseTime);
+
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ subject: 'Case F', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime - 60_000).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender views repeatedly (3 times) with advancing time
+      for (let i = 0; i < 3; i++) {
+        vi.advanceTimersByTime(20_000);
+        const now = new Date().toISOString();
+        await worker.fetch(
+          new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ timestamp: now }),
+          }),
+          env,
+        );
+        await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+      }
+
+      const email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      // None of the sender self-views should inflate recipient open count
+      expect(email.open_count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('automatic Google-image-proxy fetch stores PROXY_LIKELY and does not turn open_count to 1', async () => {
     const created = await worker.fetch(
       new Request('http://127.0.0.1:8787/api/emails', {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({ subject: 'Case F', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        body: JSON.stringify({ subject: 'Proxy Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
       }),
       env,
     );
@@ -379,30 +443,64 @@ describe('local memory tracker', () => {
       new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
         method: 'PATCH',
         headers: authHeaders(),
-        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 60_000).toISOString() }),
+        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 1000).toISOString() }),
       }),
       env,
     );
 
-    // Sender views repeatedly (3 times)
-    for (let i = 0; i < 3; i++) {
-      const now = new Date(Date.now() + i * 20_000).toISOString();
-      await worker.fetch(
-        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
-          method: 'POST',
-          headers: authHeaders(),
-          body: JSON.stringify({ timestamp: now }),
-        }),
-        env,
-      );
-      await worker.fetch(new Request(pixel_url), env);
-    }
+    // Pixel request with GoogleImageProxy UA
+    const pixelRes = await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+    expect(pixelRes.status).toBe(200);
 
     const email = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
     ).json()) as { open_count: number };
-    // None of the sender self-views should inflate recipient open count
     expect(email.open_count).toBe(0);
+
+    const events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ type: string; classification: string }>;
+    expect(events).toHaveLength(1);
+    expect(events[0].classification).toBe('PROXY_LIKELY');
+  });
+
+  it('scanner fetch stores MACHINE_LIKELY and does not increment open_count', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Scanner Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: new Date(Date.now() - 1000).toISOString() }),
+      }),
+      env,
+    );
+
+    // Pixel request with scanner UA
+    const pixelRes = await worker.fetch(
+      new Request(pixel_url, { headers: { 'User-Agent': 'Barracuda Sentinel Scanner/1.0' } }),
+      env,
+    );
+    expect(pixelRes.status).toBe(200);
+
+    const email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(email.open_count).toBe(0);
+
+    const events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ type: string; classification: string }>;
+    expect(events).toHaveLength(1);
+    expect(events[0].classification).toBe('MACHINE_LIKELY');
   });
 
   it('Self-view reported with gmailThreadId links to email', async () => {

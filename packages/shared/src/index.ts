@@ -245,6 +245,7 @@ export const RuntimeMessageSchema = z.discriminatedUnion('type', [
     trackingId: z.string(),
     timestamp: z.string().optional(),
     gmailThreadId: z.string().nullable().optional(),
+    gmailMessageId: z.string().nullable().optional(),
   }),
   z.object({
     type: z.literal('REQUEST_SUMMARY'),
