@@ -55,6 +55,27 @@ describe('local memory tracker', () => {
     expect(body.pixel_url).toBe(`http://127.0.0.1:8787/open/${body.tracking_id}`);
     expect(body.rewritten_links).toHaveLength(1);
 
+    const pendingPixel = await worker.fetch(new Request(body.pixel_url), env);
+    expect(pendingPixel.status).toBe(200);
+    expect(pendingPixel.headers.get('Content-Type')).toContain('image/gif');
+    const pending = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${body.tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number; status: string; sent_at: string | null };
+    expect(pending.status).toBe('PENDING');
+    expect(pending.sent_at).toBeNull();
+    expect(pending.open_count).toBe(0);
+
+    const sentAt = new Date(Date.now() - 60_000).toISOString();
+    const marked = await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${body.tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: sentAt }),
+      }),
+      env,
+    );
+    expect(marked.status).toBe(200);
+
     const pixel = await worker.fetch(new Request(body.pixel_url), env);
     expect(pixel.status).toBe(200);
     expect(pixel.headers.get('Content-Type')).toContain('image/gif');
@@ -76,8 +97,11 @@ describe('local memory tracker', () => {
       new Request('http://127.0.0.1:8787/api/events/recent', { headers: authHeaders() }),
       env,
     );
-    const events = (await recent.json()) as Array<{ type: string }>;
-    expect(events.map((event) => event.type).sort()).toEqual(['CLICK', 'OPEN']);
+    const events = (await recent.json()) as Array<{ type: string; classification?: string }>;
+    expect(events.filter((event) => event.type === 'CLICK')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'OPEN')).toHaveLength(2);
+    expect(events.some((event) => event.classification === 'SELF_LIKELY')).toBe(true);
+    expect(events.some((event) => event.classification === 'RECIPIENT_LIKELY')).toBe(true);
   });
 
   it('lists tracked mail and links a gmail thread without changing opens', async () => {

@@ -1,7 +1,7 @@
 import { httpRouter } from "convex/server";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
-import { publicTrackerOrigin, trackingIdFromUrl } from "./openRequest";
+import { publicTrackerOrigin, trackingIdFromUrl, classifyOpenEvent } from "./openRequest";
 
 const TRANSPARENT_GIF = Uint8Array.from(
   atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"),
@@ -50,16 +50,6 @@ function safeRedirectUrl(url: string): string | null {
   }
 }
 
-function suspectSelfOpen(sentAt: string | null, now: number, ua: string | null): { suspected: boolean; confidence: number } {
-  let score = 0;
-  if (sentAt) {
-    const delta = now - Date.parse(sentAt);
-    if (delta >= 0 && delta < 5000) score += 0.5;
-  }
-  if (ua && /Headless|Lighthouse/i.test(ua)) score += 0.3;
-  return { suspected: score >= 0.5, confidence: Math.min(1, score) };
-}
-
 async function hashIp(ip: string): Promise<string | null> {
   if (!ip) return null;
   const salt = process.env.PERSONAL_API_TOKEN || "salt";
@@ -90,7 +80,9 @@ type EmailDoc = {
   recipients: string[];
   gmailThreadId: string | null;
   gmailMessageId: string | null;
-  sentAt: string;
+  status?: "PENDING" | "SENT" | "CANCELLED" | "FAILED";
+  createdAt?: string;
+  sentAt: string | null;
   firstOpenedAt: string | null;
   lastOpenedAt: string | null;
   openCount: number;
@@ -108,6 +100,7 @@ type EventDoc = {
   ipHash: string | null;
   suspectedSelfOpen: boolean;
   confidence: number;
+  classification?: "RECIPIENT_LIKELY" | "SELF_LIKELY" | "UNKNOWN";
   clickId: string | null;
   destination: string | null;
 };
@@ -120,6 +113,8 @@ function emailJson(row: EmailDoc) {
     recipients: row.recipients,
     gmail_thread_id: row.gmailThreadId,
     gmail_message_id: row.gmailMessageId,
+    status: row.status || (row.sentAt ? "SENT" : "PENDING"),
+    created_at: row.createdAt || null,
     sent_at: row.sentAt,
     first_opened_at: row.firstOpenedAt,
     last_opened_at: row.lastOpenedAt,
@@ -140,6 +135,7 @@ function eventJson(row: EventDoc) {
     ip_hash: row.ipHash,
     suspected_self_open: row.suspectedSelfOpen,
     confidence: row.confidence,
+    classification: row.classification,
     click_id: row.clickId,
     destination: row.destination,
   };
@@ -165,7 +161,12 @@ http.route({
       if (email) {
         const now = Date.now();
         const ua = request.headers.get("User-Agent");
-        const self = suspectSelfOpen(email.sentAt, now, ua);
+        const sentMs = email.sentAt ? Date.parse(email.sentAt) : null;
+        const verdict = classifyOpenEvent({
+          eventTs: now,
+          sentAt: sentMs != null && Number.isFinite(sentMs) ? sentMs : null,
+          userAgent: ua,
+        });
         const event = {
           eventId: newId("evt"),
           trackingId,
@@ -173,18 +174,27 @@ http.route({
           timestamp: new Date(now).toISOString(),
           userAgent: ua,
           ipHash: await hashIp(clientIp(request)),
-          suspectedSelfOpen: self.suspected,
-          confidence: self.confidence,
+          suspectedSelfOpen: verdict.suspected,
+          confidence: verdict.confidence,
+          classification: verdict.classification,
           clickId: null,
           destination: null,
         };
-        // Count first, in its own mutation. A failed event insert must not roll the count back.
-        const recorded = await ctx.runMutation(internal.tracking.recordOpen, event);
-        if (recorded.recorded) {
+        if (!verdict.countsAsOpen) {
           try {
             await ctx.runMutation(internal.tracking.recordOpenEvent, event);
           } catch (error) {
             console.error("open event insert failed", error);
+          }
+        } else {
+          // Count first, in its own mutation. A failed event insert must not roll the count back.
+          const recorded = await ctx.runMutation(internal.tracking.recordOpen, event);
+          if (recorded.recorded) {
+            try {
+              await ctx.runMutation(internal.tracking.recordOpenEvent, event);
+            } catch (error) {
+              console.error("open event insert failed", error);
+            }
           }
         }
       }
@@ -281,7 +291,7 @@ http.route({
     const recipients = body.recipients.filter((item): item is string => typeof item === "string").slice(0, 100);
     if (!recipients.length || body.subject.length > 998) return json({ error: "bad_request" }, 400);
     const trackingId = newId("trk");
-    const sentAt = new Date().toISOString();
+    const createdAt = new Date().toISOString();
     const origin = publicTrackerOrigin(process.env.CONVEX_SITE_URL, request.url);
     const links: Array<{ clickId: string; destination: string }> = [];
     const rewritten: Array<{ click_id: string; original: string; tracked_url: string }> = [];
@@ -302,12 +312,17 @@ http.route({
       recipients,
       gmailThreadId: typeof body.gmail_thread_id === "string" ? body.gmail_thread_id.slice(0, 128) : null,
       gmailMessageId: typeof body.gmail_message_id === "string" ? body.gmail_message_id.slice(0, 128) : null,
-      sentAt,
+      status: "PENDING" as const,
+      sentAt: null,
+      createdAt,
       links,
     });
     return json({
       tracking_id: trackingId,
-      pixel_url: `${origin}/open/${trackingId}.gif`,
+      pixel_url: `${origin}/open/${trackingId}`,
+      status: "PENDING",
+      created_at: createdAt,
+      sent_at: null,
       rewritten_links: rewritten,
     });
   }),
@@ -323,14 +338,51 @@ http.route({
     const body = (await request.json().catch(() => null)) as {
       gmail_thread_id?: unknown;
       gmail_message_id?: unknown;
+      status?: unknown;
+      sent_at?: unknown;
+      subject?: unknown;
+      sender?: unknown;
+      recipients?: unknown;
+      links?: unknown;
     } | null;
     if (!body || typeof body !== "object") return json({ error: "bad_request" }, 400);
-    const patch: { trackingId: string; gmailThreadId?: string | null; gmailMessageId?: string | null } = { trackingId: id };
+    const patch: {
+      trackingId: string;
+      gmailThreadId?: string | null;
+      gmailMessageId?: string | null;
+      status?: "PENDING" | "SENT" | "CANCELLED" | "FAILED";
+      sentAt?: string | null;
+      subject?: string;
+      sender?: string;
+      recipients?: string[];
+      links?: Array<{ clickId: string; destination: string }>;
+    } = { trackingId: id };
     if ("gmail_thread_id" in body) {
       patch.gmailThreadId = body.gmail_thread_id == null ? null : String(body.gmail_thread_id).slice(0, 128);
     }
     if ("gmail_message_id" in body) {
       patch.gmailMessageId = body.gmail_message_id == null ? null : String(body.gmail_message_id).slice(0, 128);
+    }
+    if (body.status === "PENDING" || body.status === "SENT" || body.status === "CANCELLED" || body.status === "FAILED") {
+      patch.status = body.status;
+    }
+    if ("sent_at" in body) patch.sentAt = body.sent_at == null ? null : String(body.sent_at).slice(0, 40);
+    if (typeof body.subject === "string") patch.subject = body.subject.slice(0, 998);
+    if (typeof body.sender === "string") patch.sender = body.sender.slice(0, 320);
+    if (Array.isArray(body.recipients)) {
+      patch.recipients = body.recipients.filter((item): item is string => typeof item === "string").slice(0, 100);
+    }
+    if (Array.isArray(body.links)) {
+      const links: Array<{ clickId: string; destination: string }> = [];
+      for (const link of body.links.slice(0, 50)) {
+        if (!link || typeof link !== "object") continue;
+        const clickId = "click_id" in link ? String((link as { click_id: unknown }).click_id) : "";
+        const raw = "url" in link ? String((link as { url: unknown }).url) : "";
+        const safe = safeRedirectUrl(raw);
+        if (!/^[\w-]+$/.test(clickId) || !safe) continue;
+        links.push({ clickId, destination: safe });
+      }
+      patch.links = links;
     }
     const row = await ctx.runMutation(internal.tracking.patchEmail, patch);
     if (!row) return json({ error: "not_found" }, 404);

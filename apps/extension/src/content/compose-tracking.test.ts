@@ -5,16 +5,14 @@ import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
 import { describe, expect, it, vi } from 'vitest';
 import {
   attachSdkComposeTracking,
+  DRAFT_READY_TIMEOUT_MS,
   getComposeSession,
-  installDomComposeTracking,
   listComposeSessions,
-  planTrackingInjection,
-  prepareDomCompose,
   resetComposeSessionsForTests,
-  TRACKING_READY_WAIT_MS,
-  trackedOutgoingBody,
-  type SdkComposeView,
+  type ComposeTrackingDeps,
 } from './compose-tracking';
+import { GmailComposeSendHarness } from './gmail-send-harness';
+import { decidePresending, createTrackingSession } from './tracking-session';
 
 const settings: ExtensionSettings = {
   ...DEFAULT_SETTINGS,
@@ -25,254 +23,271 @@ const settings: ExtensionSettings = {
   personalApiToken: 'token',
 };
 
-function deps(create?: (input: { links?: Array<{ url: string }> }) => { tracking_id: string }) {
-  let n = 0;
-  return {
+function deps(overrides: Partial<ComposeTrackingDeps> = {}): ComposeTrackingDeps & { created: number; sent: Array<{ trackingId: string }>; cancelled: string[] } {
+  const state = { created: 0, sent: [] as Array<{ trackingId: string }>, cancelled: [] as string[] };
+  const api: ComposeTrackingDeps & typeof state = {
+    ...state,
     getSettings: () => settings,
     refreshSettings: async () => undefined,
-    createTracked: async (input: { links?: Array<{ url: string }> }) => {
-      n += 1;
-      return create?.(input) || {
-        tracking_id: `trk_${n}`,
-        pixel_url: `https://track.example/open/trk_${n}`,
-        rewritten_links: [{ click_id: 'clk_1', original: 'https://example.com/docs', tracked_url: 'https://track.example/c/clk_1' }],
+    createTracked: async () => {
+      api.created += 1;
+      const id = `trk_${api.created}`;
+      return {
+        tracking_id: id,
+        pixel_url: `https://track.example/open/${id}`,
+        status: 'PENDING',
+        created_at: '2026-09-23T12:00:00.000Z',
+        sent_at: null,
+        rewritten_links: [],
       };
     },
-    linkTracked: () => undefined,
+    markSent: (patch) => {
+      api.sent.push(patch);
+    },
+    cancelTracked: (trackingId) => {
+      api.cancelled.push(trackingId);
+    },
+    syncLinks: () => undefined,
+    ...overrides,
   };
+  return api;
 }
 
-describe('compose tracking does not block send', () => {
-  it('sends the original body when tracking does not become ready', async () => {
+describe('compose tracking sessions', () => {
+  it('waits for a recipient and allocates one tracker', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness('new');
+    const tracking = deps();
+    const id = attachSdkComposeTracking(gmail.view(), tracking);
+    await vi.waitFor(() => expect(getComposeSession(id)?.state).toBe('WAITING_FOR_RECIPIENTS'));
+    expect(tracking.created).toBe(0);
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    gmail.emit('recipientsChanged');
+    await vi.waitFor(() => expect(getComposeSession(id)?.trackingId).toBe('trk_1'));
+    gmail.subject = 'Changed';
+    gmail.emit('subjectChanged');
+    gmail.emit('recipientsChanged');
+    await vi.waitFor(() => expect(tracking.created).toBe(1));
+    expect(getComposeSession(id)?.state).toBe('WAITING_FOR_DRAFT');
+  });
+
+  it('keeps reply, forward, and a second compose on separate trackers', async () => {
+    resetComposeSessionsForTests();
+    const reply = new GmailComposeSendHarness('reply');
+    const forward = new GmailComposeSendHarness('forward');
+    reply.recipients = [{ emailAddress: 'a@b.com' }];
+    forward.recipients = [{ emailAddress: 'c@d.com' }];
+    reply.setDraftId('draft-reply');
+    forward.setDraftId('draft-forward');
+    const tracking = deps();
+    const replyId = attachSdkComposeTracking(reply.view(), tracking);
+    const forwardId = attachSdkComposeTracking(forward.view(), tracking);
+    await vi.waitFor(() => expect(getComposeSession(replyId)?.modifierRegistered).toBe(true));
+    await vi.waitFor(() => expect(getComposeSession(forwardId)?.modifierRegistered).toBe(true));
+    expect(getComposeSession(replyId)?.kind).toBe('reply');
+    expect(getComposeSession(forwardId)?.kind).toBe('forward');
+    expect(getComposeSession(replyId)?.trackingId).not.toBe(getComposeSession(forwardId)?.trackingId);
+    expect(listComposeSessions()).toHaveLength(2);
+    const replySend = await reply.deliverSend('<p>Reply <a href="https://example.com/a">a</a></p>');
+    const forwardSend = await forward.deliverSend('<p>FYI <a href="https://example.com/b">b</a></p>');
+    expect(replySend.body).toContain(`/open/${getComposeSession(replyId)?.trackingId}`);
+    expect(forwardSend.body).toContain(`/open/${getComposeSession(forwardId)?.trackingId}`);
+    expect(replySend.body).not.toContain(`/open/${getComposeSession(forwardId)?.trackingId}`);
+    expect(forwardSend.body).not.toContain(`/open/${getComposeSession(replyId)?.trackingId}`);
+  });
+
+  it('drops the session when the compose is discarded', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness();
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    const tracking = deps();
+    const id = attachSdkComposeTracking(gmail.view(), tracking);
+    await vi.waitFor(() => expect(getComposeSession(id)?.trackingId).toBe('trk_1'));
+    gmail.emit('destroy');
+    expect(getComposeSession(id)).toBeUndefined();
+    expect(tracking.cancelled).toEqual(['trk_1']);
+  });
+
+  it('does not mark the modifier registered when Gmail has no draft id', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness();
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    gmail.failNextRegistrations(1);
+    gmail.setDraftId('draft-1');
+    const id = attachSdkComposeTracking(gmail.view(), deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.trackingId).toBe('trk_1'));
+    expect(getComposeSession(id)?.modifierRegistered).toBe(false);
+    expect(gmail.modifierCount()).toBe(0);
+    gmail.emit('draftSaved');
+    await vi.waitFor(() => expect(getComposeSession(id)?.modifierRegistered).toBe(true));
+    expect(getComposeSession(id)?.gmailDraftId).toBe('draft-1');
+  });
+});
+
+describe('gmail send interception', () => {
+  it('injects the tracking pixel into the final outbound Gmail send payload', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness();
+    gmail.subject = 'Tracking proof 9f3a';
+    gmail.recipients = [{ emailAddress: 'person@example.com' }];
+    gmail.cc = [{ emailAddress: 'other@example.com' }];
+    gmail.setDraftId('msg-a:draft_9f3a');
+    const body = gmail.view().getBodyElement();
+    const before = body?.innerHTML || '';
+    const tracking = deps();
+    const id = attachSdkComposeTracking(gmail.view(), tracking);
+    await vi.waitFor(() => expect(getComposeSession(id)?.modifierRegistered).toBe(true));
+    expect(body?.innerHTML).toBe(before);
+    expect(document.documentElement.innerHTML).not.toContain('/open/trk_');
+
+    let cancelled = false;
+    gmail.emit('presending', {
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    expect(cancelled).toBe(false);
+
+    const outbound = '<div>Hello <a href="https://example.com/docs">docs</a><img src="https://cdn.example/a.png"></div>';
+    const payload = await gmail.deliverSend(outbound, false);
+    expect(payload.invoked).toBe(true);
+    expect(payload.body).toContain('https://track.example/open/trk_1');
+    expect(payload.body.match(/\/open\/trk_1/g)).toHaveLength(1);
+    expect(payload.body).toContain('https://track.example/c/');
+    expect(payload.body).not.toContain('href="https://example.com/docs"');
+    expect(payload.body).toContain('https://cdn.example/a.png');
+    expect(payload.body).toContain('Hello');
+    expect(body?.innerHTML).toBe(before);
+    expect(getComposeSession(id)?.modifierInvocationCount).toBe(1);
+    expect(getComposeSession(id)?.modifierSawPixel).toBe(true);
+
+    const again = await gmail.deliverSend(payload.body, false);
+    expect(again.body.match(/\/open\/trk_1/g)).toHaveLength(1);
+
+    gmail.emit('sent', {
+      getMessageID: async () => 'msg-f:sent-1',
+      getThreadID: async () => 'thread-f:thread-1',
+    });
+    await vi.waitFor(() => expect(tracking.sent).toHaveLength(1));
+    expect(tracking.sent[0]).toMatchObject({
+      trackingId: 'trk_1',
+      status: 'SENT',
+      gmail_message_id: 'sent-1',
+      gmail_thread_id: 'thread-1',
+      recipients: ['person@example.com', 'other@example.com'],
+    });
+    expect(tracking.sent[0]?.sent_at).toEqual(expect.any(String));
+  });
+
+  it('leaves a true plain-text body unchanged', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness();
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    gmail.setDraftId('draft-plain');
+    const id = attachSdkComposeTracking(gmail.view(), deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.modifierRegistered).toBe(true));
+    const payload = await gmail.deliverSend('Hi <there>', true);
+    expect(payload.invoked).toBe(true);
+    expect(payload.body).toBe('Hi <there>');
+    expect(payload.body).not.toContain('/open/');
+    expect(getComposeSession(id)?.lastError).toMatch(/Plain-text/);
+  });
+
+  it('registers after the draft appears and does not cancel a ready send', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness();
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    const id = attachSdkComposeTracking(gmail.view(), deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.trackingId).toBe('trk_1'));
+    expect(getComposeSession(id)?.modifierRegistered).toBe(false);
+    const early = await gmail.deliverSend('<p>Hi</p>');
+    expect(early.invoked).toBe(false);
+    expect(early.body).toBe('<p>Hi</p>');
+    gmail.setDraftId('draft-later');
+    gmail.emit('draftSaved');
+    await vi.waitFor(() => expect(getComposeSession(id)?.modifierRegistered).toBe(true));
+    const payload = await gmail.deliverSend('<p>Hi</p>');
+    expect(payload.invoked).toBe(true);
+    expect(payload.body).toContain('/open/trk_1');
+  });
+
+  it('cancels send once to bind the modifier, then lets the retried send through', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness();
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    const id = attachSdkComposeTracking(gmail.view(), deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.trackingId).toBe('trk_1'));
+    const cancels: boolean[] = [];
+    gmail.emit('presending', {
+      cancel: () => {
+        cancels.push(true);
+      },
+    });
+    expect(cancels).toEqual([true]);
+    expect(gmail.sendCalls).toBe(0);
+    gmail.setDraftId('draft-recover');
+    await vi.waitFor(() => expect(gmail.sendCalls).toBe(1));
+    expect(getComposeSession(id)?.modifierRegistered).toBe(true);
+    expect(cancels).toEqual([true]);
+    const payload = await gmail.deliverSend('<p>Recovered</p>');
+    expect(payload.body).toContain('/open/trk_1');
+  });
+
+  it('sends without a pixel when the draft id never appears', async () => {
     resetComposeSessionsForTests();
     vi.useFakeTimers();
     try {
-      let modifier: ((params: { body: string }) => Promise<{ body: string }>) | null = null;
-      const view: SdkComposeView = {
-        registerRequestModifier(fn) {
-          modifier = fn;
-        },
-        on() {},
-        getSubject: () => 'Hello',
-        getToRecipients: () => [{ emailAddress: 'a@b.com' }],
-        getElement: () => document.createElement('div'),
-      };
-      attachSdkComposeTracking(view, {
-        ...deps(),
-        createTracked: () => new Promise(() => undefined),
-      });
-      const pending = modifier?.({ body: '<p>Hi</p>' });
-      await vi.advanceTimersByTimeAsync(TRACKING_READY_WAIT_MS);
-      const result = await pending;
-      expect(result?.body).toBe('<p>Hi</p>');
-      expect(planTrackingInjection(undefined)).toBe('send-untracked');
+      const gmail = new GmailComposeSendHarness();
+      gmail.recipients = [{ emailAddress: 'a@b.com' }];
+      const id = attachSdkComposeTracking(gmail.view(), deps());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getComposeSession(id)?.trackingId).toBe('trk_1');
+      gmail.emit('presending', { cancel: () => undefined });
+      await vi.advanceTimersByTimeAsync(DRAFT_READY_TIMEOUT_MS + 50);
+      expect(gmail.sendCalls).toBe(1);
+      expect(getComposeSession(id)?.modifierRegistered).toBe(false);
+      expect(getComposeSession(id)?.lastError).toMatch(/without a pixel/);
+      const payload = await gmail.deliverSend('<p>Untracked</p>');
+      expect(payload.invoked).toBe(false);
+      expect(payload.body).toBe('<p>Untracked</p>');
     } finally {
       vi.useRealTimers();
       resetComposeSessionsForTests();
     }
   });
 
-  it('waits until send to add the pixel if the recipient was not there yet', async () => {
+  it('does not rebind the modifier when the draft id changes after registration', async () => {
     resetComposeSessionsForTests();
-    let modifier: ((params: { body: string; isPlainText?: boolean }) => Promise<{ body: string; ishtml?: '1' }>) | null = null;
-    let recipients: Array<{ emailAddress: string }> = [];
-    const element = document.createElement('div');
-    const view: SdkComposeView = {
-      registerRequestModifier(fn) {
-        modifier = fn;
-      },
-      on() {},
-      getSubject: () => 'Hello',
-      getToRecipients: () => recipients,
-      getElement: () => element,
-    };
-    const id = attachSdkComposeTracking(view, deps());
-    await vi.waitFor(() => expect(getComposeSession(id)?.inflight).toBeNull());
-    expect(getComposeSession(id)?.ready).toBe(false);
-    recipients = [{ emailAddress: 'a@b.com' }];
-    const result = await modifier?.({ body: '<p>Hi</p>' });
-    expect(result?.body).toContain('https://track.example/open/trk_1');
-    expect(getComposeSession(id)?.ready).toBe(true);
+    const gmail = new GmailComposeSendHarness();
+    gmail.recipients = [{ emailAddress: 'a@b.com' }];
+    gmail.setDraftId('draft-first');
+    const id = attachSdkComposeTracking(gmail.view(), deps());
+    await vi.waitFor(() => expect(getComposeSession(id)?.modifierRegistered).toBe(true));
+    expect(gmail.modifierCount()).toBe(1);
+    gmail.setDraftId('draft-second');
+    gmail.emit('draftSaved');
+    await vi.waitFor(() => expect(getComposeSession(id)?.lastError).toMatch(/Draft id changed/));
+    expect(gmail.modifierCount()).toBe(1);
+    expect(getComposeSession(id)?.gmailDraftId).toBe('draft-first');
+    const payload = await gmail.deliverSend('<p>Moved</p>');
+    expect(payload.invoked).toBe(false);
+    expect(payload.body).toBe('<p>Moved</p>');
   });
 
-  it('turns a plain-text send into html that contains the pixel', async () => {
-    resetComposeSessionsForTests();
-    let modifier: ((params: { body: string; isPlainText?: boolean }) => Promise<{ body: string; ishtml?: '1' }>) | null = null;
-    const element = document.createElement('div');
-    const view: SdkComposeView = {
-      registerRequestModifier(fn) {
-        modifier = fn;
-      },
-      on() {},
-      getSubject: () => 'Hello',
-      getToRecipients: () => [{ emailAddress: 'a@b.com' }],
-      getElement: () => element,
-    };
-    const id = attachSdkComposeTracking(view, deps());
-    await vi.waitFor(() => expect(getComposeSession(id)?.ready).toBe(true));
-    const result = await modifier?.({ body: 'Hi <there>', isPlainText: true });
-    expect(result?.ishtml).toBe('1');
-    expect(result?.body).toContain('Hi &lt;there&gt;');
-    expect(result?.body).toContain('/open/trk_1');
-    expect(trackedOutgoingBody('Hi', true, undefined).body).toBe('Hi');
-  });
-
-  it('stamps the live compose body when tracking becomes ready', async () => {
-    resetComposeSessionsForTests();
-    const element = document.createElement('div');
-    const body = document.createElement('div');
-    body.innerHTML = '<p>Hi</p>';
-    element.append(body);
-    const view: SdkComposeView = {
-      on() {},
-      getSubject: () => 'Hello',
-      getToRecipients: () => [{ emailAddress: 'a@b.com' }],
-      getBodyElement: () => body,
-      getElement: () => element,
-    };
-
-    const id = attachSdkComposeTracking(view, deps());
-    await vi.waitFor(() => expect(getComposeSession(id)?.ready).toBe(true));
-
-    expect(body.innerHTML).toContain('https://track.example/open/trk_1');
-    expect(body.innerHTML).toContain('<p>Hi</p>');
-  });
-
-  it('registers the send modifier again after the draft id appears', () => {
-    resetComposeSessionsForTests();
-    let modifier: unknown = null;
-    let calls = 0;
-    let presend: ((event?: { cancel?: () => void }) => void) | null = null;
-    const view: SdkComposeView = {
-      registerRequestModifier(fn) {
-        calls += 1;
-        if (calls === 1) throw new Error('no draft');
-        modifier = fn;
-      },
-      on(event, cb) {
-        if (event === 'presending') presend = cb as typeof presend;
-      },
-      getSubject: () => 'Hello',
-      getToRecipients: () => [{ emailAddress: 'a@b.com' }],
-      getElement: () => document.createElement('div'),
-    };
-    attachSdkComposeTracking(view, deps());
-    expect(modifier).toBeNull();
-    presend?.({});
-    expect(modifier).toBeTypeOf('function');
-  });
-
-  it('injects a preallocated pixel without cancelling send', async () => {
-    resetComposeSessionsForTests();
-    let modifier: ((params: { body: string; isPlainText?: boolean }) => Promise<{ body: string }>) | null = null;
-    const cancelled = false;
-    const element = document.createElement('div');
-    element.id = 'compose-a';
-    element.innerHTML = '<div aria-label="Message Body"><p>Hi <a href="https://example.com/docs">docs</a></p></div>';
-    const body = element.querySelector<HTMLElement>('[aria-label="Message Body"]')!;
-    const view: SdkComposeView = {
-      registerRequestModifier(fn) {
-        modifier = fn;
-      },
-      on() {},
-      getSubject: () => 'Hello',
-      getToRecipients: () => [{ emailAddress: 'a@b.com' }],
-      getBodyElement: () => body,
-      getElement: () => element,
-    };
-    const id = attachSdkComposeTracking(view, deps());
-    await vi.waitFor(() => expect(getComposeSession(id)?.ready).toBe(true));
-    const result = await modifier?.({
-      body: '<p>Hi <a href="https://example.com/docs">docs</a></p>',
+  it('does not loop when presending recovery calls send', () => {
+    const session = createTrackingSession({
+      composeSessionId: 'c1',
+      kind: 'new',
+      trackOpens: true,
+      trackLinks: true,
     });
-    expect(cancelled).toBe(false);
-    expect(result?.body).toContain('https://track.example/open/trk_1');
-    expect(result?.body).toContain('https://track.example/c/clk_1');
-    expect(result?.body).not.toContain('https://example.com/docs');
-  });
-
-  it('keeps separate state for reply and forward windows', async () => {
-    resetComposeSessionsForTests();
-    document.body.innerHTML = `
-      <div role="dialog" aria-label="Reply">
-        <span email="a@b.com"></span>
-        <div aria-label="Message Body"><p>Hi</p></div>
-        <div data-tooltip="Send"></div>
-      </div>
-      <div role="dialog" aria-label="Forward">
-        <span email="c@d.com"></span>
-        <div aria-label="Message Body"><p>FYI <a href="https://example.com/docs">docs</a></p></div>
-        <div data-tooltip="Send"></div>
-      </div>`;
-    const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')];
-    const tracking = deps();
-    const ids = dialogs.map((dialog) => prepareDomCompose(dialog, tracking));
-    expect(new Set(ids).size).toBe(2);
-    await vi.waitFor(() => expect(listComposeSessions().filter((session) => session.ready)).toHaveLength(2));
-    expect(listComposeSessions().map((session) => session.kind).sort()).toEqual(['forward', 'reply']);
-    expect(listComposeSessions().map((session) => session.trackingId)).toEqual(['trk_1', 'trk_2']);
-    installDomComposeTracking({ ...deps(), sdkOwnsCompose: () => false });
-    const send = dialogs[0]!.querySelector('[data-tooltip="Send"]')!;
-    const event = new Event('pointerdown', { bubbles: true, cancelable: true });
-    send.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(false);
-    expect(dialogs[0]!.querySelector('[aria-label="Message Body"]')?.innerHTML).toContain('/open/trk_1');
-    expect(dialogs[1]!.querySelector('[aria-label="Message Body"]')?.innerHTML || '').not.toContain('/open/trk_1');
-  });
-
-  it('cancels presending, stamps the compose body with pixel HTML, and calls view.send', async () => {
-    resetComposeSessionsForTests();
-    const element = document.createElement('div');
-    const body = document.createElement('div');
-    body.innerHTML = '<p>Hello friend</p>';
-    element.append(body);
-    let presendCb: ((event: { cancel: () => void }) => void) | null = null;
-    let cancelled = false;
-    let sendCalls = 0;
-    const view: SdkComposeView = {
-      registerRequestModifier() {},
-      on(event, cb) {
-        if (event === 'presending') presendCb = cb as typeof presendCb;
-      },
-      getSubject: () => 'Test Subject',
-      getToRecipients: () => [{ emailAddress: 'friend@example.com' }],
-      getBodyElement: () => body,
-      getHTMLContent: () => body.innerHTML,
-      setBodyHTML: (html: string) => {
-        body.innerHTML = html;
-      },
-      getElement: () => element,
-      send: () => {
-        sendCalls += 1;
-        // Trigger presending again as real InboxSDK does on view.send()
-        presendCb?.({
-          cancel: () => {
-            cancelled = true;
-          },
-        });
-      },
-    };
-
-    attachSdkComposeTracking(view, deps());
-
-    // First send attempt by user
-    let firstCancelled = false;
-    presendCb?.({
-      cancel: () => {
-        firstCancelled = true;
-      },
-    });
-
-    expect(firstCancelled).toBe(true);
-
-    // Wait for the async ensureReady, stampBody, and view.send() to complete
-    await vi.waitFor(() => expect(sendCalls).toBe(1));
-
-    // Compose body must contain the tracking pixel
-    expect(body.innerHTML).toContain('https://track.example/open/trk_1');
-    expect(body.innerHTML).toContain('<p>Hello friend</p>');
-    // The second send from releasing pass was not cancelled
-    expect(cancelled).toBe(false);
+    expect(decidePresending(session, true)).toBe('recover');
+    session.sendRecoveryAttempted = true;
+    expect(decidePresending(session, true)).toBe('allow');
+    session.sendRecoveryAttempted = false;
+    session.modifierRegistered = true;
+    session.trackingId = 'trk_1';
+    session.pixelUrl = 'https://track.example/open/trk_1';
+    expect(decidePresending(session, true)).toBe('allow');
   });
 });
-

@@ -9,7 +9,8 @@ export default defineSchema({
     recipients: v.array(v.string()),
     gmailThreadId: v.union(v.string(), v.null()),
     gmailMessageId: v.union(v.string(), v.null()),
-    sentAt: v.string(),
+    status: v.optional(v.union(v.literal("PENDING"), v.literal("SENT"), v.literal("CANCELLED"), v.literal("FAILED"))),
+    sentAt: v.union(v.string(), v.null()),
     firstOpenedAt: v.union(v.string(), v.null()),
     lastOpenedAt: v.union(v.string(), v.null()),
     openCount: v.number(),
@@ -34,6 +35,7 @@ export default defineSchema({
     ipHash: v.union(v.string(), v.null()),
     suspectedSelfOpen: v.boolean(),
     confidence: v.number(),
+    classification: v.optional(v.union(v.literal("RECIPIENT_LIKELY"), v.literal("SELF_LIKELY"), v.literal("UNKNOWN"))),
     clickId: v.union(v.string(), v.null()),
     destination: v.union(v.string(), v.null()),
   })

@@ -18,10 +18,10 @@ import {
   type InboxSdkLike,
   type QueuedGmailAction,
 } from '@gi/gmail';
-import type { CreateTrackedEmailInput, CreateTrackedEmailResult, TrackedEmailSummary } from '@gi/tracking';
+import type { CreateTrackedEmailInput, CreateTrackedEmailResult, TrackedEmailPatch, TrackedEmailSummary } from '@gi/tracking';
 import { applyCategoryChip, rowsForThread } from './chips';
 import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
-import { attachSdkComposeTracking, installDomComposeTracking, prepareDomCompose } from './compose-tracking';
+import { attachSdkComposeTracking, type ComposeTrackingSession } from './compose-tracking';
 import { installSentStatus, type SentStatusController } from './sent-status';
 import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
 import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
@@ -48,19 +48,37 @@ function runtimeAlive(): boolean {
   }
 }
 
-function send<T>(message: unknown): Promise<T | undefined> {
+function send<T>(message: unknown, timeoutMs = 12_000): Promise<T | undefined> {
   if (!runtimeAlive()) return Promise.resolve(undefined);
   return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(undefined);
+    }, timeoutMs);
+
     try {
       const pending = chrome.runtime.sendMessage(message, (response) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         if (!runtimeAlive() || chrome.runtime.lastError) {
           resolve(undefined);
           return;
         }
         resolve(response as T);
       });
-      void Promise.resolve(pending).catch(() => resolve(undefined));
+      void Promise.resolve(pending).catch(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(undefined);
+      });
     } catch {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       resolve(undefined);
     }
   });
@@ -75,7 +93,6 @@ async function tryLoadInboxSdk(): Promise<InboxSdkLike | null> {
   const appId = settings.inboxSdkAppId.trim();
   if (!appId) return null;
   try {
-    await send({ type: 'ENSURE_INBOXSDK_PAGEWORLD' });
     const mod = await import('@inboxsdk/core');
     const loader = (mod as { load?: (version: number, appId: string, opts?: { appName?: string }) => Promise<unknown> }).load;
     if (!loader) return null;
@@ -113,8 +130,8 @@ function currentIslandMode(): IslandMode {
   try {
     const stored = sessionStorage.getItem('gi.island');
     if (stored === 'docked' || stored === 'open' || stored === 'expanded') {
-      islandMode = stored;
-      return stored;
+      islandMode = stored === 'expanded' ? 'open' : stored;
+      return islandMode;
     }
   } catch {
     /* sessionStorage can throw on hardened pages */
@@ -134,6 +151,7 @@ async function boot(): Promise<void> {
     sdkReady = bound;
     if (bound) mountSdkUi(sdk);
   }
+  reportTracking(null);
   await adapter.start((event) => {
     if (event.type === 'VISIBLE_ROWS_CHANGED') {
       const threads = event.rows.map((row) => normalizeVisibleRow(row, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom'));
@@ -152,9 +170,8 @@ async function boot(): Promise<void> {
       }
       if (!sdkReady) showDomThreadPanel(event.thread.threadId);
     }
-    if (event.type === 'COMPOSE_OPENED') {
-      const compose = document.querySelector<HTMLElement>(`[data-gi-compose-id="${CSS.escape(event.compose.composeId)}"]`);
-      if (compose && !sdkOwnsCompose) prepareDomCompose(compose, trackingDeps());
+    if (event.type === 'COMPOSE_OPENED' && !sdkOwnsCompose) {
+      reportTracking(null);
     }
     if (event.type === 'ROUTE_CHANGED' && !/#\/[A-Za-z0-9]/.test(location.hash)) {
       currentThreadId = null;
@@ -178,7 +195,6 @@ async function boot(): Promise<void> {
       linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
     },
   });
-  installDomComposeTracking({ ...trackingDeps(), sdkOwnsCompose: () => sdkOwnsCompose });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
       settings = { ...settings, ...(changes.settings.newValue as ExtensionSettings) };
@@ -211,11 +227,44 @@ function trackingDeps() {
     getSettings: () => settings,
     refreshSettings,
     createTracked,
-    linkTracked,
+    markSent,
+    cancelTracked,
+    syncLinks,
+    reportDiagnostics: reportTracking,
     onSent: ({ subject, recipients, bodyText }: { subject: string; recipients: string[]; bodyText: string }) => {
       void send({ type: 'OUTGOING_COMPOSE', subject, recipients, bodyText, threadId: currentThreadId || 'sent' });
     },
   };
+}
+
+function reportTracking(session: ComposeTrackingSession | null): void {
+  const head = document.head;
+  void send({
+    type: 'REPORT_TRACKING',
+    report: {
+      inboxSdkLoaded: sdkReady,
+      composeHookAttached: sdkOwnsCompose,
+      pageWorldInjected: head?.getAttribute('data-inboxsdk-script-injected') === 'true',
+      pageWorldReady: Boolean(head?.getAttribute('data-inboxsdk-user-email-address')),
+      last: session
+        ? {
+            composeSessionId: session.composeSessionId,
+            kind: session.kind,
+            state: session.state,
+            trackingId: session.trackingId,
+            allocation: Boolean(session.trackingId),
+            draftId: Boolean(session.gmailDraftId),
+            modifierRegistered: session.modifierRegistered,
+            modifierInvoked: session.modifierInvocationCount > 0,
+            pixelPresent: session.modifierSawPixel,
+            gmailSent: session.state === 'SENT',
+            gmailIdsLinked: Boolean(session.gmailThreadId || session.gmailMessageId),
+            lastError: session.lastError,
+            logs: session.logs,
+          }
+        : null,
+    },
+  });
 }
 
 function mountSdkUi(sdk: InboxSdkLike): void {
@@ -371,10 +420,10 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
   const preview = summaryLine ? null : note?.preview || null;
   const pending = summaryLine
     ? null
-    : note?.pending
-      ? 'Analyzing thread…'
-      : preview
-        ? null
+    : preview
+      ? null
+      : note?.pending
+        ? 'Analyzing thread…'
         : note?.reason || (intel?.classification ? null : 'Analyzing thread…');
   root.render(
     createElement(ThreadIntelCard, {
@@ -418,32 +467,64 @@ function previewLine(thread: NormalizedThread): string | null {
 
 async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
   const hasBody = thread.messages.some((message) => message.bodyText.trim().length > 0);
-  summaryNotes.set(thread.threadId, { pending: hasBody, reason: null, preview: null });
-  await refreshThread(thread.threadId);
-  const direction = thread.route === 'sent' ? 'outbound' : 'inbound';
-  await send({ type: 'INGEST_THREAD', direction, thread });
-  if (!hasBody) {
-    summaryNotes.set(thread.threadId, { pending: false, reason: 'The message text is not on screen yet.', preview: null });
-    await refreshThread(thread.threadId);
-    return;
-  }
-  const res = await send<{ ok?: boolean; reason?: string }>({
-    type: 'SUMMARIZE_THREAD',
-    threadId: thread.threadId,
-    subject: thread.subject,
-    messages: thread.messages.map((message) => ({
-      sender: message.sender.email,
-      bodyText: message.bodyText,
-      timestamp: message.timestamp || '',
-    })),
-  });
-  const fallback = res?.ok ? null : previewLine(thread);
+  const preview = previewLine(thread);
   summaryNotes.set(thread.threadId, {
-    pending: false,
-    reason: res?.ok ? null : res?.reason || null,
-    preview: fallback,
+    pending: hasBody && !preview,
+    reason: null,
+    preview,
   });
   await refreshThread(thread.threadId);
+
+  try {
+    const direction = thread.route === 'sent' ? 'outbound' : 'inbound';
+    const ingestPromise = send({ type: 'INGEST_THREAD', direction, thread });
+    if (!hasBody) {
+      summaryNotes.set(thread.threadId, {
+        pending: false,
+        reason: 'The message text is not on screen yet.',
+        preview: null,
+      });
+      await refreshThread(thread.threadId);
+      await ingestPromise;
+      return;
+    }
+    const res = await send<{ ok?: boolean; oneLine?: string; reason?: string }>({
+      type: 'SUMMARIZE_THREAD',
+      threadId: thread.threadId,
+      subject: thread.subject,
+      messages: thread.messages.map((message) => ({
+        sender: message.sender?.email || 'unknown@local',
+        bodyText: message.bodyText,
+        timestamp: message.timestamp || '',
+      })),
+    });
+    const fallback = res?.ok ? null : (preview || previewLine(thread));
+    summaryNotes.set(thread.threadId, {
+      pending: false,
+      reason: res?.ok ? null : res?.reason || null,
+      preview: fallback,
+    });
+    await refreshThread(thread.threadId);
+    await ingestPromise;
+  } catch (error) {
+    console.warn('[gi] summarizeOpenThread error', error);
+    summaryNotes.set(thread.threadId, {
+      pending: false,
+      reason: null,
+      preview: preview || previewLine(thread),
+    });
+    await refreshThread(thread.threadId);
+  } finally {
+    const current = summaryNotes.get(thread.threadId);
+    if (current?.pending) {
+      summaryNotes.set(thread.threadId, {
+        pending: false,
+        reason: current.reason,
+        preview: current.preview || previewLine(thread),
+      });
+      await refreshThread(thread.threadId);
+    }
+  }
 }
 
 function getIntel(threadId: string): Promise<ThreadIntelData | undefined> {
@@ -461,6 +542,20 @@ async function createTracked(input: CreateTrackedEmailInput): Promise<CreateTrac
     pixel_url: res.pixel_url,
     rewritten_links: res.rewritten_links || [],
   };
+}
+
+function markSent(patch: TrackedEmailPatch & { trackingId: string }): void {
+  void send({ type: 'MARK_TRACKED_SENT', ...patch }).then(() => {
+    void send({ type: 'TRACKING_POLL' });
+  });
+}
+
+function cancelTracked(trackingId: string): void {
+  void send({ type: 'CANCEL_TRACKED_EMAIL', trackingId });
+}
+
+function syncLinks(update: { trackingId: string; links: Array<{ click_id: string; url: string }> }): void {
+  void send({ type: 'SYNC_TRACKED_LINKS', ...update });
 }
 
 function linkTracked(link: { trackingId: string; gmailThreadId: string | null; gmailMessageId: string | null }): void {
@@ -780,7 +875,7 @@ async function runCommand(id: string): Promise<void> {
       threadId,
       subject: opened?.subject || '',
       messages: (opened?.messages || []).map((message) => ({
-        sender: message.sender.email,
+        sender: message.sender?.email || 'unknown@local',
         bodyText: message.bodyText,
         timestamp: message.timestamp || '',
       })),

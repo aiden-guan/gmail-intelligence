@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { DEFAULT_SETTINGS, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
-import { trackerPermissionOrigin } from '@gi/tracking';
+import { trackerHealthLabel, trackerPermissionOrigin, type TrackerHealthStatus } from '@gi/tracking';
 import { AiConnect } from '../setup/AiConnect';
 
 const CATEGORIES: ThreadCategory[] = ['RESPOND', 'WAITING', 'FYI', 'NOTIFICATIONS', 'PROMOTIONS', 'NEWS'];
@@ -12,13 +12,33 @@ export function SettingsApp() {
   const [changeAi, setChangeAi] = useState(false);
   const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
   const [rules, setRules] = useState('');
+  const [trackerHealth, setTrackerHealth] = useState<TrackerHealthStatus | null>(null);
+
+  const checkTracker = useCallback((current: ExtensionSettings) => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+    chrome.runtime.sendMessage(
+      {
+        type: 'CHECK_TRACKER',
+        trackingEnabled: current.trackingEnabled,
+        trackerBaseUrl: current.trackerBaseUrl,
+        personalApiToken: current.personalApiToken,
+      },
+      (res?: { status?: TrackerHealthStatus }) => {
+        if (res?.status) setTrackerHealth(res.status);
+      },
+    );
+  }, []);
 
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res?: { settings?: ExtensionSettings }) => {
-      if (res?.settings) setSettings({ ...DEFAULT_SETTINGS, ...res.settings });
+      if (res?.settings) {
+        const next = { ...DEFAULT_SETTINGS, ...res.settings };
+        setSettings(next);
+        checkTracker(next);
+      }
     });
-  }, []);
+  }, [checkTracker]);
 
   function update<K extends keyof ExtensionSettings>(key: K, value: ExtensionSettings[K]) {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -37,6 +57,7 @@ export function SettingsApp() {
         if (res?.settings) {
           setSettings(res.settings);
           setSaved(true);
+          checkTracker(res.settings);
         }
       });
     };
@@ -94,7 +115,10 @@ export function SettingsApp() {
         <Toggle label="Track opens" checked={settings.trackOpens} onChange={(on) => update('trackOpens', on)} />
         <Toggle label="Track links" checked={settings.trackLinks} onChange={(on) => update('trackLinks', on)} />
         <p className="gi-muted text-xs">
-          Connection: {settings.trackerBaseUrl && settings.personalApiToken ? 'Configured' : 'Needs setup'}
+          Connection: {trackerHealth ? trackerHealthLabel(trackerHealth) : 'Checking…'}
+        </p>
+        <p className="gi-muted text-xs">
+          Tracking ready means a tracker record exists and Gmail’s send request can be rewritten. The compose window itself does not load the tracking image.
         </p>
       </Section>
 
@@ -194,6 +218,7 @@ export function SettingsApp() {
             <button type="button" className="gi-btn gi-btn-ghost" onClick={() => chrome.runtime.sendMessage({ type: 'CLEAR_INDEX' })}>Clear local mail index</button>
             <button type="button" className="gi-btn gi-btn-ghost" onClick={() => chrome.runtime.sendMessage({ type: 'RUN_DIAGNOSTICS' }, (next) => setDiag(next))}>Run diagnostics</button>
           </div>
+          {diag?.trackingReport ? <pre className="gi-pre">{String(diag.trackingReport)}</pre> : null}
           {diag ? <pre className="gi-pre">{JSON.stringify(diag, null, 2)}</pre> : null}
           <p className="gi-muted text-xs">ChatGPT web sign-in is experimental and may stop working when ChatGPT’s website changes.</p>
         </Section>

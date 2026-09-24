@@ -21,7 +21,7 @@ This environment did not sign in to Gmail, so the flows below are **not** claime
 3. Click Respond in the Gmail sidebar or the extension side panel. The list is local threads, not a Gmail search. Opening a row goes to that thread.
 4. On a Respond thread, click Draft reply. Gmail’s reply box opens with the draft. The extension does not send it.
 5. With two Gmail tabs open, turn on auto-archive only if you intend to test it. The inactive pinned worker tab should move, not the tab you are reading.
-6. Compose with tracking configured. Send should feel immediate. If the tracker is slow, the message still sends. A sent row shows ✓ until an open is detected, then ✓✓.
+6. Tracking acceptance is [docs/tracking-debug.md](tracking-debug.md). Send should feel immediate. If the tracker is down, the message still sends. A sent row stays **Sent** until an OPEN event exists, then **Opened**. Do not treat a tracker record by itself as an open. The raw MIME check in that doc was not run in this environment.
 
 ## Honest degradation
 

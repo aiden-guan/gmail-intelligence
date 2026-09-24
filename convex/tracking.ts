@@ -8,7 +8,9 @@ const emailArgs = {
   recipients: v.array(v.string()),
   gmailThreadId: v.union(v.string(), v.null()),
   gmailMessageId: v.union(v.string(), v.null()),
-  sentAt: v.string(),
+  status: v.optional(v.union(v.literal("PENDING"), v.literal("SENT"), v.literal("CANCELLED"), v.literal("FAILED"))),
+  sentAt: v.union(v.string(), v.null()),
+  createdAt: v.string(),
   links: v.array(v.object({ clickId: v.string(), destination: v.string() })),
 };
 
@@ -22,6 +24,7 @@ export const createEmail = internalMutation({
       recipients: args.recipients,
       gmailThreadId: args.gmailThreadId,
       gmailMessageId: args.gmailMessageId,
+      status: args.status || (args.sentAt ? "SENT" : "PENDING"),
       sentAt: args.sentAt,
       firstOpenedAt: null,
       lastOpenedAt: null,
@@ -29,7 +32,7 @@ export const createEmail = internalMutation({
       firstClickedAt: null,
       lastClickedAt: null,
       clickCount: 0,
-      createdAt: args.sentAt,
+      createdAt: args.createdAt,
     });
     for (const link of args.links) {
       await ctx.db.insert("trackedLinks", {
@@ -64,6 +67,12 @@ export const patchEmail = internalMutation({
     trackingId: v.string(),
     gmailThreadId: v.optional(v.union(v.string(), v.null())),
     gmailMessageId: v.optional(v.union(v.string(), v.null())),
+    status: v.optional(v.union(v.literal("PENDING"), v.literal("SENT"), v.literal("CANCELLED"), v.literal("FAILED"))),
+    sentAt: v.optional(v.union(v.string(), v.null())),
+    subject: v.optional(v.string()),
+    sender: v.optional(v.string()),
+    recipients: v.optional(v.array(v.string())),
+    links: v.optional(v.array(v.object({ clickId: v.string(), destination: v.string() }))),
   },
   handler: async (ctx, args) => {
     const rows = await ctx.db
@@ -72,10 +81,39 @@ export const patchEmail = internalMutation({
       .take(1);
     const row = rows[0];
     if (!row) return null;
-    const patch: { gmailThreadId?: string | null; gmailMessageId?: string | null } = {};
+    const patch: {
+      gmailThreadId?: string | null;
+      gmailMessageId?: string | null;
+      status?: "PENDING" | "SENT" | "CANCELLED" | "FAILED";
+      sentAt?: string | null;
+      subject?: string;
+      sender?: string;
+      recipients?: string[];
+    } = {};
     if (args.gmailThreadId !== undefined) patch.gmailThreadId = args.gmailThreadId;
     if (args.gmailMessageId !== undefined) patch.gmailMessageId = args.gmailMessageId;
+    if (args.status !== undefined) patch.status = args.status;
+    if (args.sentAt !== undefined) patch.sentAt = args.sentAt;
+    if (args.subject !== undefined) patch.subject = args.subject;
+    if (args.sender !== undefined) patch.sender = args.sender;
+    if (args.recipients !== undefined) patch.recipients = args.recipients;
+    if (patch.status === "SENT" && patch.sentAt === undefined && !row.sentAt) {
+      patch.sentAt = new Date().toISOString();
+    }
     if (Object.keys(patch).length) await ctx.db.patch(row._id, patch);
+    for (const link of args.links || []) {
+      const existing = await ctx.db
+        .query("trackedLinks")
+        .withIndex("by_clickId", (q) => q.eq("clickId", link.clickId))
+        .unique();
+      if (!existing) {
+        await ctx.db.insert("trackedLinks", {
+          clickId: link.clickId,
+          trackingId: args.trackingId,
+          destination: link.destination,
+        });
+      }
+    }
     return await ctx.db.get(row._id);
   },
 });
@@ -117,6 +155,7 @@ const eventArgs = {
   ipHash: v.union(v.string(), v.null()),
   suspectedSelfOpen: v.boolean(),
   confidence: v.number(),
+  classification: v.optional(v.union(v.literal("RECIPIENT_LIKELY"), v.literal("SELF_LIKELY"), v.literal("UNKNOWN"))),
   clickId: v.union(v.string(), v.null()),
   destination: v.union(v.string(), v.null()),
 };
@@ -156,6 +195,7 @@ export const recordOpenEvent = internalMutation({
       ipHash: args.ipHash,
       suspectedSelfOpen: args.suspectedSelfOpen,
       confidence: args.confidence,
+      classification: args.classification || "UNKNOWN",
       clickId: args.clickId,
       destination: args.destination,
     });
@@ -179,6 +219,7 @@ export const recordClick = internalMutation({
       ipHash: args.ipHash,
       suspectedSelfOpen: args.suspectedSelfOpen,
       confidence: args.confidence,
+      classification: args.classification || "UNKNOWN",
       clickId: args.clickId,
       destination: args.destination,
     });

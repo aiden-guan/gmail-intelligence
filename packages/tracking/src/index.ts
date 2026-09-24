@@ -6,14 +6,19 @@ import { z } from 'zod';
  * Send mail through Gmail normally; tracking injects pixel/links only.
  */
 
+export const TrackedEmailStatusSchema = z.enum(['PENDING', 'SENT', 'CANCELLED', 'FAILED']);
+export type TrackedEmailStatus = z.infer<typeof TrackedEmailStatusSchema>;
+
 export const TrackedEmailSchema = z.object({
   tracking_id: z.string().min(8),
   subject: z.string(),
   sender: z.string(),
   recipients: z.array(z.string()),
-  gmail_thread_id: z.string().optional(),
-  gmail_message_id: z.string().optional(),
-  sent_at: z.string(),
+  gmail_thread_id: z.string().nullable().optional(),
+  gmail_message_id: z.string().nullable().optional(),
+  status: TrackedEmailStatusSchema.optional(),
+  created_at: z.string().nullable().optional(),
+  sent_at: z.string().nullable(),
   first_opened_at: z.string().nullable().optional(),
   last_opened_at: z.string().nullable().optional(),
   open_count: z.number().default(0),
@@ -32,6 +37,7 @@ export const TrackingEventSchema = z.object({
   ip_hash: z.string().optional(),
   suspected_self_open: z.boolean().optional(),
   confidence: z.number().optional(),
+  classification: z.enum(['RECIPIENT_LIKELY', 'SELF_LIKELY', 'UNKNOWN']).optional(),
   click_id: z.string().optional(),
   destination: z.string().optional(),
 });
@@ -49,7 +55,21 @@ export type CreateTrackedEmailInput = {
 export type CreateTrackedEmailResult = {
   tracking_id: string;
   pixel_url: string;
+  status?: TrackedEmailStatus;
+  created_at?: string;
+  sent_at?: string | null;
   rewritten_links: Array<{ click_id: string; original: string; tracked_url: string }>;
+};
+
+export type TrackedEmailPatch = {
+  gmail_thread_id?: string | null;
+  gmail_message_id?: string | null;
+  status?: TrackedEmailStatus;
+  sent_at?: string | null;
+  subject?: string;
+  sender?: string;
+  recipients?: string[];
+  links?: Array<{ click_id: string; url: string }>;
 };
 
 export class TrackingClient {
@@ -108,10 +128,7 @@ export class TrackingClient {
     return res.json() as Promise<TrackedEmail[]>;
   }
 
-  async linkEmail(
-    id: string,
-    patch: { gmail_thread_id?: string | null; gmail_message_id?: string | null },
-  ): Promise<TrackedEmail> {
+  async linkEmail(id: string, patch: TrackedEmailPatch): Promise<TrackedEmail> {
     const res = await fetch(`${trim(this.baseUrl)}/api/emails/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: this.headers(),
@@ -175,22 +192,88 @@ export function applyTrackingToOutgoingHtml(
     trackLinks: boolean;
   },
 ): string {
+  return transformOutgoingHtml(html, opts).html;
+}
+
+export type OutgoingTransform = {
+  html: string;
+  linksRewritten: number;
+  pixelPresent: boolean;
+};
+
+/**
+ * Deterministic rewrite of the HTML Gmail is about to send.
+ * Safe to run more than once: an existing pixel and already-tracked links stay put.
+ */
+export function transformOutgoingHtml(
+  html: string,
+  opts: {
+    pixelUrl?: string | null;
+    linkMap?: Map<string, string>;
+    trackOpens: boolean;
+    trackLinks: boolean;
+    allocateTrackedUrl?: (originalUrl: string) => string | null;
+  },
+): OutgoingTransform {
+  const linkMap = opts.linkMap || new Map<string, string>();
+  let linksRewritten = 0;
   let next = html;
-  if (opts.trackLinks && opts.linkMap && opts.linkMap.size > 0) {
-    next = rewriteHtmlLinks(next, opts.linkMap);
+  if (opts.trackLinks) {
+    next = next.replace(/href=(["'])(.*?)\1/gi, (full, quote: string, raw: string) => {
+      const decoded = decodeHtmlAttr(raw);
+      if (!shouldRewriteLink(decoded)) return full;
+      const tracked = linkMap.get(raw) || linkMap.get(decoded) || opts.allocateTrackedUrl?.(decoded) || null;
+      if (!tracked || tracked === decoded || tracked === raw) return full;
+      linkMap.set(raw, tracked);
+      linkMap.set(decoded, tracked);
+      linksRewritten += 1;
+      return `href=${quote}${escapeAttr(tracked)}${quote}`;
+    });
   }
   if (opts.trackOpens && opts.pixelUrl) next = appendTrackingPixel(next, opts.pixelUrl);
-  return next;
+  const pixelPresent = Boolean(opts.pixelUrl && next.includes(opts.pixelUrl));
+  return { html: next, linksRewritten, pixelPresent };
+}
+
+/** Stable click id so a second pass of the same outgoing HTML does not allocate a new link. */
+export function stableClickId(trackingId: string, destination: string): string {
+  const input = `${trackingId}\n${canonicalDestination(destination)}`;
+  let a = 2166136261;
+  let b = 2166136261 ^ input.length;
+  for (let i = 0; i < input.length; i += 1) {
+    const code = input.charCodeAt(i);
+    a ^= code;
+    a = Math.imul(a, 16777619);
+    b ^= code + i;
+    b = Math.imul(b, 2246822519);
+  }
+  const hex = ((a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0')).slice(0, 16);
+  return `clk_${hex}`;
+}
+
+export function trackedClickUrl(origin: string, clickId: string): string {
+  return `${origin.replace(/\/$/, '')}/c/${clickId}`;
+}
+
+export function clickIdFromTrackedUrl(url: string): string | null {
+  try {
+    const match = new URL(url).pathname.match(/\/c\/([A-Za-z0-9_-]+)/);
+    return match?.[1] || null;
+  } catch {
+    return null;
+  }
 }
 
 export type TrackedEmailSummary = {
   trackingId: string;
+  status?: TrackedEmailStatus;
   subject: string;
   sender: string;
   recipients: string[];
   gmailThreadId: string | null;
   gmailMessageId: string | null;
-  sentAt: string;
+  createdAt?: string | null;
+  sentAt: string | null;
   firstOpenedAt: string | null;
   lastOpenedAt: string | null;
   openCount: number;
@@ -204,9 +287,11 @@ export function summaryFromRemote(
     subject: string;
     sender: string;
     recipients?: unknown;
+    status?: string | null;
     gmail_thread_id?: string | null;
     gmail_message_id?: string | null;
-    sent_at: string;
+    created_at?: string | null;
+    sent_at?: string | null;
     first_opened_at?: string | null;
     last_opened_at?: string | null;
     open_count?: number;
@@ -214,18 +299,27 @@ export function summaryFromRemote(
   },
   local?: TrackedEmailSummary | null,
 ): TrackedEmailSummary {
+  const remoteStatus = asStatus(row.status, row.sent_at);
+  const localAhead = local?.status === 'SENT' && remoteStatus === 'PENDING';
+  const status: TrackedEmailStatus = localAhead ? 'SENT' : remoteStatus;
+  const sentAt = status === 'PENDING' ? null : row.sent_at || local?.sentAt || null;
+  const recipients = asStringList(row.recipients);
+  const openCount = Math.max(row.open_count || 0, local?.openCount || 0);
+  const clickCount = Math.max(row.click_count || 0, local?.clickCount || 0);
   return {
     trackingId: row.tracking_id,
-    subject: row.subject || '',
-    sender: row.sender || '',
-    recipients: asStringList(row.recipients),
+    status,
+    subject: row.subject || local?.subject || '',
+    sender: row.sender || local?.sender || '',
+    recipients: recipients.length ? recipients : local?.recipients || [],
     gmailThreadId: row.gmail_thread_id || local?.gmailThreadId || null,
     gmailMessageId: row.gmail_message_id || local?.gmailMessageId || null,
-    sentAt: row.sent_at,
-    firstOpenedAt: row.first_opened_at ?? null,
-    lastOpenedAt: row.last_opened_at ?? null,
-    openCount: row.open_count || 0,
-    clickCount: row.click_count || 0,
+    createdAt: row.created_at || local?.createdAt || null,
+    sentAt,
+    firstOpenedAt: openCount === 0 ? null : earlierIso(row.first_opened_at, local?.firstOpenedAt),
+    lastOpenedAt: openCount === 0 ? null : laterIso(row.last_opened_at, local?.lastOpenedAt),
+    openCount,
+    clickCount,
     notifyIfNoReply: local?.notifyIfNoReply ?? false,
   };
 }
@@ -241,16 +335,17 @@ export function matchTrackedEmail(
   row: TrackingRowQuery,
   emails: TrackedEmailSummary[],
 ): TrackedEmailSummary | null {
+  const delivered = emails.filter(isDeliveredTrackedEmail);
   const ids = new Set(row.threadIds.map((id) => id.trim()).filter(Boolean));
   if (ids.size > 0) {
-    const byThread = emails.filter((email) => threadIdsMatch(email.gmailThreadId, ids));
+    const byThread = delivered.filter((email) => threadIdsMatch(email.gmailThreadId, ids));
     if (byThread.length > 0) return preferOpened(byThread);
   }
 
   const subject = normalizeSubject(row.subject);
   if (!subject) return null;
   const rowEmails = new Set(row.emails.map(normalizeEmail).filter(Boolean));
-  let candidates = emails.filter((email) => subjectsMatch(row.subject, email.subject));
+  let candidates = delivered.filter((email) => subjectsMatch(row.subject, email.subject));
   if (rowEmails.size > 0) {
     candidates = candidates.filter((email) =>
       email.recipients.some((recipient) => rowEmails.has(normalizeEmail(recipient))),
@@ -259,7 +354,7 @@ export function matchTrackedEmail(
   if (candidates.length === 1) return candidates[0];
   if (rowEmails.size === 0) return null;
   const sameThread = candidates.filter(
-    (email) => !email.gmailThreadId || ids.size === 0 || ids.has(email.gmailThreadId),
+    (email) => !email.gmailThreadId || ids.size === 0 || threadIdsMatch(email.gmailThreadId, ids),
   );
   return sameThread.length > 0 ? preferOpened(sameThread) : null;
 }
@@ -270,12 +365,13 @@ export function matchTrackedEmail(
  */
 export function applyRecentOpens(
   emails: TrackedEmailSummary[],
-  events: Array<{ tracking_id: string; type: string; timestamp: string }>,
+  events: Array<{ tracking_id: string; type: string; timestamp: string; classification?: string }>,
 ): TrackedEmailSummary[] {
   const byId = new Map(emails.map((email) => [email.trackingId, email]));
   const opens = new Map<string, { count: number; first: string; last: string }>();
   for (const event of events) {
     if (event.type !== 'OPEN' || !event.tracking_id || !event.timestamp) continue;
+    if (event.classification === 'SELF_LIKELY') continue;
     const slot = opens.get(event.tracking_id) || { count: 0, first: event.timestamp, last: event.timestamp };
     slot.count += 1;
     if (event.timestamp < slot.first) slot.first = event.timestamp;
@@ -306,7 +402,7 @@ function threadIdsMatch(stored: string | null, ids: Set<string>): boolean {
 }
 
 function canonicalThreadId(id: string): string {
-  return id.trim().replace(/^#/, '').replace(/^msg-a:/i, '');
+  return id.trim().replace(/^#/, '').replace(/^(msg-a:|msg-f:|thread-a:|thread-f:)/i, '');
 }
 
 /** Sent rows append the snippet or a category chip onto the subject. */
@@ -406,7 +502,7 @@ export function describeTrackingStatus(
   const headline = emphasis ? `${emphasis}${rest}` : opened ? `Opened ${ago}.` : rest;
 
   const detail =
-    opened && email.firstOpenedAt
+    opened && email.firstOpenedAt && email.sentAt
       ? `First opened ${formatAfterSend(email.sentAt, email.firstOpenedAt)}.`
       : opened
         ? `Last opened ${ago}.`
@@ -424,6 +520,16 @@ export function describeTrackingStatus(
   }
 
   const loopback = Boolean(opts?.trackerBaseUrl && isLoopbackTracker(opts.trackerBaseUrl));
+  const delivered = isDeliveredTrackedEmail(email);
+  const markLabel = opened
+    ? email.openCount > 1
+      ? `Opened ${email.openCount}×`
+      : 'Opened'
+    : clicked
+      ? 'Clicked'
+      : delivered
+        ? 'Sent'
+        : 'Not opened';
   return {
     opened: engaged,
     emphasis,
@@ -431,7 +537,7 @@ export function describeTrackingStatus(
     headline,
     detail,
     countLabel,
-    markLabel: opened ? 'Opened' : clicked ? 'Clicked' : 'Not opened',
+    markLabel,
     loopbackWarning: loopback
       ? 'Gmail loads tracking images from Google’s servers, which cannot reach this computer. Use a public tracker URL in Settings to record recipient opens.'
       : null,
@@ -536,7 +642,44 @@ function asStringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 function mostRecent(emails: TrackedEmailSummary[]): TrackedEmailSummary {
-  return [...emails].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0))[0];
+  return [...emails].sort((a, b) => (sentStamp(a) < sentStamp(b) ? 1 : sentStamp(a) > sentStamp(b) ? -1 : 0))[0];
+}
+
+function sentStamp(email: TrackedEmailSummary): string {
+  return email.sentAt || '';
+}
+
+function isDeliveredTrackedEmail(email: TrackedEmailSummary): boolean {
+  if (email.status === 'CANCELLED' || email.status === 'FAILED' || email.status === 'PENDING') return false;
+  if (email.status === 'SENT') return true;
+  return Boolean(email.sentAt);
+}
+
+function asStatus(status: string | null | undefined, sentAt: string | null | undefined): TrackedEmailStatus {
+  if (status === 'PENDING' || status === 'SENT' || status === 'CANCELLED' || status === 'FAILED') return status;
+  return sentAt ? 'SENT' : 'PENDING';
+}
+
+function earlierIso(a?: string | null, b?: string | null): string | null {
+  if (!a) return b || null;
+  if (!b) return a;
+  return a < b ? a : b;
+}
+
+function laterIso(a?: string | null, b?: string | null): string | null {
+  if (!a) return b || null;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+
+function canonicalDestination(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return url.trim();
+  }
 }
 
 function preferOpened(emails: TrackedEmailSummary[]): TrackedEmailSummary {
@@ -568,3 +711,21 @@ function clickCountLabel(count: number): string {
   if (count === 1) return 'Link clicked once';
   return `Link clicked ${count} times`;
 }
+
+export {
+  classifyOpenEvent,
+  formatTrackingReport,
+  inspectTrackedMime,
+  normalizeGmailId,
+  probeTracker,
+  trackerHealthLabel,
+} from './lifecycle.js';
+export type {
+  MimeTrackingInspection,
+  OpenClassification,
+  OpenVerdict,
+  TrackerHealthStatus,
+  TrackerProbe,
+  TrackingDiagnosticsReport,
+  TrackingSendReport,
+} from './lifecycle.js';

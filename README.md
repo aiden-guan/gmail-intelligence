@@ -88,7 +88,7 @@ A short onboarding page opens on a fresh install. After you change code, run `np
 npm run tracker
 ```
 
-Leave that process running. In the extension, open **Settings → Tracking**, paste the URL and token from `.local/tracker.txt`, and click **Save settings**. Compose in Gmail with tracking on, send the message, and open it. A notification says “Open detected”. Image blockers and Apple Mail Privacy can hide or fake that signal.
+Leave that process running. In the extension, open **Settings → Tracking**, paste the URL and token from `.local/tracker.txt`, and click **Save settings**. The connection line should say **Tracker healthy**. Compose in Gmail until the control says **Tracking ready**, then send. The pixel is added to Gmail’s outbound request, not to the compose box. Confirm it with **Sent → Show original** and a search for `/open/trk_`. The full check is in [docs/tracking-debug.md](docs/tracking-debug.md). Opening the message elsewhere should then show “Open detected”. Image blockers and Apple Mail Privacy can hide or fake that signal.
 
 Events stay in memory until you stop `npm run tracker`. Mailbox text is never sent to the tracker.
 
@@ -120,7 +120,7 @@ Use this if you want the tracker on Cloudflare instead of Convex.
 **Supabase**
 
 1. Create a project.
-2. Run `supabase/migrations/20260322000000_tracking.sql` in the SQL editor.
+2. Run `supabase/migrations/20260322000000_tracking.sql` and `supabase/migrations/20260923000000_tracking_status.sql` in the SQL editor.
 3. Copy the project URL and **service role** key into `.env` and `workers/tracker/.dev.vars`. The service role key stays on the worker. Never put it in the extension.
 
 **Cloudflare Worker**

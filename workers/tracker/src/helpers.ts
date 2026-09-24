@@ -10,6 +10,30 @@ export function safeRedirectUrl(url: string): string | null {
   }
 }
 
+export function classifyOpen(opts: {
+  sentAt: string | null;
+  now: number;
+  ua: string | null;
+}): {
+  classification: 'RECIPIENT_LIKELY' | 'SELF_LIKELY' | 'UNKNOWN';
+  suspected: boolean;
+  confidence: number;
+  countsAsOpen: boolean;
+} {
+  const sentMs = opts.sentAt ? Date.parse(opts.sentAt) : Number.NaN;
+  if (!opts.sentAt || !Number.isFinite(sentMs) || opts.now < sentMs) {
+    return { classification: 'SELF_LIKELY', suspected: true, confidence: 1, countsAsOpen: false };
+  }
+  const delta = opts.now - sentMs;
+  if (delta < 5000) {
+    return { classification: 'SELF_LIKELY', suspected: true, confidence: 0.5, countsAsOpen: true };
+  }
+  if (opts.ua && /Headless|Lighthouse/i.test(opts.ua)) {
+    return { classification: 'UNKNOWN', suspected: true, confidence: 0.3, countsAsOpen: true };
+  }
+  return { classification: 'RECIPIENT_LIKELY', suspected: false, confidence: 0, countsAsOpen: true };
+}
+
 export function suspectSelfOpen(opts: {
   sentAt: string | null;
   now: number;

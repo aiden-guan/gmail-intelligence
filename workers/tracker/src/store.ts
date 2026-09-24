@@ -13,21 +13,24 @@ export class StoreError extends Error {
   }
 }
 
+export type EmailStatus = 'PENDING' | 'SENT' | 'CANCELLED' | 'FAILED';
+
 export type EmailRow = {
   tracking_id: string;
+  status: EmailStatus;
   subject: string;
   sender: string;
   recipients: string[];
   gmail_thread_id: string | null;
   gmail_message_id: string | null;
-  sent_at: string;
+  created_at: string;
+  sent_at: string | null;
   first_opened_at: string | null;
   last_opened_at: string | null;
   open_count: number;
   first_clicked_at: string | null;
   last_clicked_at: string | null;
   click_count: number;
-  created_at: string;
 };
 
 export type LinkRow = {
@@ -45,6 +48,7 @@ export type EventRow = {
   ip_hash: string | null;
   suspected_self_open: boolean;
   confidence: number;
+  classification?: 'RECIPIENT_LIKELY' | 'SELF_LIKELY' | 'UNKNOWN';
   click_id?: string | null;
   destination?: string | null;
 };
@@ -110,7 +114,7 @@ function memoryStore(): TrackerStore {
     },
     async listEmails(limit) {
       return [...state.emails.values()]
-        .sort((a, b) => (a.sent_at < b.sent_at ? 1 : -1))
+        .sort((a, b) => ((a.sent_at || a.created_at) < (b.sent_at || b.created_at) ? 1 : -1))
         .slice(0, limit)
         .map((row) => ({ ...row, recipients: [...row.recipients] }));
     },

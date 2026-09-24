@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { safeRedirectUrl, suspectSelfOpen } from './helpers.js';
+import { safeRedirectUrl, classifyOpen } from './helpers.js';
 import { getStore, StoreError, type EmailRow, type TrackerStore } from './store.js';
 
-export { safeRedirectUrl, suspectSelfOpen } from './helpers.js';
+export { safeRedirectUrl, classifyOpen, suspectSelfOpen } from './helpers.js';
 
 export interface Env {
   SUPABASE_URL?: string;
@@ -19,6 +19,15 @@ const PatchEmailSchema = z
   .object({
     gmail_thread_id: z.string().max(128).nullable().optional(),
     gmail_message_id: z.string().max(128).nullable().optional(),
+    status: z.enum(['PENDING', 'SENT', 'CANCELLED', 'FAILED']).optional(),
+    sent_at: z.string().max(40).nullable().optional(),
+    subject: z.string().max(998).optional(),
+    sender: z.string().max(320).optional(),
+    recipients: z.array(z.string().max(320)).max(100).optional(),
+    links: z
+      .array(z.object({ click_id: z.string().regex(/^[\w-]+$/).max(80), url: z.string().url() }))
+      .max(50)
+      .optional(),
   })
   .strict();
 
@@ -139,23 +148,24 @@ async function handleCreateEmail(
 ): Promise<Response> {
   const body = CreateEmailSchema.parse(await request.json());
   const tracking_id = newId('trk');
-  const sent_at = new Date().toISOString();
+  const created_at = new Date().toISOString();
 
   const email: EmailRow = {
     tracking_id,
+    status: 'PENDING',
     subject: body.subject,
     sender: body.sender,
     recipients: body.recipients,
     gmail_thread_id: body.gmail_thread_id ?? null,
     gmail_message_id: body.gmail_message_id ?? null,
-    sent_at,
+    sent_at: null,
     first_opened_at: null,
     last_opened_at: null,
     open_count: 0,
     first_clicked_at: null,
     last_clicked_at: null,
     click_count: 0,
-    created_at: sent_at,
+    created_at,
   };
   await store.insertEmail(email);
 
@@ -179,6 +189,9 @@ async function handleCreateEmail(
   return json({
     tracking_id,
     pixel_url: `${origin}/open/${tracking_id}`,
+    status: 'PENDING',
+    created_at,
+    sent_at: null,
     rewritten_links,
   });
 }
@@ -211,7 +224,22 @@ async function handlePatchEmail(
   const patch: Partial<EmailRow> = {};
   if (parsed.data.gmail_thread_id !== undefined) patch.gmail_thread_id = parsed.data.gmail_thread_id;
   if (parsed.data.gmail_message_id !== undefined) patch.gmail_message_id = parsed.data.gmail_message_id;
+  if (parsed.data.subject !== undefined) patch.subject = parsed.data.subject;
+  if (parsed.data.sender !== undefined) patch.sender = parsed.data.sender;
+  if (parsed.data.recipients !== undefined) patch.recipients = parsed.data.recipients;
+  if (parsed.data.status !== undefined) patch.status = parsed.data.status;
+  if (parsed.data.sent_at !== undefined) patch.sent_at = parsed.data.sent_at;
+  if (patch.status === 'SENT' && patch.sent_at === undefined && !existing.sent_at) {
+    patch.sent_at = new Date().toISOString();
+  }
   if (Object.keys(patch).length > 0) await store.updateEmail(id, patch);
+  for (const link of parsed.data.links || []) {
+    const safe = safeRedirectUrl(link.url);
+    if (!safe) continue;
+    const already = await store.getLink(link.click_id);
+    if (already) continue;
+    await store.insertLink({ click_id: link.click_id, tracking_id: id, destination: safe });
+  }
   return json(await store.getEmail(id));
 }
 
@@ -246,27 +274,32 @@ async function handleOpen(
         '';
       const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
       const now = Date.now();
-      const self = suspectSelfOpen({ sentAt: email.sent_at, now, ua });
+      const verdict = classifyOpen({ sentAt: email.sent_at, now, ua });
       const ts = new Date(now).toISOString();
-
-      await store.insertEvent({
-        id: newId('evt'),
-        tracking_id: trackingId,
-        type: 'OPEN',
-        timestamp: ts,
-        user_agent: ua,
-        ip_hash,
-        suspected_self_open: self.suspected,
-        confidence: self.confidence,
-      });
-
-      const open_count = (email.open_count || 0) + 1;
-      const patch: Partial<EmailRow> = {
-        open_count,
-        last_opened_at: ts,
-      };
-      if (open_count === 1) patch.first_opened_at = ts;
-      await store.updateEmail(trackingId, patch);
+      const lastMs = email.last_opened_at ? Date.parse(email.last_opened_at) : 0;
+      const duplicate = verdict.countsAsOpen && lastMs && Number.isFinite(now) && now >= lastMs && now - lastMs < 800;
+      if (!duplicate) {
+        await store.insertEvent({
+          id: newId('evt'),
+          tracking_id: trackingId,
+          type: 'OPEN',
+          timestamp: ts,
+          user_agent: ua,
+          ip_hash,
+          suspected_self_open: verdict.suspected,
+          confidence: verdict.confidence,
+          classification: verdict.classification,
+        });
+        if (verdict.countsAsOpen) {
+          const open_count = (email.open_count || 0) + 1;
+          const patch: Partial<EmailRow> = {
+            open_count,
+            last_opened_at: ts,
+          };
+          if (open_count === 1) patch.first_opened_at = ts;
+          await store.updateEmail(trackingId, patch);
+        }
+      }
     }
   } catch (e) {
     console.error('open record failed', e);

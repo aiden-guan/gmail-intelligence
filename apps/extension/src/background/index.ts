@@ -37,8 +37,12 @@ import {
   TrackingClient,
   applyRecentOpens,
   formatSentTrackingBadge,
+  formatTrackingReport,
+  probeTracker,
   summaryFromRemote,
   type TrackedEmailSummary,
+  type TrackingDiagnosticsReport,
+  type TrackingSendReport,
 } from '@gi/tracking';
 import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
 import {
@@ -72,27 +76,7 @@ const workerTabs = new WorkerTabController({
 async function loadSettings(): Promise<ExtensionSettings> {
   const stored = await chrome.storage.local.get('settings');
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings as Partial<ExtensionSettings> | undefined) };
-  await applyBundledTracker();
   return settings;
-}
-
-async function applyBundledTracker(): Promise<void> {
-  if (settings.trackerBaseUrl.trim() && settings.personalApiToken.trim()) return;
-  try {
-    const response = await fetch(chrome.runtime.getURL('tracker-config.json'));
-    if (!response.ok) return;
-    const config = (await response.json()) as { trackerBaseUrl?: string; personalApiToken?: string };
-    if (!config.trackerBaseUrl?.startsWith('https://') || !config.personalApiToken) return;
-    await saveSettings({
-      trackingEnabled: true,
-      trackOpens: true,
-      trackLinks: true,
-      trackerBaseUrl: config.trackerBaseUrl.replace(/\/$/, ''),
-      personalApiToken: config.personalApiToken,
-    });
-  } catch {
-    /* No machine-local tracker config is bundled. */
-  }
 }
 
 async function saveSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
@@ -335,18 +319,38 @@ async function runDiagnostics() {
   } catch {
     mailboxDb = 'error';
   }
-  let tracking: 'not_configured' | 'healthy' | 'unreachable' = 'not_configured';
-  if (settings.trackerBaseUrl && settings.personalApiToken) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1500);
-      const res = await fetch(`${settings.trackerBaseUrl.replace(/\/$/, '')}/health`, { signal: controller.signal });
-      clearTimeout(timer);
-      tracking = res.ok ? 'healthy' : 'unreachable';
-    } catch {
-      tracking = 'unreachable';
-    }
+  let tracking: 'not_configured' | 'healthy' | 'unreachable' | 'unauthorized' | 'invalid_url' | 'disabled' = 'not_configured';
+  let trackingProbe: Awaited<ReturnType<typeof probeTracker>> | null = null;
+  if (!settings.trackingEnabled) tracking = 'disabled';
+  else if (settings.trackerBaseUrl || settings.personalApiToken) {
+    trackingProbe = await probeTracker(settings.trackerBaseUrl, settings.personalApiToken);
+    tracking = trackingProbe.status === 'healthy'
+      ? 'healthy'
+      : trackingProbe.status === 'unauthorized'
+        ? 'unauthorized'
+        : trackingProbe.status === 'invalid_url'
+          ? 'invalid_url'
+          : trackingProbe.status === 'missing'
+            ? 'not_configured'
+            : 'unreachable';
   }
+  const storedTracking = await chrome.storage.session.get('trackingReport');
+  const trackingSnapshot = (storedTracking.trackingReport || null) as {
+    inboxSdkLoaded?: boolean;
+    composeHookAttached?: boolean;
+    pageWorldInjected?: boolean;
+    pageWorldReady?: boolean;
+    last?: TrackingSendReport | null;
+  } | null;
+  const trackingDiagnostics: TrackingDiagnosticsReport = {
+    health: tracking === 'disabled' ? 'disabled' : trackingProbe?.status || (tracking === 'not_configured' ? 'missing' : 'unreachable'),
+    endpoint: trackingProbe?.status === 'healthy' || trackingProbe?.status === 'unauthorized' ? 'reachable' : trackingProbe?.status === 'invalid_url' ? 'invalid URL' : trackingProbe ? 'unreachable' : 'not configured',
+    auth: trackingProbe?.status === 'healthy' ? 'valid' : trackingProbe?.status === 'unauthorized' ? 'invalid' : 'unchecked',
+    inboxSdk: runtime?.inboxSdk === 'loaded' || trackingSnapshot?.inboxSdkLoaded ? 'loaded' : 'not loaded',
+    pageWorld: trackingSnapshot?.pageWorldReady ? 'ready' : trackingSnapshot?.pageWorldInjected ? 'injected' : 'not confirmed',
+    composeHook: trackingSnapshot?.composeHookAttached ? 'attached' : 'not attached',
+    last: trackingSnapshot?.last || null,
+  };
   const aiStatus = settings.aiMode === 'disabled' ? 'disabled' : getAI() ? 'ready' : 'error';
   let workerTab: 'ready' | 'inactive' | 'unavailable' = 'inactive';
   const workerId = workerTabs.getTabId();
@@ -369,6 +373,8 @@ async function runDiagnostics() {
     currentThreadId: runtime?.currentThreadId || null,
     ai: { provider: settings.aiProvider, mode: settings.aiMode, status: aiStatus },
     tracking,
+    trackingReport: formatTrackingReport(trackingDiagnostics),
+    trackingDetail: trackingDiagnostics,
     workerTab,
     lastAction: runtime?.lastAction || null,
     lastClassifierRun: agent?.getLastClassifierRun() ?? null,
@@ -524,7 +530,7 @@ async function ensureNoReplyReminder(email: TrackedEmailSummary): Promise<void> 
     id: `trk_${email.trackingId}`,
     threadId: email.gmailThreadId || `pending:${email.trackingId}`,
     recipients: email.recipients,
-    lastOutgoingAt: Date.parse(email.sentAt) || Date.now(),
+    lastOutgoingAt: email.sentAt ? Date.parse(email.sentAt) || Date.now() : Date.now(),
     dueAt: due,
     status: 'pending',
     reason: `No reply yet from ${email.recipients[0] || 'recipient'}`,
@@ -541,7 +547,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     }
   }
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
-  chrome.alarms.create('tracking_poll', { periodInMinutes: 0.5 });
+  chrome.alarms.create('tracking_poll', { periodInMinutes: 1 });
   chrome.alarms.create('reminder_tick', { periodInMinutes: 15 });
 });
 
@@ -723,9 +729,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 subject: input.subject || '',
                 sender: input.sender || '',
                 recipients: input.recipients || [],
+                status: created.status || 'PENDING',
+                created_at: created.created_at || new Date().toISOString(),
                 gmail_thread_id: input.gmail_thread_id ?? null,
                 gmail_message_id: input.gmail_message_id ?? null,
-                sent_at: new Date().toISOString(),
+                sent_at: created.sent_at ?? null,
                 open_count: 0,
                 click_count: 0,
               },
@@ -736,6 +744,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (e) {
           sendResponse({ error: String(e) });
         }
+        return;
+      }
+      if (message?.type === 'MARK_TRACKED_SENT' || message?.type === 'SYNC_TRACKED_LINKS' || message?.type === 'CANCEL_TRACKED_EMAIL') {
+        const trackingId = String(message.trackingId || '');
+        if (!trackingId) {
+          sendResponse({ error: 'missing_tracking_id' });
+          return;
+        }
+        const patch = trackingPatchFromMessage(message);
+        if (message.type === 'CANCEL_TRACKED_EMAIL') patch.status = 'CANCELLED';
+        if (message.type === 'MARK_TRACKED_SENT') {
+          patch.status = 'SENT';
+          if (!patch.sentAt) patch.sentAt = new Date().toISOString();
+        }
+        const updated = await patchTrackedEmail(trackingId, patch);
+        if (updated?.notifyIfNoReply && updated.status === 'SENT') await ensureNoReplyReminder(updated);
+        if (settings.trackerBaseUrl && settings.personalApiToken) {
+          try {
+            const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+            await client.linkEmail(trackingId, {
+              ...(patch.gmailThreadId !== undefined ? { gmail_thread_id: patch.gmailThreadId } : {}),
+              ...(patch.gmailMessageId !== undefined ? { gmail_message_id: patch.gmailMessageId } : {}),
+              ...(patch.status ? { status: patch.status } : {}),
+              ...(patch.sentAt !== undefined ? { sent_at: patch.sentAt } : {}),
+              ...(patch.subject ? { subject: patch.subject } : {}),
+              ...(patch.sender ? { sender: patch.sender } : {}),
+              ...(patch.recipients ? { recipients: patch.recipients } : {}),
+              ...(Array.isArray(message.links) ? { links: message.links } : {}),
+            });
+          } catch (e) {
+            console.warn('[gi] tracking update failed', e);
+          }
+        }
+        sendResponse({ ok: true, emails: await readTrackedEmails() });
+        return;
+      }
+      if (message?.type === 'REPORT_TRACKING') {
+        await chrome.storage.session.set({ trackingReport: message.report });
+        sendResponse({ ok: true });
+        return;
+      }
+      if (message?.type === 'CHECK_TRACKER') {
+        const enabled = typeof message.trackingEnabled === 'boolean' ? message.trackingEnabled : settings.trackingEnabled;
+        if (!enabled) {
+          sendResponse({ status: 'disabled', label: 'Disabled' });
+          return;
+        }
+        const base = typeof message.trackerBaseUrl === 'string' ? message.trackerBaseUrl : settings.trackerBaseUrl;
+        const token = typeof message.personalApiToken === 'string' ? message.personalApiToken : settings.personalApiToken;
+        sendResponse(await probeTracker(base, token));
         return;
       }
       if (message?.type === 'LINK_TRACKED_EMAIL') {
@@ -861,24 +919,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(true);
         } catch (e) {
           console.warn('[gi] InboxSDK pageWorld injection failed', e);
-          sendResponse(false);
-        }
-        return;
-      }
-      if (message?.type === 'ENSURE_INBOXSDK_PAGEWORLD') {
-        try {
-          const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
-          for (const tab of tabs) {
-            if (tab.id == null) continue;
+          try {
+            const documentIds = sender.documentId ? [sender.documentId] : undefined;
+            const frameIds = !documentIds && sender.frameId != null ? [sender.frameId] : undefined;
             await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
+              target: { tabId: sender.tab.id, documentIds, frameIds },
               world: 'MAIN',
-              files: ['inboxsdk/pageWorld.js'],
+              func: () => document.head.removeAttribute('data-inboxsdk-script-injected'),
             });
+          } catch {
+            /* The page can retry injection after a reload. */
           }
-          sendResponse({ ok: true });
-        } catch (e) {
-          sendResponse({ ok: false, error: String(e) });
+          sendResponse(false);
         }
         return;
       }
@@ -1133,5 +1185,35 @@ void loadSettings()
     if (isWorkerEvictionError(err)) return;
     console.warn('[gi] background initialization failed', err);
   });
+
+function trackingPatchFromMessage(message: {
+  gmailThreadId?: unknown;
+  gmailMessageId?: unknown;
+  gmail_thread_id?: unknown;
+  gmail_message_id?: unknown;
+  sentAt?: unknown;
+  sent_at?: unknown;
+  subject?: unknown;
+  sender?: unknown;
+  recipients?: unknown;
+  status?: unknown;
+}): Partial<TrackedEmailSummary> {
+  const patch: Partial<TrackedEmailSummary> = {};
+  const thread = message.gmailThreadId ?? message.gmail_thread_id;
+  const gmailMessage = message.gmailMessageId ?? message.gmail_message_id;
+  const sent = message.sentAt ?? message.sent_at;
+  if (typeof thread === 'string' || thread === null) patch.gmailThreadId = thread;
+  if (typeof gmailMessage === 'string' || gmailMessage === null) patch.gmailMessageId = gmailMessage;
+  if (typeof sent === 'string' || sent === null) patch.sentAt = sent;
+  if (typeof message.subject === 'string') patch.subject = message.subject;
+  if (typeof message.sender === 'string') patch.sender = message.sender;
+  if (Array.isArray(message.recipients)) {
+    patch.recipients = message.recipients.filter((item): item is string => typeof item === 'string');
+  }
+  if (message.status === 'PENDING' || message.status === 'SENT' || message.status === 'CANCELLED' || message.status === 'FAILED') {
+    patch.status = message.status;
+  }
+  return patch;
+}
 
 export { formatSentTrackingBadge };

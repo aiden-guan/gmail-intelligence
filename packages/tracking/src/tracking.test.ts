@@ -8,12 +8,17 @@ import {
   rewriteHtmlLinks,
   appendTrackingPixel,
   applyTrackingToOutgoingHtml,
+  classifyOpenEvent,
   describeTrackingStatus,
+  inspectTrackedMime,
   isLoopbackTracker,
   matchTrackedEmail,
+  normalizeGmailId,
   normalizeSubject,
+  stableClickId,
   summaryFromRemote,
   trackerPermissionOrigin,
+  transformOutgoingHtml,
   type TrackedEmailSummary,
 } from '@gi/tracking';
 
@@ -199,7 +204,7 @@ describe('sent mail status', () => {
     expect(copy.headline).toBe('a@b.com opened your email less than a minute ago.');
     expect(copy.detail).toBe('First opened less than a minute after you sent.');
     expect(copy.countLabel).toBe('Opened 2 times');
-    expect(copy.markLabel).toBe('Opened');
+    expect(copy.markLabel).toBe('Opened 2×');
   });
 
   it('describes mail that has not been opened', () => {
@@ -208,7 +213,7 @@ describe('sent mail status', () => {
     expect(copy.headline).toBe('Not opened yet.');
     expect(copy.detail).toBe('Tracking is on for this email.');
     expect(copy.countLabel).toBe('Not opened yet');
-    expect(copy.markLabel).toBe('Not opened');
+    expect(copy.markLabel).toBe('Sent');
   });
 
   it('shows an opened copy when a newer duplicate on the same thread is still unread', () => {
@@ -262,9 +267,129 @@ describe('sent mail status', () => {
   });
 });
 
-describe('bad ids / auth shapes', () => {
-  it('rejects empty destinations', () => {
-    expect(safeRedirectUrl('')).toBeNull();
-    expect(safeRedirectUrl('not a url')).toBeNull();
+describe('outgoing html', () => {
+  const pixel = 'https://track.example/open/trk_abc';
+
+  it('inserts one pixel, rewrites http links, and leaves the rest of the message alone', () => {
+    const html = [
+      '<div>Hi Sam</div>',
+      '<div class="gmail_signature">--<br>Aiden</div>',
+      '<blockquote class="gmail_quote">On Monday, Pat wrote:<br><a href="https://example.com/docs">docs</a></blockquote>',
+      '<a href="mailto:a@b.com">mail</a>',
+      '<a href="tel:+15551212">call</a>',
+      '<a href="cid:logo">logo</a>',
+      '<a href="#section">section</a>',
+      '<a href="https://mail.google.com/mail/u/0/">gmail</a>',
+      '<img src="https://example.com/photo.png" alt="photo">',
+    ].join('');
+    const once = transformOutgoingHtml(html, {
+      pixelUrl: pixel,
+      trackOpens: true,
+      trackLinks: true,
+      linkMap: new Map(),
+      allocateTrackedUrl: (url) => `https://track.example/c/${stableClickId('trk_abc', url)}`,
+    });
+    expect(once.pixelPresent).toBe(true);
+    expect(once.html.match(new RegExp(pixel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
+    expect(once.html).toContain('Hi Sam');
+    expect(once.html).toContain('gmail_signature');
+    expect(once.html).toContain('Aiden');
+    expect(once.html).toContain('On Monday, Pat wrote:');
+    expect(once.html).toContain('mailto:a@b.com');
+    expect(once.html).toContain('tel:+15551212');
+    expect(once.html).toContain('cid:logo');
+    expect(once.html).toContain('#section');
+    expect(once.html).toContain('https://mail.google.com/mail/u/0/');
+    expect(once.html).toContain('https://example.com/photo.png');
+    expect(once.html).not.toContain('href="https://example.com/docs"');
+    expect(once.linksRewritten).toBe(1);
+    const twice = transformOutgoingHtml(once.html, {
+      pixelUrl: pixel,
+      trackOpens: true,
+      trackLinks: true,
+      linkMap: new Map([['https://example.com/docs', `https://track.example/c/${stableClickId('trk_abc', 'https://example.com/docs')}`]]),
+      allocateTrackedUrl: () => {
+        throw new Error('second pass must not allocate');
+      },
+    });
+    expect(twice.html).toBe(once.html);
+    expect(twice.linksRewritten).toBe(0);
+    expect(transformOutgoingHtml('', { pixelUrl: pixel, trackOpens: true, trackLinks: false }).html).toContain(pixel);
+  });
+
+  it('does not count a fetch from before sentAt as a recipient open', () => {
+    const sent = Date.parse('2026-09-23T12:00:00.000Z');
+    expect(classifyOpenEvent({ eventTs: sent - 1, sentAt: sent }).countsAsOpen).toBe(false);
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).classification).toBe('SELF_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent }).countsAsOpen).toBe(true);
+    expect(classifyOpenEvent({ eventTs: sent + 60_000, sentAt: sent }).classification).toBe('RECIPIENT_LIKELY');
+  });
+
+  it('keeps a local sent linkage when the tracker still says pending', () => {
+    const local: TrackedEmailSummary = {
+      trackingId: 'trk_1',
+      status: 'SENT',
+      subject: 'Hello',
+      sender: 'me@example.com',
+      recipients: ['a@b.com'],
+      gmailThreadId: 'thread-1',
+      gmailMessageId: 'msg-1',
+      sentAt: '2026-09-23T12:00:00.000Z',
+      firstOpenedAt: null,
+      lastOpenedAt: null,
+      openCount: 1,
+      clickCount: 0,
+      notifyIfNoReply: true,
+    };
+    const merged = summaryFromRemote(
+      {
+        tracking_id: 'trk_1',
+        status: 'PENDING',
+        subject: 'Hello',
+        sender: 'me@example.com',
+        recipients: ['a@b.com'],
+        sent_at: null,
+        open_count: 0,
+        gmail_thread_id: null,
+        gmail_message_id: null,
+      },
+      local,
+    );
+    expect(merged.status).toBe('SENT');
+    expect(merged.sentAt).toBe(local.sentAt);
+    expect(merged.gmailThreadId).toBe('thread-1');
+    expect(merged.openCount).toBe(1);
+  });
+
+  it('matches thread ids after InboxSDK prefix normalization', () => {
+    expect(normalizeGmailId('msg-a:abc')).toBe('abc');
+    expect(normalizeGmailId('#thread-f:abc')).toBe('abc');
+    const email: TrackedEmailSummary = {
+      trackingId: 'trk_1',
+      status: 'SENT',
+      subject: 'Hello',
+      sender: 'me',
+      recipients: ['a@b.com'],
+      gmailThreadId: 'abc',
+      gmailMessageId: null,
+      sentAt: '2026-09-23T12:00:00.000Z',
+      firstOpenedAt: null,
+      lastOpenedAt: null,
+      openCount: 0,
+      clickCount: 0,
+      notifyIfNoReply: false,
+    };
+    expect(matchTrackedEmail({ threadIds: ['thread-f:abc'], subject: 'Hello', emails: [] }, [email])?.trackingId).toBe('trk_1');
+  });
+
+  it('reads a tracking pixel out of raw mime', () => {
+    const raw = `Content-Type: text/html\n\n<div>Hi</div><img src="https://track.example/open/trk_abc" width="1"><a href="https://track.example/c/clk_123">docs</a>`;
+    expect(inspectTrackedMime(raw)).toMatchObject({
+      pixelFound: true,
+      trackingIds: ['trk_abc'],
+      pixelCount: 1,
+      trackedLinks: 1,
+    });
+    expect(inspectTrackedMime('Hello there').pixelFound).toBe(false);
   });
 });

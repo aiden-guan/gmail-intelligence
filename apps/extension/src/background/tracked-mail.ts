@@ -3,18 +3,33 @@ import type { TrackedEmailSummary } from '@gi/tracking';
 const KEY = 'trackedEmails';
 const MAX_TRACKED = 400;
 
+function isEvictionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return msg.includes('No SW') || msg.includes('No RPH') || msg.includes('Extension context invalidated');
+}
+
 export async function readTrackedEmails(): Promise<TrackedEmailSummary[]> {
-  const stored = await chrome.storage.local.get(KEY);
-  const value = stored[KEY];
-  if (!Array.isArray(value)) return [];
-  return value.filter(isSummary);
+  try {
+    const stored = await chrome.storage.local.get(KEY);
+    const value = stored[KEY];
+    if (!Array.isArray(value)) return [];
+    return value.filter(isSummary);
+  } catch (error) {
+    if (isEvictionError(error)) return [];
+    throw error;
+  }
 }
 
 export async function writeTrackedEmails(emails: TrackedEmailSummary[]): Promise<void> {
   const capped = [...emails]
-    .sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0))
+    .sort((a, b) => ((a.sentAt || a.createdAt || '') < (b.sentAt || b.createdAt || '') ? 1 : (a.sentAt || a.createdAt || '') > (b.sentAt || b.createdAt || '') ? -1 : 0))
     .slice(0, MAX_TRACKED);
-  await chrome.storage.local.set({ [KEY]: capped });
+  try {
+    await chrome.storage.local.set({ [KEY]: capped });
+  } catch (error) {
+    if (isEvictionError(error)) return;
+    throw error;
+  }
 }
 
 export async function upsertTrackedEmail(email: TrackedEmailSummary): Promise<TrackedEmailSummary[]> {
@@ -40,5 +55,5 @@ export async function patchTrackedEmail(
 function isSummary(value: unknown): value is TrackedEmailSummary {
   if (!value || typeof value !== 'object') return false;
   const row = value as Partial<TrackedEmailSummary>;
-  return typeof row.trackingId === 'string' && typeof row.sentAt === 'string' && Array.isArray(row.recipients);
+  return typeof row.trackingId === 'string' && (row.sentAt == null || typeof row.sentAt === 'string') && Array.isArray(row.recipients);
 }
