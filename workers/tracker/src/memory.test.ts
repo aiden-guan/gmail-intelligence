@@ -529,4 +529,213 @@ describe('local memory tracker', () => {
     ).json()) as { gmail_thread_id: string };
     expect(email.gmail_thread_id).toBe('thread-xyz');
   });
+
+  it('MV3 background delay: self-view arriving 5s after pixel fetch reclassifies preceding open and resets open_count to 0', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ subject: 'MV3 Delay Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      // Mark sent
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender views email at T+10s in content script
+      vi.advanceTimersByTime(10_000);
+      const observedAtIso = new Date().toISOString();
+
+      // Browser requests tracking pixel at T+10.5s (before MV3 background wakes up)
+      vi.advanceTimersByTime(500);
+      const pixelRes = await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+      expect(pixelRes.status).toBe(200);
+
+      // Pixel open is temporarily classified as recipient open before self-view arrives
+      const midEmail = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(midEmail.open_count).toBe(1);
+
+      // MV3 background service worker wakes up 4.5s later (T+15s) and delivers the content interaction timestamp (T+10s)
+      vi.advanceTimersByTime(4500);
+      const selfViewRes = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ timestamp: observedAtIso }),
+        }),
+        env,
+      );
+      expect(selfViewRes.status).toBe(200);
+      const selfViewBody = (await selfViewRes.json()) as { ok: boolean; open_count: number };
+      expect(selfViewBody.ok).toBe(true);
+      expect(selfViewBody.open_count).toBe(0);
+
+      // Verified: Email open_count is reverted to 0
+      const finalEmail = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number; first_opened_at: string | null };
+      expect(finalEmail.open_count).toBe(0);
+      expect(finalEmail.first_opened_at).toBeNull();
+
+      // Event classification was updated to SELF_LIKELY with suspected_self_open: true
+      const events = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+      ).json()) as Array<{ type: string; classification: string; suspected_self_open: boolean }>;
+      const openEvent = events.find((e) => e.type === 'OPEN');
+      expect(openEvent?.classification).toBe('SELF_LIKELY');
+      expect(openEvent?.suspected_self_open).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Self-view preserves payload timestamp over server arrival time, and falls back to now when omitted', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Timestamp Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id } = (await created.json()) as { tracking_id: string };
+
+    const customTs = '2026-09-24T08:15:30.000Z';
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ timestamp: customTs }),
+      }),
+      env,
+    );
+
+    let events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ type: string; timestamp: string }>;
+    expect(events).toHaveLength(1);
+    expect(events[0].timestamp).toBe(customTs);
+
+    // Now test fallback when timestamp is omitted
+    const created2 = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Fallback Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id: tracking_id_2 } = (await created2.json()) as { tracking_id: string };
+
+    const before = Date.now();
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id_2}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({}),
+      }),
+      env,
+    );
+    const after = Date.now();
+
+    events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id_2}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ type: string; timestamp: string }>;
+    expect(events).toHaveLength(1);
+    const fallbackMs = Date.parse(events[0].timestamp);
+    expect(fallbackMs).toBeGreaterThanOrEqual(before - 1000);
+    expect(fallbackMs).toBeLessThanOrEqual(after + 1000);
+  });
+
+  it('Normalizes gmail message and thread IDs with msg-a:, msg-f:, and # prefixes across create, patch, and self-view', async () => {
+    // 1. Create with prefixes
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          subject: 'Normalize Test',
+          sender: 'me@example.com',
+          recipients: ['r@example.com'],
+          gmail_message_id: 'msg-a:r-1234567890',
+          gmail_thread_id: '#thread-f:189abcdef',
+        }),
+      }),
+      env,
+    );
+    const { tracking_id } = (await created.json()) as { tracking_id: string };
+
+    let email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { gmail_message_id: string; gmail_thread_id: string };
+    expect(email.gmail_message_id).toBe('r-1234567890');
+    expect(email.gmail_thread_id).toBe('189abcdef');
+
+    // 2. Patch with prefixes
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          gmail_message_id: 'msg-f:r-9999999999',
+          gmail_thread_id: 'thread-a:999abcdef',
+        }),
+      }),
+      env,
+    );
+
+    email = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+    ).json()) as { gmail_message_id: string; gmail_thread_id: string };
+    expect(email.gmail_message_id).toBe('r-9999999999');
+    expect(email.gmail_thread_id).toBe('999abcdef');
+
+    // 3. Self-view linking with prefixes on an email without existing ids
+    const created2 = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          subject: 'Normalize Self-View Link Test',
+          sender: 'me@example.com',
+          recipients: ['r@example.com'],
+        }),
+      }),
+      env,
+    );
+    const { tracking_id: tracking_id_2 } = (await created2.json()) as { tracking_id: string };
+
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id_2}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          gmailMessageId: '#msg-a:linked-msg-456',
+          gmailThreadId: 'thread-f:linked-thread-789',
+        }),
+      }),
+      env,
+    );
+
+    const email2 = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id_2}`, { headers: authHeaders() }), env)
+    ).json()) as { gmail_message_id: string; gmail_thread_id: string };
+    expect(email2.gmail_message_id).toBe('linked-msg-456');
+    expect(email2.gmail_thread_id).toBe('linked-thread-789');
+  });
 });

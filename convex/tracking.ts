@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
-import { deriveTrackingStats, isSelfViewCorrelated } from "./openRequest";
+import { deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from "./openRequest";
 
 const emailArgs = {
   trackingId: v.string(),
@@ -23,8 +23,8 @@ export const createEmail = internalMutation({
       subject: args.subject,
       sender: args.sender,
       recipients: args.recipients,
-      gmailThreadId: args.gmailThreadId,
-      gmailMessageId: args.gmailMessageId,
+      gmailThreadId: normalizeGmailId(args.gmailThreadId),
+      gmailMessageId: normalizeGmailId(args.gmailMessageId),
       status: args.status || (args.sentAt ? "SENT" : "PENDING"),
       sentAt: args.sentAt,
       firstOpenedAt: null,
@@ -91,8 +91,8 @@ export const patchEmail = internalMutation({
       sender?: string;
       recipients?: string[];
     } = {};
-    if (args.gmailThreadId !== undefined) patch.gmailThreadId = args.gmailThreadId;
-    if (args.gmailMessageId !== undefined) patch.gmailMessageId = args.gmailMessageId;
+    if (args.gmailThreadId !== undefined) patch.gmailThreadId = normalizeGmailId(args.gmailThreadId);
+    if (args.gmailMessageId !== undefined) patch.gmailMessageId = normalizeGmailId(args.gmailMessageId);
     if (args.status !== undefined) patch.status = args.status;
     if (args.sentAt !== undefined) patch.sentAt = args.sentAt;
     if (args.subject !== undefined) patch.subject = args.subject;
@@ -215,11 +215,13 @@ export const recordSelfView = internalMutation({
     if (!email) return { ok: false };
 
     const emailPatch: { gmailThreadId?: string | null; gmailMessageId?: string | null } = {};
-    if (args.gmailThreadId && !email.gmailThreadId) {
-      emailPatch.gmailThreadId = args.gmailThreadId;
+    const normThread = normalizeGmailId(args.gmailThreadId);
+    const normMessage = normalizeGmailId(args.gmailMessageId);
+    if (normThread && !email.gmailThreadId) {
+      emailPatch.gmailThreadId = normThread;
     }
-    if (args.gmailMessageId && !email.gmailMessageId) {
-      emailPatch.gmailMessageId = args.gmailMessageId;
+    if (normMessage && !email.gmailMessageId) {
+      emailPatch.gmailMessageId = normMessage;
     }
     if (Object.keys(emailPatch).length > 0) {
       await ctx.db.patch(email._id, emailPatch);

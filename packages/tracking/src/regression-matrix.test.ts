@@ -6,12 +6,13 @@ import {
   detectOpenRequestSource,
   isSelfViewCorrelated,
   matchTrackedEmail,
+  normalizeGmailId,
   transformOutgoingHtml,
   type TrackedEmailSummary,
   type TrackingEvent,
 } from './index';
 
-describe('Regression Matrix (Cases A through L)', () => {
+describe('Regression Matrix (Cases A through N)', () => {
   // Case A: Same thread, second email sent -> second email unread -> row must show UNREAD / gray.
   it('Case A: Same thread, second email sent -> second email unread -> row must show UNREAD / pending', () => {
     const olderOpened: TrackedEmailSummary = {
@@ -401,5 +402,108 @@ describe('Regression Matrix (Cases A through L)', () => {
     expect(rewritten.html).toContain('https://track.example/c/clk_123');
     expect(rewritten.html).toContain('<img src="https://track.example/open/trk_case_l.gif"');
     expect(rewritten.html).toContain('role="presentation"');
+  });
+
+  // Case M: MV3 background wake-up delay - sender interaction observed timestamp reclassifies open and resets open count to 0.
+  it('Case M: MV3 background wake-up delay - sender interaction observed timestamp reclassifies open and resets open count to 0', () => {
+    const sentAt = Date.parse('2026-09-24T12:00:00.000Z');
+    const senderObservedAt = sentAt + 10_000; // T+10s: sender views email in Sent folder
+    const openArrivalTs = senderObservedAt + 500; // T+10.5s: pixel fetch arrives at server
+
+    // Before self-view arrives, pixel fetch is considered a recipient open:
+    const initialEvents: TrackingEvent[] = [
+      {
+        id: 'ev_open_1',
+        tracking_id: 'trk_mv3_delay',
+        type: 'OPEN',
+        timestamp: new Date(openArrivalTs).toISOString(),
+        classification: 'RECIPIENT_LIKELY',
+        user_agent: 'Mozilla/5.0 Chrome/120',
+      },
+    ];
+
+    const email: TrackedEmailSummary = {
+      trackingId: 'trk_mv3_delay',
+      subject: 'MV3 Delay Matrix Test',
+      sender: 'me@example.com',
+      recipients: ['recipient@example.com'],
+      gmailThreadId: 'thread_mv3',
+      gmailMessageId: 'msg_mv3',
+      sentAt: new Date(sentAt).toISOString(),
+      firstOpenedAt: null,
+      lastOpenedAt: null,
+      openCount: 0,
+      clickCount: 0,
+      notifyIfNoReply: false,
+    };
+
+    let updated = applyRecentOpens([email], initialEvents);
+    expect(updated[0].openCount).toBe(1);
+
+    // MV3 background service worker wakes up 5 seconds later (T+15s), but sends the content script interaction timestamp (T+10s):
+    expect(isSelfViewCorrelated(openArrivalTs, senderObservedAt)).toBe(true);
+
+    const reclassifiedEvents: TrackingEvent[] = [
+      {
+        id: 'ev_open_1',
+        tracking_id: 'trk_mv3_delay',
+        type: 'OPEN',
+        timestamp: new Date(openArrivalTs).toISOString(),
+        classification: 'SELF_LIKELY',
+        suspected_self_open: true,
+        user_agent: 'Mozilla/5.0 Chrome/120',
+      },
+      {
+        id: 'ev_self_1',
+        tracking_id: 'trk_mv3_delay',
+        type: 'SELF_VIEW',
+        timestamp: new Date(senderObservedAt).toISOString(),
+        classification: 'SELF_LIKELY',
+        suspected_self_open: true,
+      },
+    ];
+
+    updated = applyRecentOpens([email], reclassifiedEvents);
+    expect(updated[0].openCount).toBe(0);
+    expect(updated[0].firstOpenedAt).toBeNull();
+
+    const stats = deriveTrackingStats(reclassifiedEvents);
+    expect(stats.openCount).toBe(0);
+    expect(stats.firstOpenedAt).toBeNull();
+  });
+
+  // Case N: Gmail ID normalization with msg-a: / thread-f: prefixes matches stored bare IDs accurately in thread view.
+  it('Case N: Gmail ID normalization with msg-a: / thread-f: prefixes matches stored bare IDs accurately', () => {
+    expect(normalizeGmailId('msg-a:r-1234567890')).toBe('r-1234567890');
+    expect(normalizeGmailId('#thread-f:thread-abc')).toBe('thread-abc');
+
+    const storedEmail: TrackedEmailSummary = {
+      trackingId: 'trk_norm_test',
+      subject: 'Normalized IDs',
+      sender: 'me@example.com',
+      recipients: ['bob@example.com'],
+      gmailThreadId: 'thread_xyz',
+      gmailMessageId: 'msg_bare_123',
+      sentAt: '2026-09-24T10:00:00.000Z',
+      firstOpenedAt: null,
+      lastOpenedAt: null,
+      openCount: 0,
+      clickCount: 0,
+      notifyIfNoReply: false,
+    };
+
+    // Client query arrives from InboxSDK MessageView with 'msg-a:msg_bare_123' and thread 'thread-f:thread_xyz'
+    const matched = matchTrackedEmail(
+      {
+        threadIds: ['thread-f:thread_xyz'],
+        messageId: 'msg-a:msg_bare_123',
+        messageIds: ['msg-a:msg_bare_123'],
+        subject: 'Normalized IDs',
+        emails: ['bob@example.com'],
+      },
+      [storedEmail],
+    );
+
+    expect(matched?.trackingId).toBe('trk_norm_test');
   });
 });

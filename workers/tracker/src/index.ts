@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { safeRedirectUrl, classifyOpen, deriveTrackingStats, isSelfViewCorrelated } from './helpers.js';
+import { safeRedirectUrl, classifyOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
 import { getStore, StoreError, type EmailRow, type TrackerStore } from './store.js';
 
-export { safeRedirectUrl, classifyOpen, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated } from './helpers.js';
+export { safeRedirectUrl, classifyOpen, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
 
 export interface Env {
   SUPABASE_URL?: string;
@@ -160,8 +160,8 @@ async function handleCreateEmail(
     subject: body.subject,
     sender: body.sender,
     recipients: body.recipients,
-    gmail_thread_id: body.gmail_thread_id ?? null,
-    gmail_message_id: body.gmail_message_id ?? null,
+    gmail_thread_id: normalizeGmailId(body.gmail_thread_id),
+    gmail_message_id: normalizeGmailId(body.gmail_message_id),
     sent_at: null,
     first_opened_at: null,
     last_opened_at: null,
@@ -226,8 +226,8 @@ async function handlePatchEmail(
   const existing = await store.getEmail(id);
   if (!existing) return json({ error: 'not_found' }, 404);
   const patch: Partial<EmailRow> = {};
-  if (parsed.data.gmail_thread_id !== undefined) patch.gmail_thread_id = parsed.data.gmail_thread_id;
-  if (parsed.data.gmail_message_id !== undefined) patch.gmail_message_id = parsed.data.gmail_message_id;
+  if (parsed.data.gmail_thread_id !== undefined) patch.gmail_thread_id = normalizeGmailId(parsed.data.gmail_thread_id);
+  if (parsed.data.gmail_message_id !== undefined) patch.gmail_message_id = normalizeGmailId(parsed.data.gmail_message_id);
   if (parsed.data.subject !== undefined) patch.subject = parsed.data.subject;
   if (parsed.data.sender !== undefined) patch.sender = parsed.data.sender;
   if (parsed.data.recipients !== undefined) patch.recipients = parsed.data.recipients;
@@ -295,11 +295,13 @@ async function handleSelfView(
   const selfMs = Date.parse(ts);
 
   const emailPatch: Partial<EmailRow> = {};
-  if (body.gmailThreadId && !existing.gmail_thread_id) {
-    emailPatch.gmail_thread_id = body.gmailThreadId;
+  const normThread = normalizeGmailId(body.gmailThreadId);
+  const normMessage = normalizeGmailId(body.gmailMessageId);
+  if (normThread && !existing.gmail_thread_id) {
+    emailPatch.gmail_thread_id = normThread;
   }
-  if (body.gmailMessageId && !existing.gmail_message_id) {
-    emailPatch.gmail_message_id = body.gmailMessageId;
+  if (normMessage && !existing.gmail_message_id) {
+    emailPatch.gmail_message_id = normMessage;
   }
   if (Object.keys(emailPatch).length > 0) {
     await store.updateEmail(id, emailPatch);

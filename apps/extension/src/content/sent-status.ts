@@ -1,6 +1,7 @@
 import {
   describeTrackingStatus,
   matchTrackedEmail,
+  normalizeGmailId,
   type TrackedEmailSummary,
   type TrackingRowQuery,
   type TrackingStatusCopy,
@@ -30,7 +31,7 @@ export function installSentStatus(opts: {
   onNotify: (trackingId: string, enabled: boolean) => void;
   onStatus?: () => void;
   onLink?: (trackingId: string, gmailThreadId: string) => void;
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null) => void;
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null, observedAt?: number) => void;
 }): SentStatusController {
   let emails = opts.emails || [];
   let trackerBaseUrl = opts.trackerBaseUrl || '';
@@ -45,12 +46,14 @@ export function installSentStatus(opts: {
     trackingId: string,
     gmailThreadId?: string | null,
     gmailMessageId?: string | null,
+    observedAt = Date.now(),
   ) => {
-    const key = gmailMessageId ? `${trackingId}:${gmailMessageId}` : trackingId;
+    const normMsg = normalizeGmailId(gmailMessageId);
+    const key = normMsg ? `${trackingId}:${normMsg}` : trackingId;
     const last = recentSelfViews.get(key) || 0;
-    if (Date.now() - last > 10_000) {
-      recentSelfViews.set(key, Date.now());
-      opts.onSelfView?.(trackingId, gmailThreadId, gmailMessageId);
+    if (observedAt - last > 10_000) {
+      recentSelfViews.set(key, observedAt);
+      opts.onSelfView?.(trackingId, gmailThreadId, gmailMessageId, observedAt);
     }
   };
 
@@ -140,7 +143,7 @@ export function paintRows(
   emails: TrackedEmailSummary[],
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null) => void,
+  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null, observedAt?: number) => void,
 ): void {
   ensureStyles();
   threadRows(root).forEach((row) => {
@@ -164,14 +167,17 @@ export function paintRows(
 
     if (!row.dataset.giSelfBound) {
       row.dataset.giSelfBound = 'true';
-      row.addEventListener('click', (e) => {
+      const handleEarlyInteraction = (e: Event) => {
         if ((e.target as HTMLElement)?.closest('.gi-track-btn')) return;
         const currentTrackingId = row.dataset.giTrackingId;
         if (!currentTrackingId) return;
         const currentThreadId = row.dataset.giTrackingThreadId || null;
         const currentMessageId = row.dataset.giTrackingMessageId || null;
-        onSelfView?.(currentTrackingId, currentThreadId, currentMessageId);
-      });
+        const observedAt = Date.now();
+        onSelfView?.(currentTrackingId, currentThreadId, currentMessageId, observedAt);
+      };
+      row.addEventListener('pointerdown', handleEarlyInteraction, { capture: true });
+      row.addEventListener('click', handleEarlyInteraction);
     }
   });
 }

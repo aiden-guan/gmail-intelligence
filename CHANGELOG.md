@@ -42,9 +42,13 @@ Comprehensive resolution of false "Opened" states and thread matching regression
 - **Window Overlap Bug**: Tightened self-view correlation from broad `±15s` to `[-3s, +8s]`, preventing swallow of legitimate recipient opens.
 - **Notification Spam**: Filtered extension desktop notifications strictly to verified `RECIPIENT_LIKELY` events.
 - **Worker Test Suite**: Fixed timer synchronization in `workers/tracker/src/memory.test.ts` (`Case F`).
+- **Sender Self-Open Race (MV3 Wake-up Delay)**: Fixed sender interaction timestamp distortion caused by Manifest V3 background service worker cold-start delays by capturing interaction-time `observedAt` and delivering it in the `TRACKING_SELF_VIEW` message payload.
+- **InboxSDK ID Prefix Mismatches**: Unified `normalizeGmailId()` across extension content scripts, workers, and Convex to strip `msg-a:`, `msg-f:`, `thread-a:`, `thread-f:`, and `#` prefixes.
+- **MessageView Expansion Lifecycle**: Built `MessageSelfViewController` to safely track InboxSDK `MessageView` expansion state (`EXPANDED`), subscribe to `viewStateChange` and `load`, and handle late cache arrival races with `reinspectActive()`.
 
 ### Verification Proof
-- `npm test`: 26 test files passed, 213 tests passed.
+- `npm test`: 27 test files passed, 230 tests passed.
 - `npm run typecheck`: Passed with 0 TypeScript errors across all workspaces.
 - `npm run lint`: Passed with 0 errors across packages, apps, and workers.
 - `npm run build`: Production build verified for shared, gmail, mailbox, ai, search, agent, tracking, extension, and tracker packages.
+

@@ -12,6 +12,12 @@ export function trackingIdFromUrl(url: string): string | null {
   return match[1].replace(/\.(gif|png|jpe?g|webp)$/i, '');
 }
 
+export function normalizeGmailId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const next = value.trim().replace(/^#/, '').replace(/^(msg-a:|msg-f:|thread-a:|thread-f:)/i, '');
+  return next || null;
+}
+
 export type OpenClassification =
   | "RECIPIENT_LIKELY"
   | "SELF_LIKELY"

@@ -7,7 +7,6 @@ import {
   findComposeBody,
   findNotice,
   resolveThreadId,
-  resolveMessageId,
   findThreadRows,
   normalizeOpenedThread,
   normalizeVisibleRow,
@@ -21,10 +20,17 @@ import {
   type InboxSdkLike,
   type QueuedGmailAction,
 } from '@gi/gmail';
-import type { CreateTrackedEmailInput, CreateTrackedEmailResult, TrackedEmailPatch, TrackedEmailSummary } from '@gi/tracking';
+import {
+  normalizeGmailId,
+  type CreateTrackedEmailInput,
+  type CreateTrackedEmailResult,
+  type TrackedEmailPatch,
+  type TrackedEmailSummary,
+} from '@gi/tracking';
 import { applyCategoryChip, rowsForThread } from './chips';
 import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
 import { attachSdkComposeTracking, type ComposeTrackingSession } from './compose-tracking';
+import { createMessageSelfViewHandler, type MessageSelfViewController } from './message-self-view';
 import { installSentStatus, type SentStatusController } from './sent-status';
 import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
 import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
@@ -35,6 +41,7 @@ let settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 let sdkReady = false;
 let sdkOwnsCompose = false;
 let sentStatus: SentStatusController | null = null;
+let messageSelfView: MessageSelfViewController | null = null;
 let booted = false;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
@@ -49,16 +56,20 @@ function reportTrackingSelfView(
   trackingId: string,
   gmailThreadId?: string | null,
   gmailMessageId?: string | null,
+  observedAt = Date.now(),
 ): void {
-  const key = gmailMessageId ? `${trackingId}:${gmailMessageId}` : trackingId;
+  const normMessageId = normalizeGmailId(gmailMessageId);
+  const normThreadId = normalizeGmailId(gmailThreadId);
+  const key = `${trackingId}:${normMessageId || 'unknown'}`;
   const last = recentContentSelfViews.get(key) || 0;
-  if (Date.now() - last > 10_000) {
-    recentContentSelfViews.set(key, Date.now());
+  if (observedAt - last > 10_000) {
+    recentContentSelfViews.set(key, observedAt);
     void send({
       type: 'TRACKING_SELF_VIEW',
       trackingId,
-      gmailThreadId,
-      gmailMessageId,
+      gmailThreadId: normThreadId,
+      gmailMessageId: normMessageId,
+      timestamp: new Date(observedAt).toISOString(),
     });
   }
 }
@@ -211,6 +222,7 @@ async function boot(): Promise<void> {
   const updateCachedEmails = (emails: TrackedEmailSummary[]) => {
     cachedTrackedEmails = emails;
     sentStatus?.setEmails(emails);
+    void messageSelfView?.reinspectActive();
   };
 
   sentStatus = installSentStatus({
@@ -228,8 +240,8 @@ async function boot(): Promise<void> {
     onLink: (trackingId, gmailThreadId) => {
       linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
     },
-    onSelfView: (trackingId, gmailThreadId, gmailMessageId) => {
-      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId);
+    onSelfView: (trackingId, gmailThreadId, gmailMessageId, observedAt) => {
+      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId, observedAt);
     },
   });
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -328,31 +340,15 @@ function mountSdkUi(sdk: InboxSdkLike): void {
     /* sidebar is optional */
   }
   try {
-    const inspectMessageView = async (messageView: unknown) => {
-      try {
-        const messageId = await resolveMessageId(messageView as any);
-        if (!messageId) return;
-        const threadView =
-          typeof (messageView as { getThreadView?: () => unknown }).getThreadView === 'function'
-            ? (messageView as { getThreadView: () => unknown }).getThreadView()
-            : null;
-        const threadId = threadView ? await resolveThreadId(threadView as any) : null;
-        const match = cachedTrackedEmails.find((item) => item.gmailMessageId === messageId);
-        if (match) {
-          reportTrackingSelfView(match.trackingId, threadId || match.gmailThreadId, messageId);
-        }
-      } catch {
-        /* message view inspection is optional */
-      }
-    };
+    messageSelfView = createMessageSelfViewHandler({
+      getEmails: () => cachedTrackedEmails,
+      onSelfView: (trackingId, threadId, msgId, observedAt) => {
+        reportTrackingSelfView(trackingId, threadId, msgId, observedAt);
+      },
+    });
 
     sdk.Conversations?.registerMessageViewHandler?.((messageView) => {
-      void inspectMessageView(messageView);
-      if (typeof (messageView as { on?: (event: string, cb: () => void) => void }).on === 'function') {
-        (messageView as { on: (event: string, cb: () => void) => void }).on('load', () => {
-          void inspectMessageView(messageView);
-        });
-      }
+      messageSelfView?.handleMessageView(messageView as any);
     });
   } catch {
     /* message view handler is optional */
