@@ -104,6 +104,9 @@ export class MailboxDatabase extends Dexie {
       thread_overrides: 'threadId, category, createdAt',
       ai_jobs: 'id, kind, threadId, fingerprint, status, createdAt',
     });
+    this.version(4).stores({
+      ai_jobs: 'id, kind, threadId, fingerprint, status, createdAt, resultId',
+    });
   }
 }
 

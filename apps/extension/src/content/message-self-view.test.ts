@@ -112,7 +112,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     mv.setState('EXPANDED');
 
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
-    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-expanded');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED');
   });
 
   // Case B: MessageView already loaded, state = EXPANDED -> handler registers -> SELF_VIEW emitted immediately
@@ -127,7 +127,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     handler.handleMessageView(mv);
 
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
-    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-expanded');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED');
   });
 
   // Case C: MessageView initially unloaded + COLLAPSED -> load fires -> still COLLAPSED -> no SELF_VIEW -> later EXPANDED -> SELF_VIEW
@@ -151,7 +151,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     // Later expanded
     mv.setState('EXPANDED');
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
-    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-expanded');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED');
   });
 
   // Case D: MessageView initially unloaded + EXPANDED -> load fires -> resolve ID -> SELF_VIEW
@@ -171,7 +171,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     // Now message finishes loading
     mv.setLoaded(true);
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
-    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-load');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_LOAD');
   });
 
   // ID Normalization tests: msg-a:, msg-f:, #msg-a:
@@ -185,7 +185,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
       });
       const mv = createMockMessageView({ id: 'msg-a:abc123', loaded: true, state: 'EXPANDED' });
       handler.handleMessageView(mv);
-      await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-expanded'));
+      await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED'));
     }
 
     // 2. stored = "abc123", view = "msg-f:abc123"
@@ -197,7 +197,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
       });
       const mv = createMockMessageView({ id: 'msg-f:abc123', loaded: true, state: 'EXPANDED' });
       handler.handleMessageView(mv);
-      await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-expanded'));
+      await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED'));
     }
 
     // 3. stored = "abc123", view = "#msg-a:abc123"
@@ -209,7 +209,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
       });
       const mv = createMockMessageView({ id: '#msg-a:abc123', loaded: true, state: 'EXPANDED' });
       handler.handleMessageView(mv);
-      await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'message-expanded'));
+      await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED'));
     }
   });
 
@@ -236,7 +236,68 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     await handler.reinspectActive();
 
     expect(onSelfView).toHaveBeenCalledTimes(1);
-    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'cache-reinspection');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', expect.any(Number), 'CACHE_REINSPECTION');
+  });
+
+  // Section 5: Mandatory Regression Test
+  it('Priority 1 Regression Test: cache refresh while message remains expanded does NOT fabricate a new SELF_VIEW', async () => {
+    const onSelfView = vi.fn();
+    const emails = [trackedEmailA];
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => emails,
+      onSelfView,
+    });
+
+    const mv = createMockMessageView({ id: 'msg-a:abc123', loaded: true, state: 'EXPANDED' });
+    // T = 0: sender expands message
+    const t0 = 1000;
+    vi.setSystemTime(t0);
+    handler.handleMessageView(mv);
+
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', t0, 'MESSAGE_EXPANDED');
+
+    // Message remains expanded.
+    // T = 60s: recipient legitimately opens at T = 60s
+    const t60 = t0 + 60_000;
+    vi.setSystemTime(t60);
+
+    // Cache refresh runs at T=60
+    await handler.reinspectActive();
+
+    // EXPECTED: NO new SELF_VIEW at T=60!
+    expect(onSelfView).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+  });
+
+  it('late cache arrival preserves original expansion timestamp T=0 instead of T=60', async () => {
+    let emails: TrackedEmailSummary[] = [];
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => emails,
+      onSelfView,
+    });
+
+    const mv = createMockMessageView({ id: 'msg-a:abc123', loaded: true, state: 'EXPANDED' });
+    const t0 = 1000;
+    vi.setSystemTime(t0);
+    handler.handleMessageView(mv);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(onSelfView).not.toHaveBeenCalled();
+
+    // Cache arrives at T=60s
+    const t60 = t0 + 60_000;
+    vi.setSystemTime(t60);
+    emails = [trackedEmailA];
+    await handler.reinspectActive();
+
+    expect(onSelfView).toHaveBeenCalledTimes(1);
+    // MUST have original expandedAt (t0), NOT t60!
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', t0, 'CACHE_REINSPECTION');
+
+    vi.useRealTimers();
   });
 
   // Section 29: Multiple tracked messages in same thread remain isolated
@@ -257,13 +318,13 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
 
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
     // ONLY trk_A is emitted! trk_B is NOT emitted!
-    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', expect.any(Number), 'message-expanded');
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED');
 
     // Now sender expands Message B
     mvB.setState('EXPANDED');
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(2));
     // Message B emits its own SELF_VIEW
-    expect(onSelfView).toHaveBeenLastCalledWith('trk_B', 'thread_X', 'def456', expect.any(Number), 'message-expanded');
+    expect(onSelfView).toHaveBeenLastCalledWith('trk_B', 'thread_X', 'def456', expect.any(Number), 'MESSAGE_EXPANDED');
   });
 
   // MessageView destruction cleans up active set

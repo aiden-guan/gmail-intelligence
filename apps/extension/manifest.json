@@ -21,6 +21,7 @@
     "https://*.convex.site/*"
   ],
   "optional_host_permissions": [
+    "https://*/*",
     "https://api.openai.com/*",
     "https://*.openai.azure.com/*",
     "http://127.0.0.1:11434/*",

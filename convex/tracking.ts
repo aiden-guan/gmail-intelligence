@@ -1,6 +1,13 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery } from "./_generated/server";
+import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from "./openRequest";
+
+async function getAllEventsForEmail(ctx: { db: QueryCtx["db"] | MutationCtx["db"] }, trackingId: string) {
+  return await ctx.db
+    .query("trackingEvents")
+    .withIndex("by_trackingId", (q) => q.eq("trackingId", trackingId))
+    .collect();
+}
 
 const emailArgs = {
   trackingId: v.string(),
@@ -122,10 +129,7 @@ export const patchEmail = internalMutation({
 export const listEvents = internalQuery({
   args: { trackingId: v.string() },
   handler: async (ctx, args) => {
-    const events = await ctx.db
-      .query("trackingEvents")
-      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
-      .take(200);
+    const events = await getAllEventsForEmail(ctx, args.trackingId);
     return events.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
   },
 });
@@ -179,10 +183,7 @@ export const recomputeEmailStats = internalMutation({
     const email = emailRows[0];
     if (!email) return null;
 
-    const allEvents = await ctx.db
-      .query("trackingEvents")
-      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
-      .take(200);
+    const allEvents = await getAllEventsForEmail(ctx, args.trackingId);
 
     const stats = deriveTrackingStats(allEvents);
     await ctx.db.patch(email._id, {
@@ -242,15 +243,12 @@ export const recordSelfView = internalMutation({
     });
 
     const selfMs = Date.parse(args.timestamp);
-    const events = await ctx.db
-      .query("trackingEvents")
-      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
-      .take(200);
+    const events = await getAllEventsForEmail(ctx, args.trackingId);
 
     for (const evt of events) {
-      if (evt.type === "OPEN") {
-        const openMs = Date.parse(evt.timestamp);
-        if (Number.isFinite(openMs) && isSelfViewCorrelated(openMs, selfMs)) {
+      if (evt.type === "OPEN" || evt.type === "CLICK") {
+        const evtMs = Date.parse(evt.timestamp);
+        if (Number.isFinite(evtMs) && isSelfViewCorrelated(evtMs, selfMs)) {
           await ctx.db.patch(evt._id, {
             classification: "SELF_LIKELY",
             suspectedSelfOpen: true,
@@ -260,10 +258,7 @@ export const recordSelfView = internalMutation({
       }
     }
 
-    const allEvents = await ctx.db
-      .query("trackingEvents")
-      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
-      .take(200);
+    const allEvents = await getAllEventsForEmail(ctx, args.trackingId);
 
     const stats = deriveTrackingStats(allEvents);
     await ctx.db.patch(email._id, {
@@ -302,20 +297,18 @@ export const recordOpenEvent = internalMutation({
       .take(1);
     const email = emailRows[0];
     if (email) {
-      const allEvents = await ctx.db
-        .query("trackingEvents")
-        .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
-        .take(200);
-
-      const stats = deriveTrackingStats(allEvents);
-      await ctx.db.patch(email._id, {
-        openCount: stats.openCount,
-        firstOpenedAt: stats.firstOpenedAt,
-        lastOpenedAt: stats.lastOpenedAt,
-        clickCount: stats.clickCount,
-        firstClickedAt: stats.firstClickedAt,
-        lastClickedAt: stats.lastClickedAt,
-      });
+      const isRecipient = args.classification === "RECIPIENT_LIKELY";
+      if (isRecipient) {
+        const evtMs = Date.parse(args.timestamp);
+        const lastMs = email.lastOpenedAt ? Date.parse(email.lastOpenedAt) : 0;
+        if (!lastMs || evtMs - lastMs >= 800) {
+          await ctx.db.patch(email._id, {
+            openCount: email.openCount + 1,
+            firstOpenedAt: email.firstOpenedAt || args.timestamp,
+            lastOpenedAt: args.timestamp,
+          });
+        }
+      }
     }
   },
 });
@@ -344,19 +337,15 @@ export const recordClick = internalMutation({
     const email = emailRows[0];
     if (!email) return;
 
-    const allEvents = await ctx.db
-      .query("trackingEvents")
-      .withIndex("by_trackingId", (q) => q.eq("trackingId", args.trackingId))
-      .take(200);
-
-    const stats = deriveTrackingStats(allEvents);
-    await ctx.db.patch(email._id, {
-      openCount: stats.openCount,
-      firstOpenedAt: stats.firstOpenedAt,
-      lastOpenedAt: stats.lastOpenedAt,
-      clickCount: stats.clickCount,
-      firstClickedAt: stats.firstClickedAt,
-      lastClickedAt: stats.lastClickedAt,
-    });
+    const isRecipient =
+      args.classification === "RECIPIENT_LIKELY" ||
+      (!args.classification && !args.suspectedSelfOpen);
+    if (isRecipient) {
+      await ctx.db.patch(email._id, {
+        clickCount: email.clickCount + 1,
+        firstClickedAt: email.firstClickedAt || args.timestamp,
+        lastClickedAt: args.timestamp,
+      });
+    }
   },
 });

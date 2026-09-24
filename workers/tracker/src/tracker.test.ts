@@ -3,7 +3,7 @@
  * Exercises pixel response, click redirect policy, auth gate, malformed IDs.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { safeRedirectUrl, suspectSelfOpen } from './helpers';
+import { classifyClick, safeRedirectUrl, suspectSelfOpen } from './helpers';
 
 // Recreate GIF header check independently
 const GIF87A = [0x47, 0x49, 0x46, 0x38]; // GIF8
@@ -19,6 +19,48 @@ describe('tracker pure helpers', () => {
     expect(suspectSelfOpen({ sentAt: sent, now: Date.now(), ua: null }).suspected).toBe(true);
     const old = new Date(Date.now() - 60_000).toISOString();
     expect(suspectSelfOpen({ sentAt: old, now: Date.now(), ua: null }).suspected).toBe(false);
+  });
+
+  it('classifyClick classifies sender, bot, and recipient clicks', () => {
+    const now = Date.now();
+    const sentAt = new Date(now - 10_000).toISOString();
+
+    // 1. Recipient click
+    const res1 = classifyClick({
+      sentAt,
+      now,
+      ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36',
+    });
+    expect(res1.classification).toBe('RECIPIENT_LIKELY');
+    expect(res1.countsAsClick).toBe(true);
+
+    // 2. Correlated self-view click
+    const res2 = classifyClick({
+      sentAt,
+      now,
+      ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+      selfViewTs: now - 500,
+    });
+    expect(res2.classification).toBe('SELF_LIKELY');
+    expect(res2.countsAsClick).toBe(false);
+
+    // 3. Pre-send click
+    const res3 = classifyClick({
+      sentAt: new Date(now + 10_000).toISOString(),
+      now,
+      ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    });
+    expect(res3.classification).toBe('SELF_LIKELY');
+    expect(res3.countsAsClick).toBe(false);
+
+    // 4. Scanner click
+    const res4 = classifyClick({
+      sentAt,
+      now,
+      ua: 'Barracuda-Url-Scanner/1.0',
+    });
+    expect(res4.classification).toBe('MACHINE_LIKELY');
+    expect(res4.countsAsClick).toBe(false);
   });
 });
 

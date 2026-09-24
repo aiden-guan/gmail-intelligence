@@ -223,4 +223,122 @@ describe('adapter lifecycle', () => {
     expect(adapter.isStarted()).toBe(false);
     vi.stubGlobal('MutationObserver', Original);
   });
+
+  it('clears currentThread on destroy even when thread ID is a Promise (async thread ID)', async () => {
+    let threadHandler: ((tv: unknown) => void) | undefined;
+    const adapter = new InboxSdkAdapter('', { rowDebounceMs: 0 });
+
+    let destroyCb: (() => void) | undefined;
+    const mockThreadView = {
+      // In real InboxSDK, getThreadID can return a Promise, or getThreadIDAsync is used
+      getThreadID: () => Promise.resolve('thread-async-destroy'),
+      getSubject: () => 'Async thread test',
+      getMessageViewsAll: () => [],
+      on: (event: string, cb: () => void) => {
+        if (event === 'destroy') destroyCb = cb;
+      },
+    };
+
+    adapter.bindSdk({
+      Router: { handleAllRoutes() {} },
+      Conversations: {
+        registerThreadViewHandler(cb) {
+          threadHandler = cb as (tv: unknown) => void;
+        },
+      },
+      Compose: { registerComposeViewHandler() {} },
+      Lists: { registerThreadRowViewHandler() {} },
+    });
+
+    await adapter.start(() => undefined);
+    threadHandler!(mockThreadView);
+
+    await vi.waitFor(async () => {
+      const current = await adapter.getCurrentThread();
+      expect(current.thread?.threadId).toBe('thread-async-destroy');
+    });
+
+    // Thread is destroyed
+    expect(destroyCb).toBeDefined();
+    destroyCb!();
+
+    await vi.waitFor(async () => {
+      const current = await adapter.getCurrentThread();
+      expect(current.thread).toBeUndefined();
+    });
+  });
+
+  it('clears currentThread when route changes away from thread', async () => {
+    let routeHandler: ((rv: { getRouteType?: () => string }) => void) | undefined;
+    let threadHandler: ((tv: unknown) => void) | undefined;
+    const adapter = new InboxSdkAdapter('', { rowDebounceMs: 0 });
+
+    const mockThreadView = {
+      getThreadID: () => 'thread-route-test',
+      getSubject: () => 'Route thread test',
+      getMessageViewsAll: () => [],
+      on: () => {},
+    };
+
+    adapter.bindSdk({
+      Router: {
+        handleAllRoutes(cb) {
+          routeHandler = cb;
+        },
+      },
+      Conversations: {
+        registerThreadViewHandler(cb) {
+          threadHandler = cb as (tv: unknown) => void;
+        },
+      },
+      Compose: { registerComposeViewHandler() {} },
+      Lists: { registerThreadRowViewHandler() {} },
+    });
+
+    await adapter.start(() => undefined);
+    threadHandler!(mockThreadView);
+
+    await vi.waitFor(async () => {
+      const current = await adapter.getCurrentThread();
+      expect(current.thread?.threadId).toBe('thread-route-test');
+    });
+
+    // User navigates back to inbox list
+    routeHandler!({ getRouteType: () => 'inbox' });
+
+    const current = await adapter.getCurrentThread();
+    expect(current.thread).toBeUndefined();
+  });
+
+  it('properly awaits async Router.goto in openThread, navigateToSearch, and navigateToInbox', async () => {
+    const adapter = new InboxSdkAdapter('', { rowDebounceMs: 0 });
+    const visited: string[] = [];
+
+    adapter.bindSdk({
+      Router: {
+        handleAllRoutes() {},
+        goto: async (path: string) => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          visited.push(path);
+        },
+      },
+      Conversations: { registerThreadViewHandler() {} },
+      Compose: { registerComposeViewHandler() {} },
+      Lists: { registerThreadRowViewHandler() {} },
+    });
+
+    await adapter.start(() => undefined);
+
+    const openRes = await adapter.openThread('thread-123');
+    expect(openRes.success).toBe(true);
+    expect(visited).toContain('#inbox/thread-123');
+
+    const searchRes = await adapter.navigateToSearch('has:attachment');
+    expect(searchRes.success).toBe(true);
+    expect(visited).toContain('#search/has%3Aattachment');
+
+    const inboxRes = await adapter.navigateToInbox();
+    expect(inboxRes.success).toBe(true);
+    expect(visited).toContain('#inbox');
+  });
 });

@@ -8,17 +8,33 @@ export type InboxSdkMessageViewLike = MessageIdView & {
   destroyed?: boolean;
 };
 
+export type SelfViewSource =
+  | 'ROW_INTERACTION'
+  | 'MESSAGE_EXPANDED'
+  | 'MESSAGE_LOAD'
+  | 'CACHE_REINSPECTION';
+
+/** Backwards-compatible alias */
 export type MessageSelfViewTrigger =
+  | SelfViewSource
   | 'message-expanded'
   | 'message-load'
   | 'cache-reinspection';
 
 export interface MessageSelfViewController {
   handleMessageView(messageView: InboxSdkMessageViewLike): void;
-  reinspectActive(observedAt?: number): Promise<void>;
+  reinspectActive(): Promise<void>;
   getActiveCount(): number;
   destroy(): void;
 }
+
+export type ActiveMessageViewState = {
+  view: InboxSdkMessageViewLike;
+  expandedAt: number | null;
+  lastReportedTrackingId?: string;
+  lastReportedMessageId?: string;
+  lastReportedExpandedAt?: number;
+};
 
 export function createMessageSelfViewHandler(opts: {
   getEmails: () => TrackedEmailSummary[];
@@ -27,26 +43,30 @@ export function createMessageSelfViewHandler(opts: {
     gmailThreadId: string | null,
     gmailMessageId: string | null,
     observedAt: number,
-    trigger: MessageSelfViewTrigger,
+    trigger: SelfViewSource,
   ) => void;
 }): MessageSelfViewController {
-  const activeMessageViews = new Set<InboxSdkMessageViewLike>();
+  const activeMessageViews = new Map<InboxSdkMessageViewLike, ActiveMessageViewState>();
 
   async function inspectMessageView(
-    messageView: InboxSdkMessageViewLike,
-    observedAt = Date.now(),
-    trigger: MessageSelfViewTrigger = 'message-expanded',
+    state: ActiveMessageViewState,
+    source: SelfViewSource = 'MESSAGE_EXPANDED',
   ): Promise<void> {
+    const messageView = state.view;
     try {
       if (messageView.destroyed) {
         activeMessageViews.delete(messageView);
         return;
       }
 
-      const state = typeof messageView.getViewState === 'function' ? messageView.getViewState() : null;
-      if (state !== 'EXPANDED') {
+      const viewState = typeof messageView.getViewState === 'function' ? messageView.getViewState() : null;
+      if (viewState !== 'EXPANDED') {
         return;
       }
+
+      // Preserve real observation time
+      const observedAt = state.expandedAt ?? Date.now();
+      state.expandedAt = observedAt;
 
       const rawMessageId = await resolveMessageId(messageView);
       const messageId = normalizeGmailId(rawMessageId);
@@ -55,18 +75,38 @@ export function createMessageSelfViewHandler(opts: {
       const emails = opts.getEmails();
       const match = emails.find((item) => normalizeGmailId(item.gmailMessageId) === messageId);
       if (match) {
+        // If already reported for this view and this expansion timestamp, do not emit again
+        if (
+          state.lastReportedTrackingId === match.trackingId &&
+          state.lastReportedMessageId === messageId &&
+          state.lastReportedExpandedAt === observedAt
+        ) {
+          return;
+        }
+
+        state.lastReportedTrackingId = match.trackingId;
+        state.lastReportedMessageId = messageId;
+        state.lastReportedExpandedAt = observedAt;
+
         const threadView = typeof messageView.getThreadView === 'function' ? messageView.getThreadView() : null;
         const rawThreadId = threadView ? await resolveThreadId(threadView) : null;
         const threadId = normalizeGmailId(rawThreadId) || normalizeGmailId(match.gmailThreadId);
-        opts.onSelfView(match.trackingId, threadId, messageId, observedAt, trigger);
+        opts.onSelfView(match.trackingId, threadId, messageId, observedAt, source);
       }
-    } catch {
-      /* message view inspection is optional */
+    } catch (error) {
+      console.warn('[gi][self-view] Message view inspection error', error);
     }
   }
 
   function handleMessageView(messageView: InboxSdkMessageViewLike): void {
-    activeMessageViews.add(messageView);
+    let state = activeMessageViews.get(messageView);
+    if (!state) {
+      state = {
+        view: messageView,
+        expandedAt: null,
+      };
+      activeMessageViews.set(messageView, state);
+    }
 
     if (typeof messageView.on === 'function') {
       messageView.on('destroy', () => {
@@ -78,8 +118,15 @@ export function createMessageSelfViewHandler(opts: {
           ? messageView.getViewState()
           : event?.newViewState;
         if (currentState === 'EXPANDED') {
-          const observedAt = Date.now();
-          void inspectMessageView(messageView, observedAt, 'message-expanded');
+          if (!state.expandedAt) {
+            state.expandedAt = Date.now();
+          }
+          void inspectMessageView(state, 'MESSAGE_EXPANDED');
+        } else {
+          state.expandedAt = null;
+          state.lastReportedExpandedAt = undefined;
+          state.lastReportedTrackingId = undefined;
+          state.lastReportedMessageId = undefined;
         }
       });
 
@@ -88,29 +135,37 @@ export function createMessageSelfViewHandler(opts: {
           ? messageView.getViewState()
           : null;
         if (currentState === 'EXPANDED') {
-          const observedAt = Date.now();
-          void inspectMessageView(messageView, observedAt, 'message-load');
+          if (!state.expandedAt) {
+            state.expandedAt = Date.now();
+          }
+          void inspectMessageView(state, 'MESSAGE_LOAD');
         }
       });
     }
 
     const initial = typeof messageView.getViewState === 'function' ? messageView.getViewState() : null;
     if (initial === 'EXPANDED') {
-      const observedAt = Date.now();
-      void inspectMessageView(messageView, observedAt, 'message-expanded');
+      if (!state.expandedAt) {
+        state.expandedAt = Date.now();
+      }
+      void inspectMessageView(state, 'MESSAGE_EXPANDED');
     }
   }
 
-  async function reinspectActive(observedAt = Date.now()): Promise<void> {
+  async function reinspectActive(): Promise<void> {
     const promises: Promise<void>[] = [];
-    for (const mv of [...activeMessageViews]) {
+    for (const state of [...activeMessageViews.values()]) {
+      const mv = state.view;
       if (mv.destroyed) {
         activeMessageViews.delete(mv);
         continue;
       }
-      const state = typeof mv.getViewState === 'function' ? mv.getViewState() : null;
-      if (state === 'EXPANDED') {
-        promises.push(inspectMessageView(mv, observedAt, 'cache-reinspection'));
+      const viewState = typeof mv.getViewState === 'function' ? mv.getViewState() : null;
+      if (viewState === 'EXPANDED') {
+        if (!state.expandedAt) {
+          state.expandedAt = Date.now();
+        }
+        promises.push(inspectMessageView(state, 'CACHE_REINSPECTION'));
       }
     }
     await Promise.all(promises);

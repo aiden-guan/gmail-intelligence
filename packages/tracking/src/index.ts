@@ -772,6 +772,7 @@ function clickCountLabel(count: number): string {
 }
 
 export {
+  classifyClickEvent,
   classifyOpenEvent,
   deriveTrackingStats,
   detectOpenRequestSource,
@@ -785,6 +786,8 @@ export {
   trackerHealthLabel,
 } from './lifecycle.js';
 export type {
+  ClickClassification,
+  ClickVerdict,
   DerivedTrackingStats,
   MimeTrackingInspection,
   OpenClassification,

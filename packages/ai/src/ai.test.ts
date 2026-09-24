@@ -31,6 +31,73 @@ describe('AI cache invalidation', () => {
     });
     expect(calls).toBe(2);
   });
+
+  it('recomputes and replaces cache when bypassCache is true', async () => {
+    const q = new AIJobQueue();
+    let calls = 0;
+    const res1 = await q.enqueue('summary', 'fp1', async () => {
+      calls += 1;
+      return 'first';
+    });
+    expect(res1).toBe('first');
+    expect(calls).toBe(1);
+
+    // Without bypassCache, returns cached 'first'
+    const res2 = await q.enqueue('summary', 'fp1', async () => {
+      calls += 1;
+      return 'second';
+    });
+    expect(res2).toBe('first');
+    expect(calls).toBe(1);
+
+    // With bypassCache, invokes function again and updates cache
+    const res3 = await q.enqueue('summary', 'fp1', async () => {
+      calls += 1;
+      return 'third';
+    }, { bypassCache: true });
+    expect(res3).toBe('third');
+    expect(calls).toBe(2);
+
+    // Subsequent normal call returns 'third'
+    const res4 = await q.enqueue('summary', 'fp1', async () => {
+      calls += 1;
+      return 'fourth';
+    });
+    expect(res4).toBe('third');
+    expect(calls).toBe(2);
+  });
+
+  it('aborts signal on timeout and does not write late results to cache', async () => {
+    const q = new AIJobQueue();
+    let aborted = false;
+    let lateFinished = false;
+
+    await expect(
+      q.enqueue(
+        'classify',
+        'fp_timeout',
+        async (signal) => {
+          signal?.addEventListener('abort', () => {
+            aborted = true;
+          });
+          await new Promise((r) => setTimeout(r, 100));
+          lateFinished = true;
+          return { ok: true };
+        },
+        { timeoutMs: 30 },
+      ),
+    ).rejects.toThrow('timed out');
+
+    expect(aborted).toBe(true);
+
+    // Wait past the late completion
+    await new Promise((r) => setTimeout(r, 120));
+    expect(lateFinished).toBe(true);
+
+    // Cache must remain empty because the job timed out
+    expect(q.getCached('fp_timeout', 'classify')).toBeUndefined();
+    expect(q.usageToday.classifications).toBe(0);
+  });
 });
 
 describe('draft prompt placeholders', () => {

@@ -1,4 +1,4 @@
-import type { ExtensionSettings } from '@gi/shared';
+import type { ExtensionSettings, PublicExtensionSettings } from '@gi/shared';
 import {
   clickIdFromTrackedUrl,
   normalizeGmailId,
@@ -59,7 +59,7 @@ export type SdkComposeView = {
 };
 
 export type ComposeTrackingDeps = {
-  getSettings: () => ExtensionSettings;
+  getSettings: () => PublicExtensionSettings | ExtensionSettings;
   refreshSettings: () => Promise<void>;
   createTracked: (input: CreateTrackedEmailInput) => Promise<CreateTrackedEmailResult | null>;
   markSent: (patch: TrackedEmailPatch & { trackingId: string }) => void;
@@ -547,11 +547,14 @@ async function readThreadId(view: SdkComposeView): Promise<string | null> {
   }
 }
 
-function trackingConfigured(settings: ExtensionSettings): boolean {
+function trackingConfigured(settings: PublicExtensionSettings | ExtensionSettings): boolean {
+  const hasToken = 'hasPersonalApiToken' in settings
+    ? settings.hasPersonalApiToken
+    : Boolean(settings.personalApiToken?.trim());
   return Boolean(
     settings.trackingEnabled &&
       settings.trackerBaseUrl.trim() &&
-      settings.personalApiToken.trim() &&
+      hasToken &&
       (settings.trackOpens || settings.trackLinks),
   );
 }

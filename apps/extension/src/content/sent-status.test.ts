@@ -164,7 +164,7 @@ describe('sent mail open status', () => {
     // Click the recycled row - must report trk_wait, NOT trk_open!
     rowEl.click();
     expect(onSelfView).toHaveBeenCalledTimes(1);
-    expect(onSelfView).toHaveBeenCalledWith('trk_wait', 'thread-2', 'msg-1', expect.any(Number));
+    expect(onSelfView).toHaveBeenCalledWith('trk_wait', 'thread-2', 'msg-1', expect.any(Number), 'ROW_INTERACTION');
   });
 
   it('captures early pointerdown interaction and deduplicates rapid subsequent click', () => {
@@ -176,13 +176,10 @@ describe('sent mail open status', () => {
     // 1. Pointerdown fires first at T=0
     rowEl.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     expect(onSelfView).toHaveBeenCalledTimes(1);
-    expect(onSelfView).toHaveBeenCalledWith('trk_open', 'thread-1', 'msg-1', expect.any(Number));
+    expect(onSelfView).toHaveBeenCalledWith('trk_open', 'thread-1', 'msg-1', expect.any(Number), 'ROW_INTERACTION');
 
     // 2. Click fires immediately after (e.g. 50ms later) -> deduplicated by 10s window in installSentStatus
     rowEl.click();
-    // In paintRows direct invocation, onSelfView is the raw callback passed into paintRows,
-    // which was called twice here because paintRows delegates dedupe to the controller.
-    // Let's verify installSentStatus handles the deduplication end-to-end:
   });
 
   it('installSentStatus deduplicates rapid repeated self-view interactions within 10s', () => {
@@ -199,7 +196,7 @@ describe('sent mail open status', () => {
     // Pointerdown early hint
     rowEl.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     expect(onSelfView).toHaveBeenCalledTimes(1);
-    expect(onSelfView).toHaveBeenCalledWith('trk_open', 'thread-1', 'msg-1', expect.any(Number));
+    expect(onSelfView).toHaveBeenCalledWith('trk_open', 'thread-1', 'msg-1', expect.any(Number), 'ROW_INTERACTION');
 
     // Follow-up click from browser
     rowEl.click();
@@ -207,6 +204,99 @@ describe('sent mail open status', () => {
     expect(onSelfView).toHaveBeenCalledTimes(1);
 
     controller.destroy();
+  });
+
+  describe('Priority 3 & Section 10: only thread navigation targets emit row-level view hint', () => {
+    it('clicking subject emits ROW_INTERACTION SELF_VIEW hint', () => {
+      document.body.innerHTML = `
+        <table><tbody>
+          <tr class="zA" data-legacy-thread-id="thread-1">
+            <td class="yX"><div class="yW"><span email="aiden@example.com">Aiden</span></div></td>
+            <td><span class="bog">Subject Text</span></td>
+          </tr>
+        </tbody></table>
+      `;
+      const onSelfView = vi.fn();
+      paintRows(document, [opened], 'https://track.example', () => undefined, onSelfView);
+
+      const subjectEl = document.querySelector('.bog')!;
+      subjectEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onSelfView).toHaveBeenCalledTimes(1);
+      expect(onSelfView).toHaveBeenCalledWith('trk_open', 'thread-1', 'msg-1', expect.any(Number), 'ROW_INTERACTION');
+    });
+
+    it('clicking checkbox does NOT emit SELF_VIEW', () => {
+      document.body.innerHTML = `
+        <table><tbody>
+          <tr class="zA" data-legacy-thread-id="thread-1">
+            <td class="oZ-x3"><div role="checkbox" class="T-Jo" aria-checked="false"></div></td>
+            <td class="yX"><div class="yW"><span email="aiden@example.com">Aiden</span></div></td>
+            <td><span class="bog">Subject Text</span></td>
+          </tr>
+        </tbody></table>
+      `;
+      const onSelfView = vi.fn();
+      paintRows(document, [opened], 'https://track.example', () => undefined, onSelfView);
+
+      const checkboxEl = document.querySelector('[role="checkbox"]')!;
+      checkboxEl.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      checkboxEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onSelfView).not.toHaveBeenCalled();
+    });
+
+    it('clicking star does NOT emit SELF_VIEW', () => {
+      document.body.innerHTML = `
+        <table><tbody>
+          <tr class="zA" data-legacy-thread-id="thread-1">
+            <td class="apU"><span class="T-KT" aria-label="Not starred" role="button"></span></td>
+            <td class="yX"><div class="yW"><span email="aiden@example.com">Aiden</span></div></td>
+            <td><span class="bog">Subject Text</span></td>
+          </tr>
+        </tbody></table>
+      `;
+      const onSelfView = vi.fn();
+      paintRows(document, [opened], 'https://track.example', () => undefined, onSelfView);
+
+      const starEl = document.querySelector('.T-KT')!;
+      starEl.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      starEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onSelfView).not.toHaveBeenCalled();
+    });
+
+    it('clicking Gmail row menu / hover action does NOT emit SELF_VIEW', () => {
+      document.body.innerHTML = `
+        <table><tbody>
+          <tr class="zA" data-legacy-thread-id="thread-1">
+            <td class="yX"><div class="yW"><span email="aiden@example.com">Aiden</span></div></td>
+            <td><span class="bog">Subject Text</span></td>
+            <td class="bq9"><button data-tooltip="Archive" aria-label="Archive"></button></td>
+          </tr>
+        </tbody></table>
+      `;
+      const onSelfView = vi.fn();
+      paintRows(document, [opened], 'https://track.example', () => undefined, onSelfView);
+
+      const actionBtn = document.querySelector('.bq9 button')!;
+      actionBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      actionBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onSelfView).not.toHaveBeenCalled();
+    });
+
+    it('clicking tracking status control does NOT emit SELF_VIEW', () => {
+      row('thread-1', 'aiden@example.com', 'Hello');
+      const onSelfView = vi.fn();
+      paintRows(document, [opened], 'https://track.example', () => undefined, onSelfView);
+
+      const trackBtn = document.querySelector('.gi-track-btn')!;
+      trackBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      trackBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onSelfView).not.toHaveBeenCalled();
+    });
   });
 
   it('paintConversation does not emit self-view', () => {

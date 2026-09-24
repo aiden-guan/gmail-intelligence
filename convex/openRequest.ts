@@ -153,6 +153,81 @@ export function classifyOpenEvent(opts: {
   };
 }
 
+export type ClickClassification =
+  | "RECIPIENT_LIKELY"
+  | "SELF_LIKELY"
+  | "MACHINE_LIKELY"
+  | "UNKNOWN";
+
+export type ClickVerdict = {
+  classification: ClickClassification;
+  suspected: boolean;
+  confidence: number;
+  countsAsClick: boolean;
+  source: OpenRequestSource;
+};
+
+export function classifyClickEvent(opts: {
+  eventTs: number;
+  sentAt: number | null;
+  userAgent?: string | null;
+  selfViewTs?: number | null;
+}): ClickVerdict {
+  const sentAt = opts.sentAt;
+  const source = detectOpenRequestSource(opts.userAgent);
+
+  // Pre-send clicks
+  if (sentAt == null || !Number.isFinite(sentAt) || opts.eventTs < sentAt) {
+    return {
+      classification: "SELF_LIKELY",
+      suspected: true,
+      confidence: 1,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  // Correlated sender self-view takes precedence
+  if (opts.selfViewTs != null && isSelfViewCorrelated(opts.eventTs, opts.selfViewTs)) {
+    return {
+      classification: "SELF_LIKELY",
+      suspected: true,
+      confidence: 1,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  // Machine / scanner fetches
+  if (source === "headless" || source === "scanner" || source === "google_image_proxy") {
+    return {
+      classification: "MACHINE_LIKELY",
+      suspected: true,
+      confidence: 0.9,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  if (source === "unknown") {
+    return {
+      classification: "UNKNOWN",
+      suspected: true,
+      confidence: 0.5,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  return {
+    classification: "RECIPIENT_LIKELY",
+    suspected: false,
+    confidence: 0,
+    countsAsClick: true,
+    source,
+  };
+}
+
 export type TrackingEventLike = {
   type: string;
   timestamp: string;
@@ -168,6 +243,8 @@ export type DerivedTrackingStats = {
   clickCount: number;
   firstClickedAt: string | null;
   lastClickedAt: string | null;
+  pixelLoadCount: number;
+  possibleOpenCount: number;
 };
 
 export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackingStats {
@@ -177,12 +254,17 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
   let lastOpenedAt: string | null = null;
   let lastValidOpenMs = 0;
 
+  let pixelLoadCount = 0;
+  let possibleOpenCount = 0;
+  let lastPossibleOpenMs = 0;
+
   let clickCount = 0;
   let firstClickedAt: string | null = null;
   let lastClickedAt: string | null = null;
 
   for (const evt of sorted) {
     if (evt.type === "OPEN") {
+      pixelLoadCount += 1;
       const isSelf = Boolean(evt.suspectedSelfOpen || evt.classification === "SELF_LIKELY");
       const isExplicitNonRecipient =
         evt.classification === "PROXY_LIKELY" ||
@@ -203,20 +285,41 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
         !isExplicitNonRecipient &&
         !isDetectedMachine;
 
+      const evtMs = Date.parse(evt.timestamp);
+
       if (isRecipient) {
-        const evtMs = Date.parse(evt.timestamp);
-        if (lastValidOpenMs && Number.isFinite(evtMs) && evtMs >= lastValidOpenMs && evtMs - lastValidOpenMs < 800) {
-          continue;
+        if (!lastValidOpenMs || !Number.isFinite(evtMs) || evtMs < lastValidOpenMs || evtMs - lastValidOpenMs >= 800) {
+          openCount += 1;
+          lastValidOpenMs = evtMs;
+          if (!firstOpenedAt) firstOpenedAt = evt.timestamp;
+          lastOpenedAt = evt.timestamp;
         }
-        openCount += 1;
-        lastValidOpenMs = evtMs;
-        if (!firstOpenedAt) firstOpenedAt = evt.timestamp;
-        lastOpenedAt = evt.timestamp;
+      }
+
+      // Possible opens: verified opens or proxy opens (GoogleImageProxy), but self-view takes precedence (SELF_LIKELY excluded)
+      const isProxy = evt.classification === "PROXY_LIKELY" || detectedSource === "google_image_proxy";
+      if (!isSelf && (isRecipient || (isProxy && detectedSource !== "headless" && detectedSource !== "scanner"))) {
+        if (!lastPossibleOpenMs || !Number.isFinite(evtMs) || evtMs < lastPossibleOpenMs || evtMs - lastPossibleOpenMs >= 800) {
+          possibleOpenCount += 1;
+          lastPossibleOpenMs = evtMs;
+        }
       }
     } else if (evt.type === "CLICK") {
-      clickCount += 1;
-      if (!firstClickedAt) firstClickedAt = evt.timestamp;
-      lastClickedAt = evt.timestamp;
+      const isSelf = Boolean(evt.suspectedSelfOpen || evt.classification === "SELF_LIKELY");
+      const ua = evt.userAgent;
+      const detectedSource = ua ? detectOpenRequestSource(ua) : null;
+      const isMachine = evt.classification === "MACHINE_LIKELY" || detectedSource === "headless" || detectedSource === "scanner";
+      const isExplicitNonRecipient = isSelf || isMachine || evt.classification === "UNKNOWN";
+
+      const isRecipientClick =
+        evt.classification === "RECIPIENT_LIKELY" ||
+        (!evt.classification && !isExplicitNonRecipient);
+
+      if (isRecipientClick) {
+        clickCount += 1;
+        if (!firstClickedAt) firstClickedAt = evt.timestamp;
+        lastClickedAt = evt.timestamp;
+      }
     }
   }
 
@@ -227,6 +330,8 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
     clickCount,
     firstClickedAt,
     lastClickedAt,
+    pixelLoadCount,
+    possibleOpenCount,
   };
 }
 

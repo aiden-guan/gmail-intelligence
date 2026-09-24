@@ -338,11 +338,15 @@ export class AgentLoop {
         const active = this.inFlightJobs.get(key);
         if (active) active.status = 'running';
 
-        const { result } = await this.deps.queue.enqueue('summary', fingerprint, () =>
-          this.deps.ai!.summarizeThread({
-            subject: input.subject,
-            messages: input.messages,
-          }),
+        const { result } = await this.deps.queue.enqueue(
+          'summary',
+          fingerprint,
+          () =>
+            this.deps.ai!.summarizeThread({
+              subject: input.subject,
+              messages: input.messages,
+            }),
+          { bypassCache: Boolean(input.force) },
         );
         const summary = tightenSummary(result, input);
         await this.deps.db.thread_summaries.put({
@@ -358,6 +362,7 @@ export class AgentLoop {
         await this.deps.db.ai_jobs?.update(jobId, {
           status: 'succeeded',
           completedAt: Date.now(),
+          resultId: input.threadId,
         }).catch(() => {});
         await this.deps.log({
           type: 'summarize',
@@ -390,7 +395,9 @@ export class AgentLoop {
         this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
         return { ok: false, error: errorMsg, source: 'message' as const, aiStatus: 'failed' as const, oneLine: fallback.oneLine };
       } finally {
-        this.inFlightJobs.delete(key);
+        if (this.inFlightJobs.get(key)?.jobId === jobId) {
+          this.inFlightJobs.delete(key);
+        }
       }
     })();
 
@@ -450,14 +457,18 @@ export class AgentLoop {
         const active = this.inFlightJobs.get(key);
         if (active) active.status = 'running';
 
-        const { result } = await this.deps.queue.enqueue('draft', input.fingerprint, () =>
-          this.deps.ai!.draftReply({
-            subject: input.subject,
-            messages: input.messages,
-            voice: this.deps.settings().voiceProfile,
-            mode: 'direct',
-            kind: 'reply',
-          }),
+        const { result } = await this.deps.queue.enqueue(
+          'draft',
+          input.fingerprint,
+          () =>
+            this.deps.ai!.draftReply({
+              subject: input.subject,
+              messages: input.messages,
+              voice: this.deps.settings().voiceProfile,
+              mode: 'direct',
+              kind: 'reply',
+            }),
+          { bypassCache: Boolean(input.force) },
         );
         const placeholders = detectPlaceholders(result.body);
         const suggestion = { ...result, placeholders };
@@ -473,6 +484,7 @@ export class AgentLoop {
         await this.deps.db.ai_jobs?.update(jobId, {
           status: 'succeeded',
           completedAt: Date.now(),
+          resultId: id,
         }).catch(() => {});
 
         let inserted = false;
@@ -501,7 +513,9 @@ export class AgentLoop {
         this.deps.onIntel?.(input.threadId, 'THREAD_INTELLIGENCE_UPDATED');
         return { ok: false, error: errorMsg };
       } finally {
-        this.inFlightJobs.delete(key);
+        if (this.inFlightJobs.get(key)?.jobId === jobId) {
+          this.inFlightJobs.delete(key);
+        }
       }
     })();
 

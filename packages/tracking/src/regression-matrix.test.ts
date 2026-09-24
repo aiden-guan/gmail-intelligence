@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyRecentOpens,
+  classifyClickEvent,
   deriveTrackingStats,
   describeTrackingStatus,
   detectOpenRequestSource,
@@ -505,5 +506,125 @@ describe('Regression Matrix (Cases A through N)', () => {
     );
 
     expect(matched?.trackingId).toBe('trk_norm_test');
+  });
+
+  // Case O: Click classification and telemetry (recipient clicks vs sender clicks vs scanner clicks, and pixelLoadCount / possibleOpenCount)
+  it('Case O: Click classification and telemetry derives accurate click and open counts', () => {
+    const sendTs = Date.parse('2026-09-24T10:00:00.000Z');
+    const senderSelfViewTs = Date.parse('2026-09-24T10:01:00.000Z');
+
+    // 1. Pre-send click (composer/preview) -> SELF_LIKELY
+    const preSendClick = classifyClickEvent({
+      eventTs: sendTs - 5000,
+      sentAt: sendTs,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    });
+    expect(preSendClick.classification).toBe('SELF_LIKELY');
+    expect(preSendClick.countsAsClick).toBe(false);
+
+    // 2. Sender self-click correlated with self-view -> SELF_LIKELY
+    const senderClick = classifyClickEvent({
+      eventTs: senderSelfViewTs + 1000,
+      sentAt: sendTs,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+      selfViewTs: senderSelfViewTs,
+    });
+    expect(senderClick.classification).toBe('SELF_LIKELY');
+    expect(senderClick.countsAsClick).toBe(false);
+
+    // 3. Security scanner click -> MACHINE_LIKELY
+    const scannerClick = classifyClickEvent({
+      eventTs: sendTs + 60000,
+      sentAt: sendTs,
+      userAgent: 'Proofpoint-URL-Scanner/2.0',
+    });
+    expect(scannerClick.classification).toBe('MACHINE_LIKELY');
+    expect(scannerClick.countsAsClick).toBe(false);
+
+    // 4. Recipient click -> RECIPIENT_LIKELY
+    const recipientClick = classifyClickEvent({
+      eventTs: sendTs + 120000,
+      sentAt: sendTs,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    });
+    expect(recipientClick.classification).toBe('RECIPIENT_LIKELY');
+    expect(recipientClick.countsAsClick).toBe(true);
+
+    // 5. Derive stats from mixed events including proxy opens, self-view, and clicks
+    const stats = deriveTrackingStats([
+      // Pixel load from GoogleImageProxy (proxy open, possible open)
+      {
+        type: 'OPEN',
+        timestamp: '2026-09-24T10:00:30.000Z',
+        classification: 'PROXY_LIKELY',
+        userAgent: 'GoogleImageProxy',
+      },
+      // Sender self-view pixel load (must not count towards verified open or possible open)
+      {
+        type: 'OPEN',
+        timestamp: '2026-09-24T10:01:00.000Z',
+        classification: 'SELF_LIKELY',
+        suspectedSelfOpen: true,
+      },
+      // Sender click correlated with self-view
+      {
+        type: 'CLICK',
+        timestamp: '2026-09-24T10:01:01.000Z',
+        classification: 'SELF_LIKELY',
+        suspectedSelfOpen: true,
+      },
+      // Scanner click
+      {
+        type: 'CLICK',
+        timestamp: '2026-09-24T10:02:00.000Z',
+        classification: 'MACHINE_LIKELY',
+      },
+      // Legitimate recipient open
+      {
+        type: 'OPEN',
+        timestamp: '2026-09-24T10:05:00.000Z',
+        classification: 'RECIPIENT_LIKELY',
+        userAgent: 'Mozilla/5.0 Safari/605.1.15',
+      },
+      // Legitimate recipient click
+      {
+        type: 'CLICK',
+        timestamp: '2026-09-24T10:05:30.000Z',
+        classification: 'RECIPIENT_LIKELY',
+      },
+      // Legacy unclassified click (backward compatibility fallback)
+      {
+        type: 'CLICK',
+        timestamp: '2026-09-24T10:06:00.000Z',
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+      },
+    ]);
+
+    expect(stats.openCount).toBe(1); // Only the 1 recipient open is verified
+    expect(stats.pixelLoadCount).toBe(3); // All 3 OPEN events
+    expect(stats.possibleOpenCount).toBe(2); // Proxy open + recipient open (self-view excluded)
+    expect(stats.clickCount).toBe(2); // 1 RECIPIENT_LIKELY + 1 legacy unclassified (self and scanner clicks excluded)
+    expect(stats.firstClickedAt).toBe('2026-09-24T10:05:30.000Z');
+  });
+
+  // Case P: Aggregation with >200 events derives stats accurately without truncation
+  it('Case P: Aggregation with >200 events derives accurate counts without truncation', () => {
+    const events: Array<{ type: string; timestamp: string; classification: string }> = [];
+    const baseTime = Date.parse('2026-09-24T10:00:00.000Z');
+
+    // Generate 250 distinct recipient opens 2 seconds apart
+    for (let i = 0; i < 250; i++) {
+      events.push({
+        type: 'OPEN',
+        timestamp: new Date(baseTime + i * 2000).toISOString(),
+        classification: 'RECIPIENT_LIKELY',
+      });
+    }
+
+    const stats = deriveTrackingStats(events);
+    expect(stats.openCount).toBe(250);
+    expect(stats.pixelLoadCount).toBe(250);
+    expect(stats.firstOpenedAt).toBe(new Date(baseTime).toISOString());
+    expect(stats.lastOpenedAt).toBe(new Date(baseTime + 249 * 2000).toISOString());
   });
 });

@@ -74,9 +74,15 @@ export class InboxSdkAdapter implements GmailAdapter {
     const sdk = this.sdk;
     try {
       sdk.Router.handleAllRoutes((routeView) => {
+        const rawType = (routeView.getRouteType?.() || '').toLowerCase();
+        const mapped = mapRoute(rawType);
+        const isThreadRoute = rawType.includes('thread');
+        if (!isThreadRoute && (mapped !== 'unknown' || rawType.includes('list'))) {
+          this.currentThread = null;
+        }
         emit({
           type: 'ROUTE_CHANGED',
-          route: mapRoute(routeView.getRouteType?.() || 'unknown'),
+          route: mapped,
           at: Date.now(),
         });
       });
@@ -86,14 +92,17 @@ export class InboxSdkAdapter implements GmailAdapter {
 
     try {
       sdk.Conversations.registerThreadViewHandler((threadView) => {
+        let destroyed = false;
+        const threadIdPromise = resolveThreadId(threadView);
+
         const attachMessageListeners = () => {
           const mvs = threadView.getMessageViewsAll?.() || threadView.getMessageViews?.() || [];
           for (const mv of mvs) {
             mv.on?.('load', () => {
-              if (generation !== this.generation) return;
+              if (generation !== this.generation || destroyed) return;
               void mapThreadView(threadView)
                 .then((thread) => {
-                  if (thread && generation === this.generation) {
+                  if (thread && generation === this.generation && !destroyed) {
                     this.currentThread = thread;
                     emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
                   }
@@ -105,14 +114,18 @@ export class InboxSdkAdapter implements GmailAdapter {
         attachMessageListeners();
 
         threadView.on?.('destroy', () => {
-          if (generation === this.generation && this.currentThread?.threadId === threadView.getThreadID?.()) {
-            this.currentThread = null;
-          }
+          destroyed = true;
+          if (generation !== this.generation) return;
+          void threadIdPromise.then((tid) => {
+            if (generation === this.generation && tid && this.currentThread?.threadId === tid) {
+              this.currentThread = null;
+            }
+          });
         });
 
         void mapThreadView(threadView)
           .then((thread) => {
-            if (thread && generation === this.generation) {
+            if (thread && generation === this.generation && !destroyed) {
               this.currentThread = thread;
               emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
             }
@@ -133,8 +146,10 @@ export class InboxSdkAdapter implements GmailAdapter {
           void mapThreadView(threadView)
             .then((thread) => {
               if (thread && generation === this.generation) {
-                this.currentThread = thread;
-                emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
+                if (!this.currentThread || this.currentThread.threadId === thread.threadId) {
+                  this.currentThread = thread;
+                  emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
+                }
               }
             })
             .catch(() => {});
@@ -261,7 +276,7 @@ export class InboxSdkAdapter implements GmailAdapter {
   async openThread(threadId: string) {
     if (!this.sdk) return this.fallback.openThread(threadId);
     try {
-      this.sdk.Router.goto?.(`#inbox/${threadId}`);
+      await Promise.resolve(this.sdk.Router.goto?.(`#inbox/${threadId}`));
       return { ...ok('openThread'), threadId, verified: false };
     } catch (error) {
       return fail('openThread', String(error));
@@ -344,7 +359,7 @@ export class InboxSdkAdapter implements GmailAdapter {
   async navigateToSearch(query: string) {
     if (this.sdk?.Router?.goto) {
       try {
-        this.sdk.Router.goto(`#search/${encodeURIComponent(query)}`);
+        await Promise.resolve(this.sdk.Router.goto(`#search/${encodeURIComponent(query)}`));
         return ok('navigateToSearch');
       } catch {
         /* fall through */
@@ -355,7 +370,7 @@ export class InboxSdkAdapter implements GmailAdapter {
   async navigateToInbox() {
     if (this.sdk?.Router?.goto) {
       try {
-        this.sdk.Router.goto('#inbox');
+        await Promise.resolve(this.sdk.Router.goto('#inbox'));
         return ok('navigateToInbox');
       } catch {
         /* fall through */
@@ -524,7 +539,7 @@ async function mapCompose(view: ComposeViewLike): Promise<ComposeViewState> {
 export type InboxSdkLike = {
   Router: {
     handleAllRoutes: (cb: (rv: { getRouteType?: () => string }) => void) => void;
-    goto?: (path: string) => void;
+    goto?: (path: string) => void | Promise<void>;
   };
   Conversations: {
     registerThreadViewHandler: (cb: (tv: ThreadViewLike) => void) => void;

@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
+import { DEFAULT_SETTINGS, toPublicSettings, type ExtensionSettings } from '@gi/shared';
 import { describe, expect, it, vi } from 'vitest';
 import {
   attachSdkComposeTracking,
@@ -289,5 +289,33 @@ describe('gmail send interception', () => {
     session.trackingId = 'trk_1';
     session.pixelUrl = 'https://track.example/open/trk_1';
     expect(decidePresending(session, true)).toBe('allow');
+  });
+
+  it('works with PublicExtensionSettings without secrets exposed', async () => {
+    resetComposeSessionsForTests();
+    const gmail = new GmailComposeSendHarness('new');
+    const fullSettings: ExtensionSettings = {
+      ...DEFAULT_SETTINGS,
+      trackingEnabled: true,
+      trackOpens: true,
+      trackLinks: true,
+      trackerBaseUrl: 'https://track.example',
+      personalApiToken: 'super-secret-token',
+      aiApiKey: 'super-secret-ai-key',
+    };
+    const publicSettings = toPublicSettings(fullSettings);
+    // Ensure secrets are not present
+    expect((publicSettings as Record<string, unknown>).personalApiToken).toBeUndefined();
+    expect((publicSettings as Record<string, unknown>).aiApiKey).toBeUndefined();
+    expect(publicSettings.hasPersonalApiToken).toBe(true);
+
+    const tracking = deps({
+      getSettings: () => publicSettings,
+    });
+    const id = attachSdkComposeTracking(gmail.view(), tracking);
+    gmail.recipients = [{ emailAddress: 'recipient@example.com' }];
+    gmail.emit('recipientsChanged');
+    await vi.waitFor(() => expect(getComposeSession(id)?.trackingId).toBe('trk_1'));
+    expect(tracking.created).toBe(1);
   });
 });

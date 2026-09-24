@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { ExtensionSettings } from '@gi/shared';
-import { DEFAULT_SETTINGS, buildThreadSnapshot, localThreadSummary } from '@gi/shared';
+import type { ExtensionSettings, PublicExtensionSettings } from '@gi/shared';
+import { DEFAULT_SETTINGS, toPublicSettings, buildThreadSnapshot, localThreadSummary } from '@gi/shared';
 import {
   CompositeGmailAdapter,
   findComposeBody,
@@ -30,14 +30,15 @@ import {
 import { applyCategoryChip, rowsForThread } from './chips';
 import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
 import { attachSdkComposeTracking, type ComposeTrackingSession } from './compose-tracking';
-import { createMessageSelfViewHandler, type MessageSelfViewController } from './message-self-view';
+import { createMessageSelfViewHandler, type MessageSelfViewController, type SelfViewSource } from './message-self-view';
 import { installSentStatus, type SentStatusController } from './sent-status';
 import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
 import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
 import { showToast } from './toasts';
+import { SelfViewDeduplicator } from './self-view-dedupe';
 
 const adapter = new CompositeGmailAdapter();
-let settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+let settings: PublicExtensionSettings = toPublicSettings(DEFAULT_SETTINGS);
 let sdkReady = false;
 let sdkOwnsCompose = false;
 let sentStatus: SentStatusController | null = null;
@@ -47,31 +48,34 @@ let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
 let islandMode: IslandMode | null = null;
 let currentThreadId: string | null = null;
+
 const summaryNotes = new Map<string, { pending: boolean; reason: string | null; preview: string | null }>();
 const summaryKeys = new Map<string, string>();
 let cachedTrackedEmails: TrackedEmailSummary[] = [];
-const recentContentSelfViews = new Map<string, number>();
+const selfViewDeduplicator = new SelfViewDeduplicator();
 
 function reportTrackingSelfView(
   trackingId: string,
   gmailThreadId?: string | null,
   gmailMessageId?: string | null,
   observedAt = Date.now(),
+  source: SelfViewSource = 'MESSAGE_EXPANDED',
 ): void {
   const normMessageId = normalizeGmailId(gmailMessageId);
   const normThreadId = normalizeGmailId(gmailThreadId);
-  const key = `${trackingId}:${normMessageId || 'unknown'}`;
-  const last = recentContentSelfViews.get(key) || 0;
-  if (observedAt - last > 10_000) {
-    recentContentSelfViews.set(key, observedAt);
-    void send({
-      type: 'TRACKING_SELF_VIEW',
-      trackingId,
-      gmailThreadId: normThreadId,
-      gmailMessageId: normMessageId,
-      timestamp: new Date(observedAt).toISOString(),
-    });
+
+  if (!selfViewDeduplicator.shouldReport(trackingId, normMessageId, observedAt, source)) {
+    return;
   }
+
+  void send({
+    type: 'TRACKING_SELF_VIEW',
+    trackingId,
+    gmailThreadId: normThreadId,
+    gmailMessageId: normMessageId,
+    timestamp: new Date(observedAt).toISOString(),
+    source,
+  });
 }
 
 function runtimeAlive(): boolean {
@@ -119,7 +123,7 @@ function send<T>(message: unknown, timeoutMs = 12_000): Promise<T | undefined> {
 }
 
 async function refreshSettings(): Promise<void> {
-  const res = await send<{ settings?: ExtensionSettings }>({ type: 'GET_SETTINGS' });
+  const res = await send<{ settings?: PublicExtensionSettings }>({ type: 'GET_PUBLIC_SETTINGS' });
   if (res?.settings) settings = res.settings;
 }
 
@@ -240,14 +244,19 @@ async function boot(): Promise<void> {
     onLink: (trackingId, gmailThreadId) => {
       linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
     },
-    onSelfView: (trackingId, gmailThreadId, gmailMessageId, observedAt) => {
-      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId, observedAt);
+    onSelfView: (trackingId, gmailThreadId, gmailMessageId, observedAt, source) => {
+      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId, observedAt, source || 'ROW_INTERACTION');
     },
   });
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
-      settings = { ...settings, ...(changes.settings.newValue as ExtensionSettings) };
-      sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+    if (area === 'local') {
+      if (changes.publicSettings?.newValue && typeof changes.publicSettings.newValue === 'object') {
+        settings = { ...settings, ...(changes.publicSettings.newValue as PublicExtensionSettings) };
+        sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+      } else if (changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
+        settings = { ...settings, ...toPublicSettings(changes.settings.newValue as ExtensionSettings) };
+        sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+      }
     }
     if (area === 'local' && Array.isArray(changes.trackedEmails?.newValue)) {
       updateCachedEmails(changes.trackedEmails.newValue as TrackedEmailSummary[]);
@@ -327,8 +336,8 @@ function mountSdkUi(sdk: InboxSdkLike): void {
         sentStatus?.paint();
       }
     });
-  } catch {
-    /* row stamps are optional */
+  } catch (error) {
+    console.debug('[gi] registerThreadRowViewHandler skipped/failed', error);
   }
   try {
     sdk.Conversations.registerThreadViewHandler((threadView) => {
@@ -336,29 +345,30 @@ function mountSdkUi(sdk: InboxSdkLike): void {
         console.warn('[gi] Sidebar mount error', error);
       });
     });
-  } catch {
-    /* sidebar is optional */
+  } catch (error) {
+    console.debug('[gi] registerThreadViewHandler skipped/failed', error);
   }
   try {
     messageSelfView = createMessageSelfViewHandler({
       getEmails: () => cachedTrackedEmails,
-      onSelfView: (trackingId, threadId, msgId, observedAt) => {
-        reportTrackingSelfView(trackingId, threadId, msgId, observedAt);
+      onSelfView: (trackingId, threadId, msgId, observedAt, source) => {
+        reportTrackingSelfView(trackingId, threadId, msgId, observedAt, source);
       },
     });
 
     sdk.Conversations?.registerMessageViewHandler?.((messageView) => {
       messageSelfView?.handleMessageView(messageView as any);
     });
-  } catch {
-    /* message view handler is optional */
+  } catch (error) {
+    console.debug('[gi] registerMessageViewHandler skipped/failed', error);
   }
   try {
     sdk.Compose.registerComposeViewHandler((composeView) => {
       attachSdkComposeTracking(composeView, trackingDeps());
     });
     sdkOwnsCompose = true;
-  } catch {
+  } catch (error) {
+    console.debug('[gi] registerComposeViewHandler skipped/failed', error);
     sdkOwnsCompose = false;
   }
   try {
@@ -381,12 +391,12 @@ function mountSdkUi(sdk: InboxSdkLike): void {
             void send({ type: 'OPEN_SPLIT', category });
           },
         });
-      } catch {
-        /* individual nav item injection optional */
+      } catch (error) {
+        console.debug(`[gi] addNavItem skipped for ${name}`, error);
       }
     }
-  } catch {
-    /* nav is optional */
+  } catch (error) {
+    console.debug('[gi] NavMenu registration skipped/failed', error);
   }
 }
 

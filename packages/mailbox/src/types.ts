@@ -146,6 +146,7 @@ export type AIJobRow = {
   startedAt?: number;
   completedAt?: number;
   error?: string;
+  resultId?: string;
 };
 
 export type ReminderRow = {

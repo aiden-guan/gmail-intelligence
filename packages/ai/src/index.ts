@@ -445,10 +445,11 @@ export class AIJobQueue {
   async enqueue<T>(
     kind: 'classify' | 'summary' | 'draft' | 'embed',
     fingerprint: string | null,
-    fn: () => Promise<T>,
+    fn: (signal?: AbortSignal) => Promise<T>,
+    options?: { bypassCache?: boolean; signal?: AbortSignal; timeoutMs?: number },
   ): Promise<T> {
     this.rollDay();
-    if (fingerprint) {
+    if (fingerprint && !options?.bypassCache) {
       const hit = this.getCached<T>(fingerprint, kind);
       if (hit !== undefined) return hit;
     }
@@ -461,21 +462,57 @@ export class AIJobQueue {
       try {
         let attempt = 0;
         for (;;) {
+          const controller = new AbortController();
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          let timedOut = false;
+
+          const onParentAbort = () => {
+            controller.abort(options?.signal?.reason);
+          };
+          if (options?.signal) {
+            if (options.signal.aborted) {
+              controller.abort(options.signal.reason);
+            } else {
+              options.signal.addEventListener('abort', onParentAbort, { once: true });
+            }
+          }
+
           try {
-            const timeoutMs = 25_000;
+            const timeoutMs = options?.timeoutMs ?? 25_000;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                timedOut = true;
+                controller.abort(new Error(`AI job ${kind} timed out`));
+                reject(new Error(`AI job ${kind} timed out`));
+              }, timeoutMs);
+            });
+
             const result = await Promise.race([
-              fn(),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`AI job ${kind} timed out`)), timeoutMs),
-              ),
+              fn(controller.signal),
+              timeoutPromise,
             ]);
-            if (fingerprint) this.setCached(fingerprint, kind, result);
-            if (kind === 'classify') this.usageToday.classifications += 1;
-            if (kind === 'summary') this.usageToday.summaries += 1;
-            if (kind === 'draft') this.usageToday.drafts += 1;
-            if (kind === 'embed') this.usageToday.embeddings += 1;
+
+            if (timer) clearTimeout(timer);
+            if (options?.signal) options.signal.removeEventListener('abort', onParentAbort);
+
+            // If timed out or aborted, do not cache or update usage stats
+            if (!timedOut && !controller.signal.aborted) {
+              if (fingerprint) this.setCached(fingerprint, kind, result);
+              if (kind === 'classify') this.usageToday.classifications += 1;
+              if (kind === 'summary') this.usageToday.summaries += 1;
+              if (kind === 'draft') this.usageToday.drafts += 1;
+              if (kind === 'embed') this.usageToday.embeddings += 1;
+            }
             return result;
           } catch (e) {
+            if (timer) clearTimeout(timer);
+            if (options?.signal) options.signal.removeEventListener('abort', onParentAbort);
+
+            // If timed out or explicitly aborted by caller, do not retry
+            if (timedOut || options?.signal?.aborted) {
+              throw e;
+            }
+
             const retryable = (e as { retryable?: boolean; message?: string }).retryable
               || String((e as Error).message || '').includes('rate_limited');
             if (!retryable || attempt >= 5) throw e;

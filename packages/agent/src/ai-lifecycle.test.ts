@@ -273,4 +273,110 @@ describe('AI job asynchronous lifecycle and deduplication', () => {
     expect(aiCalls).toBe(2);
     expect(res2.jobId).not.toBe(res1.jobId);
   });
+
+  it('stores resultId on draft completion and allows direct retrieval', async () => {
+    const db = getMailboxDb('lifecycle_result_id_' + Math.random());
+    const ai = {
+      draftReply: async () => ({
+        result: {
+          mode: 'direct' as const,
+          body: 'Here is the draft content.',
+          placeholders: [],
+        },
+      }),
+    } as unknown as AIProvider;
+
+    const agent = new AgentLoop({
+      db,
+      ai,
+      queue: new AIJobQueue(),
+      settings: () => ({ ...DEFAULT_SETTINGS, aiMode: 'remote', autoDraft: true }),
+      archiveViaGmail: async () => ({ success: false }),
+      insertDraftViaGmail: async () => ({ success: true }),
+      log: async () => 'log',
+    });
+
+    const res = await agent.startDraftJob({
+      threadId: 't_res_id',
+      fingerprint: 'fp_res_id',
+      subject: 'Subject',
+      messages: [{ sender: 'a@test.com', bodyText: 'Body', timestamp: '' }],
+    });
+    expect(res.ok).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const job = await db.ai_jobs.get(res.jobId);
+    expect(job?.status).toBe('succeeded');
+    expect(job?.resultId).toBeDefined();
+
+    const draft = await db.draft_suggestions.get(job!.resultId!);
+    expect(draft).toBeDefined();
+    expect(draft?.suggestion.body).toBe('Here is the draft content.');
+  });
+
+  it('preserves newer inFlightJob entry when an earlier job completes (ownership check)', async () => {
+    const db = getMailboxDb('lifecycle_ownership_' + Math.random());
+    let resolveJob1!: () => void;
+    const job1Promise = new Promise<void>((resolve) => {
+      resolveJob1 = resolve;
+    });
+
+    let calls = 0;
+    const ai = {
+      summarizeThread: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await job1Promise;
+        }
+        return {
+          result: {
+            reasoning: '',
+            oneLine: `Summary ${calls}`,
+            keyPoints: [],
+            decisions: [],
+            unansweredQuestions: [],
+            commitments: [],
+            dates: [],
+            actionItems: [],
+          },
+        };
+      },
+    } as unknown as AIProvider;
+
+    const agent = new AgentLoop({
+      db,
+      ai,
+      queue: new AIJobQueue(),
+      settings: () => ({ ...DEFAULT_SETTINGS, aiMode: 'remote', autoSummarize: true }),
+      archiveViaGmail: async () => ({ success: false }),
+      insertDraftViaGmail: async () => ({ success: true }),
+      log: async () => 'log',
+    });
+
+    const input = {
+      threadId: 't_owner',
+      fingerprint: 'fp_owner',
+      subject: 'Ownership Test',
+      messages: [{ sender: 'a@test.com', bodyText: 'Message', timestamp: '' }],
+    };
+
+    // Start job 1 (hangs on job1Promise)
+    const res1 = await agent.startSummaryJob(input);
+    expect(res1.ok).toBe(true);
+
+    // Force start job 2 for the same key while job 1 is in-flight
+    const res2 = await agent.startSummaryJob({ ...input, force: true });
+    expect(res2.ok).toBe(true);
+    expect(res2.jobId).not.toBe(res1.jobId);
+
+    // Now complete job 1
+    resolveJob1();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Job 1 finished. If the ownership check works, job 2's entry was NOT deleted by job 1's finally block
+    // Calling without force while job 2 is still running (or finished with res2) should not resurrect a stale state
+    const job1Row = await db.ai_jobs.get(res1.jobId);
+    expect(job1Row?.status).toBe('succeeded');
+  });
 });

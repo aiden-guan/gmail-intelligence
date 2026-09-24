@@ -204,6 +204,7 @@ export type BridgeMessage = z.infer<typeof BridgeMessageSchema>;
 export const RuntimeMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('PING') }),
   z.object({ type: z.literal('GET_SETTINGS') }),
+  z.object({ type: z.literal('GET_PUBLIC_SETTINGS') }),
   z.object({
     type: z.literal('SAVE_SETTINGS'),
     settings: z.record(z.unknown()),
@@ -341,6 +342,20 @@ export type ExtensionSettings = {
   voiceProfile: VoiceProfile;
   learnFromSent: boolean;
 };
+
+export type PublicExtensionSettings = Omit<ExtensionSettings, 'personalApiToken' | 'aiApiKey'> & {
+  hasPersonalApiToken: boolean;
+  hasAiApiKey: boolean;
+};
+
+export function toPublicSettings(settings: ExtensionSettings): PublicExtensionSettings {
+  const { personalApiToken, aiApiKey, ...publicSettings } = settings;
+  return {
+    ...publicSettings,
+    hasPersonalApiToken: Boolean(personalApiToken?.trim()),
+    hasAiApiKey: Boolean(aiApiKey?.trim()),
+  };
+}
 
 export type VoiceProfile = {
   greeting: string;

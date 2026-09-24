@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { safeRedirectUrl, classifyOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
+import { safeRedirectUrl, classifyOpen, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
 import { getStore, StoreError, type EmailRow, type TrackerStore } from './store.js';
 
-export { safeRedirectUrl, classifyOpen, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
+export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
 
 export interface Env {
   SUPABASE_URL?: string;
@@ -321,9 +321,9 @@ async function handleSelfView(
 
   const events = await store.listEvents(id);
   for (const evt of events) {
-    if (evt.type === 'OPEN') {
-      const openMs = Date.parse(evt.timestamp);
-      if (Number.isFinite(openMs) && isSelfViewCorrelated(openMs, selfMs)) {
+    if (evt.type === 'OPEN' || evt.type === 'CLICK') {
+      const evtMs = Date.parse(evt.timestamp);
+      if (Number.isFinite(evtMs) && isSelfViewCorrelated(evtMs, selfMs)) {
         await store.updateEvent(evt.id, {
           classification: 'SELF_LIKELY',
           suspected_self_open: true,
@@ -415,7 +415,25 @@ async function handleClick(
       request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
       '';
     const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
-    const ts = new Date().toISOString();
+    const now = Date.now();
+    const ts = new Date(now).toISOString();
+
+    const email = await store.getEmail(link.tracking_id);
+    const events = await store.listEvents(link.tracking_id);
+    const recentSelfView = events.find((e) => {
+      if (e.type !== 'SELF_VIEW') return false;
+      const svMs = Date.parse(e.timestamp);
+      return isSelfViewCorrelated(now, svMs);
+    });
+    const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
+    const sentAt = email?.sent_at ?? null;
+
+    const verdict = classifyClick({
+      sentAt,
+      now,
+      ua,
+      selfViewTs,
+    });
 
     await store.insertEvent({
       id: newId('evt'),
@@ -426,8 +444,9 @@ async function handleClick(
       ip_hash,
       click_id: clickId,
       destination,
-      suspected_self_open: false,
-      confidence: 0.5,
+      suspected_self_open: verdict.suspected,
+      confidence: verdict.confidence,
+      classification: verdict.classification,
     });
 
     await recomputeEmailStats(link.tracking_id, store);

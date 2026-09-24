@@ -1,7 +1,7 @@
 import { httpRouter } from "convex/server";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
-import { publicTrackerOrigin, trackingIdFromUrl, classifyOpenEvent, isSelfViewCorrelated } from "./openRequest";
+import { publicTrackerOrigin, trackingIdFromUrl, classifyOpenEvent, classifyClickEvent, isSelfViewCorrelated } from "./openRequest";
 
 const TRANSPARENT_GIF = Uint8Array.from(
   atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"),
@@ -212,16 +212,32 @@ http.route({
     const destination = safeRedirectUrl(link.destination);
     if (!destination) return json({ error: "bad_destination" }, 400);
     try {
+      const now = Date.now();
       const ua = request.headers.get("User-Agent");
+      const email = await ctx.runQuery(internal.tracking.getEmail, { trackingId: link.trackingId });
+      const events = await ctx.runQuery(internal.tracking.listEvents, { trackingId: link.trackingId });
+      const recentSelfView = events.find(
+        (e) => e.type === "SELF_VIEW" && isSelfViewCorrelated(now, Date.parse(e.timestamp)),
+      );
+      const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
+      const sentMs = email?.sentAt ? Date.parse(email.sentAt) : null;
+      const verdict = classifyClickEvent({
+        eventTs: now,
+        sentAt: sentMs != null && Number.isFinite(sentMs) ? sentMs : null,
+        userAgent: ua,
+        selfViewTs,
+      });
+
       await ctx.runMutation(internal.tracking.recordClick, {
         eventId: newId("evt"),
         trackingId: link.trackingId,
         type: "CLICK",
-        timestamp: new Date().toISOString(),
+        timestamp: new Date(now).toISOString(),
         userAgent: ua,
         ipHash: await hashIp(clientIp(request)),
-        suspectedSelfOpen: false,
-        confidence: 0.5,
+        suspectedSelfOpen: verdict.suspected,
+        confidence: verdict.confidence,
+        classification: verdict.classification,
         clickId,
         destination,
       });

@@ -8,6 +8,7 @@ import {
 } from '@gi/tracking';
 import { findThreadRows, threadIdFromLocation } from '@gi/gmail';
 import { ensureSurface } from './surface';
+import type { SelfViewSource } from './message-self-view';
 
 export type SentStatusController = {
   setEmails(emails: TrackedEmailSummary[]): void;
@@ -25,20 +26,73 @@ function threadRows(root: ParentNode): HTMLElement[] {
   }
 }
 
+export function isThreadOpenInteractionTarget(target: EventTarget | null, row: Element): boolean {
+  if (!(target instanceof Element)) return false;
+  if (!row.contains(target)) return false;
+
+  // Exclude tracking UI
+  if (target.closest('.gi-track-btn, .gi-track-slot, .gi-track-card, .gi-track-backdrop, [data-gi-ui]')) {
+    return false;
+  }
+
+  // Exclude checkboxes
+  if (target.closest('input[type="checkbox"], [role="checkbox"], .oZ-jc, .T-Jo')) {
+    return false;
+  }
+
+  // Exclude stars
+  if (target.closest('.T-KT, [aria-label*="Star" i], [data-tooltip*="Star" i]')) {
+    return false;
+  }
+
+  // Exclude row menus, toolbar actions, hover quick action buttons
+  if (
+    target.closest(
+      '.bq9, [role="menu"], [role="menuitem"], [data-tooltip*="Snooze" i], [data-tooltip*="Delete" i], [data-tooltip*="Archive" i], [data-tooltip*="Mark as" i]',
+    )
+  ) {
+    return false;
+  }
+
+  // Exclude buttons / action links that don't open the thread
+  const btn = target.closest('button, [role="button"]');
+  if (btn && btn !== row) {
+    return false;
+  }
+
+  const anchor = target.closest('a');
+  if (anchor && (anchor.getAttribute('href')?.startsWith('#label') || anchor.hasAttribute('download'))) {
+    return false;
+  }
+
+  // Exclude category / label chips
+  if (target.closest('.ar, .gi-cat-chip, [data-label-id]')) {
+    return false;
+  }
+
+  return true;
+}
+
 export function installSentStatus(opts: {
   emails?: TrackedEmailSummary[];
   trackerBaseUrl?: string;
   onNotify: (trackingId: string, enabled: boolean) => void;
   onStatus?: () => void;
   onLink?: (trackingId: string, gmailThreadId: string) => void;
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null, observedAt?: number) => void;
+  onSelfView?: (
+    trackingId: string,
+    gmailThreadId?: string | null,
+    gmailMessageId?: string | null,
+    observedAt?: number,
+    source?: SelfViewSource,
+  ) => void;
 }): SentStatusController {
   let emails = opts.emails || [];
   let trackerBaseUrl = opts.trackerBaseUrl || '';
   let observer: MutationObserver | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let statusSignature = '';
-  const recentSelfViews = new Map<string, number>();
+  const recentSelfViews = new Map<string, { observedAt: number; source: SelfViewSource }>();
   ensureStyles();
   setTrackerBaseAttribute(trackerBaseUrl);
 
@@ -47,13 +101,14 @@ export function installSentStatus(opts: {
     gmailThreadId?: string | null,
     gmailMessageId?: string | null,
     observedAt = Date.now(),
+    source: SelfViewSource = 'ROW_INTERACTION',
   ) => {
     const normMsg = normalizeGmailId(gmailMessageId);
     const key = normMsg ? `${trackingId}:${normMsg}` : trackingId;
-    const last = recentSelfViews.get(key) || 0;
-    if (observedAt - last > 10_000) {
-      recentSelfViews.set(key, observedAt);
-      opts.onSelfView?.(trackingId, gmailThreadId, gmailMessageId, observedAt);
+    const last = recentSelfViews.get(key);
+    if (!last || observedAt - last.observedAt > 10_000) {
+      recentSelfViews.set(key, { observedAt, source });
+      opts.onSelfView?.(trackingId, gmailThreadId, gmailMessageId, observedAt, source);
     }
   };
 
@@ -143,7 +198,13 @@ export function paintRows(
   emails: TrackedEmailSummary[],
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
-  onSelfView?: (trackingId: string, gmailThreadId?: string | null, gmailMessageId?: string | null, observedAt?: number) => void,
+  onSelfView?: (
+    trackingId: string,
+    gmailThreadId?: string | null,
+    gmailMessageId?: string | null,
+    observedAt?: number,
+    source?: SelfViewSource,
+  ) => void,
 ): void {
   ensureStyles();
   threadRows(root).forEach((row) => {
@@ -168,13 +229,13 @@ export function paintRows(
     if (!row.dataset.giSelfBound) {
       row.dataset.giSelfBound = 'true';
       const handleEarlyInteraction = (e: Event) => {
-        if ((e.target as HTMLElement)?.closest('.gi-track-btn')) return;
+        if (!isThreadOpenInteractionTarget(e.target, row)) return;
         const currentTrackingId = row.dataset.giTrackingId;
         if (!currentTrackingId) return;
         const currentThreadId = row.dataset.giTrackingThreadId || null;
         const currentMessageId = row.dataset.giTrackingMessageId || null;
         const observedAt = Date.now();
-        onSelfView?.(currentTrackingId, currentThreadId, currentMessageId, observedAt);
+        onSelfView?.(currentTrackingId, currentThreadId, currentMessageId, observedAt, 'ROW_INTERACTION');
       };
       row.addEventListener('pointerdown', handleEarlyInteraction, { capture: true });
       row.addEventListener('click', handleEarlyInteraction);

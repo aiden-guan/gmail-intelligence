@@ -33,6 +33,7 @@ import {
   addBusinessDays,
   buildThreadSnapshot,
   getProviderRequiredOrigin,
+  toPublicSettings,
   type ExtensionSettings,
   type RawSnapshotMessage,
 } from '@gi/shared';
@@ -81,12 +82,16 @@ const workerTabs = new WorkerTabController({
 async function loadSettings(): Promise<ExtensionSettings> {
   const stored = await chrome.storage.local.get('settings');
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings as Partial<ExtensionSettings> | undefined) };
+  await chrome.storage.local.set({ publicSettings: toPublicSettings(settings) });
   return settings;
 }
 
 async function saveSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
   settings = { ...settings, ...partial };
-  await chrome.storage.local.set({ settings });
+  await chrome.storage.local.set({
+    settings,
+    publicSettings: toPublicSettings(settings),
+  });
   rebuildAgent();
   return settings;
 }
@@ -893,8 +898,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         let oneLine: string | undefined;
         if (job?.status === 'succeeded') {
           if (job.kind === 'draft') {
-            const drafts = await db.draft_suggestions.where('threadId').equals(job.threadId).toArray();
-            const matching = drafts.find((d) => d.fingerprint === job.fingerprint);
+            let matching = job.resultId ? await db.draft_suggestions.get(job.resultId) : undefined;
+            if (!matching) {
+              const drafts = await db.draft_suggestions.where('threadId').equals(job.threadId).toArray();
+              matching = drafts.find((d) => d.fingerprint === job.fingerprint);
+            }
             body = matching?.suggestion?.body;
           } else if (job.kind === 'summary') {
             const summary = await db.thread_summaries.get(job.threadId);
@@ -1213,8 +1221,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'PING':
         sendResponse({ ok: true });
         break;
+      case 'GET_PUBLIC_SETTINGS':
+        sendResponse({ settings: toPublicSettings(settings) });
+        break;
       case 'GET_SETTINGS':
-        sendResponse({ settings });
+        if (sender.tab) {
+          sendResponse({ settings: toPublicSettings(settings) });
+        } else {
+          sendResponse({ settings });
+        }
         break;
       case 'SAVE_SETTINGS':
         sendResponse({ settings: await saveSettings(msg.settings as Partial<ExtensionSettings>) });

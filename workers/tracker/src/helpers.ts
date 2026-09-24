@@ -151,12 +151,89 @@ export function classifyOpen(opts: {
   };
 }
 
+export type ClickClassification =
+  | 'RECIPIENT_LIKELY'
+  | 'SELF_LIKELY'
+  | 'MACHINE_LIKELY'
+  | 'UNKNOWN';
+
+export type ClickVerdict = {
+  classification: ClickClassification;
+  suspected: boolean;
+  confidence: number;
+  countsAsClick: boolean;
+  source: OpenRequestSource;
+};
+
+export function classifyClick(opts: {
+  sentAt: string | null;
+  now: number;
+  ua: string | null;
+  selfViewTs?: number | null;
+}): ClickVerdict {
+  const sentMs = opts.sentAt ? Date.parse(opts.sentAt) : Number.NaN;
+  const source = detectOpenRequestSource(opts.ua);
+
+  // Pre-send clicks
+  if (!opts.sentAt || !Number.isFinite(sentMs) || opts.now < sentMs) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  // Sender self-view correlation
+  if (opts.selfViewTs != null && isSelfViewCorrelated(opts.now, opts.selfViewTs)) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  // Machine / scanner fetches
+  if (source === 'headless' || source === 'scanner' || source === 'google_image_proxy') {
+    return {
+      classification: 'MACHINE_LIKELY',
+      suspected: true,
+      confidence: 0.9,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  if (source === 'unknown') {
+    return {
+      classification: 'UNKNOWN',
+      suspected: true,
+      confidence: 0.5,
+      countsAsClick: false,
+      source,
+    };
+  }
+
+  return {
+    classification: 'RECIPIENT_LIKELY',
+    suspected: false,
+    confidence: 0,
+    countsAsClick: true,
+    source,
+  };
+}
+
 export type TrackingEventLike = {
   type: string;
   timestamp: string;
   classification?: string | null;
   suspected_self_open?: boolean;
+  suspectedSelfOpen?: boolean;
   user_agent?: string | null;
+  userAgent?: string | null;
 };
 
 export type DerivedTrackingStats = {
@@ -166,6 +243,8 @@ export type DerivedTrackingStats = {
   clickCount: number;
   firstClickedAt: string | null;
   lastClickedAt: string | null;
+  pixelLoadCount: number;
+  possibleOpenCount: number;
 };
 
 export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackingStats {
@@ -175,19 +254,24 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
   let lastOpenedAt: string | null = null;
   let lastValidOpenMs = 0;
 
+  let pixelLoadCount = 0;
+  let possibleOpenCount = 0;
+  let lastPossibleOpenMs = 0;
+
   let clickCount = 0;
   let firstClickedAt: string | null = null;
   let lastClickedAt: string | null = null;
 
   for (const evt of sorted) {
     if (evt.type === 'OPEN') {
-      const isSelf = Boolean(evt.suspected_self_open || evt.classification === 'SELF_LIKELY');
+      pixelLoadCount += 1;
+      const isSelf = Boolean(evt.suspected_self_open || evt.suspectedSelfOpen || evt.classification === 'SELF_LIKELY');
       const isExplicitNonRecipient =
         evt.classification === 'PROXY_LIKELY' ||
         evt.classification === 'MACHINE_LIKELY' ||
         evt.classification === 'UNKNOWN';
 
-      const ua = evt.user_agent;
+      const ua = evt.user_agent || evt.userAgent;
       const detectedSource = ua ? detectOpenRequestSource(ua) : null;
       const isDetectedMachine =
         detectedSource === 'google_image_proxy' ||
@@ -201,20 +285,41 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
         !isExplicitNonRecipient &&
         !isDetectedMachine;
 
+      const evtMs = Date.parse(evt.timestamp);
+
       if (isRecipient) {
-        const evtMs = Date.parse(evt.timestamp);
-        if (lastValidOpenMs && Number.isFinite(evtMs) && evtMs >= lastValidOpenMs && evtMs - lastValidOpenMs < 800) {
-          continue;
+        if (!lastValidOpenMs || !Number.isFinite(evtMs) || evtMs < lastValidOpenMs || evtMs - lastValidOpenMs >= 800) {
+          openCount += 1;
+          lastValidOpenMs = evtMs;
+          if (!firstOpenedAt) firstOpenedAt = evt.timestamp;
+          lastOpenedAt = evt.timestamp;
         }
-        openCount += 1;
-        lastValidOpenMs = evtMs;
-        if (!firstOpenedAt) firstOpenedAt = evt.timestamp;
-        lastOpenedAt = evt.timestamp;
+      }
+
+      // Possible opens: verified opens or proxy opens (GoogleImageProxy), but self-view takes precedence (SELF_LIKELY excluded)
+      const isProxy = evt.classification === 'PROXY_LIKELY' || detectedSource === 'google_image_proxy';
+      if (!isSelf && (isRecipient || (isProxy && detectedSource !== 'headless' && detectedSource !== 'scanner'))) {
+        if (!lastPossibleOpenMs || !Number.isFinite(evtMs) || evtMs < lastPossibleOpenMs || evtMs - lastPossibleOpenMs >= 800) {
+          possibleOpenCount += 1;
+          lastPossibleOpenMs = evtMs;
+        }
       }
     } else if (evt.type === 'CLICK') {
-      clickCount += 1;
-      if (!firstClickedAt) firstClickedAt = evt.timestamp;
-      lastClickedAt = evt.timestamp;
+      const isSelf = Boolean(evt.suspected_self_open || evt.suspectedSelfOpen || evt.classification === 'SELF_LIKELY');
+      const ua = evt.user_agent || evt.userAgent;
+      const detectedSource = ua ? detectOpenRequestSource(ua) : null;
+      const isMachine = evt.classification === 'MACHINE_LIKELY' || detectedSource === 'headless' || detectedSource === 'scanner';
+      const isExplicitNonRecipient = isSelf || isMachine || evt.classification === 'UNKNOWN';
+
+      const isRecipientClick =
+        evt.classification === 'RECIPIENT_LIKELY' ||
+        (!evt.classification && !isExplicitNonRecipient);
+
+      if (isRecipientClick) {
+        clickCount += 1;
+        if (!firstClickedAt) firstClickedAt = evt.timestamp;
+        lastClickedAt = evt.timestamp;
+      }
     }
   }
 
@@ -225,6 +330,8 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
     clickCount,
     firstClickedAt,
     lastClickedAt,
+    pixelLoadCount,
+    possibleOpenCount,
   };
 }
 
