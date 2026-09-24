@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { normalizeGmailId } from './helpers';
 
 /**
  * Tracking metadata store.
@@ -53,6 +54,22 @@ export type EventRow = {
   destination?: string | null;
 };
 
+export type ClaimRow = {
+  id: string;
+  tracking_id: string;
+  gmail_message_id: string | null;
+  gmail_thread_id: string | null;
+  first_observed_at: string;
+  last_observed_at: string;
+  expires_at: string;
+  source: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
+  consumed_by_event_id: string | null;
+  consumed_at?: string | null;
+  consumed_ua?: string | null;
+  consumed_ip_hash?: string | null;
+  created_at: string;
+};
+
 export interface TrackerStore {
   readonly kind: 'memory' | 'supabase';
   insertEmail(row: EmailRow): Promise<void>;
@@ -65,12 +82,32 @@ export interface TrackerStore {
   updateEvent(id: string, patch: Partial<EventRow>): Promise<void>;
   updateEmail(id: string, patch: Partial<EmailRow>): Promise<void>;
   getLink(clickId: string): Promise<LinkRow | null>;
+  insertClaim(row: ClaimRow): Promise<void>;
+  updateClaim(id: string, patch: Partial<ClaimRow>): Promise<void>;
+  getClaim(id: string): Promise<ClaimRow | null>;
+  getActiveClaim(trackingId: string, gmailMessageId?: string | null, nowMs?: number): Promise<ClaimRow | null>;
+  consumeClaim(
+    claimId: string,
+    eventId: string,
+    consumedAt?: string,
+    ua?: string | null,
+    ipHash?: string | null,
+  ): Promise<boolean>;
+  getRecentConsumedClaim(
+    trackingId: string,
+    nowMs?: number,
+    graceMs?: number,
+    ua?: string | null,
+    ipHash?: string | null,
+  ): Promise<ClaimRow | null>;
+  hasClaims(trackingId: string): Promise<boolean>;
 }
 
 type MemoryState = {
   emails: Map<string, EmailRow>;
   links: Map<string, LinkRow>;
   events: EventRow[];
+  claims: Map<string, ClaimRow>;
 };
 
 let memory: MemoryState | null = null;
@@ -80,7 +117,7 @@ export function resetMemoryStore(): void {
 }
 
 function memoryState(): MemoryState {
-  memory ??= { emails: new Map(), links: new Map(), events: [] };
+  memory ??= { emails: new Map(), links: new Map(), events: [], claims: new Map() };
   return memory;
 }
 
@@ -149,6 +186,73 @@ function memoryStore(): TrackerStore {
     async getLink(clickId) {
       const row = state.links.get(clickId);
       return row ? { ...row } : null;
+    },
+    async insertClaim(row) {
+      state.claims.set(row.id, { ...row });
+    },
+    async updateClaim(id, patch) {
+      const cur = state.claims.get(id);
+      if (!cur) return;
+      state.claims.set(id, { ...cur, ...patch });
+    },
+    async getClaim(id) {
+      const row = state.claims.get(id);
+      return row ? { ...row } : null;
+    },
+    async getActiveClaim(trackingId, gmailMessageId, nowMs = Date.now()) {
+      const normQueryMsg = normalizeGmailId(gmailMessageId);
+      const active = [...state.claims.values()].filter((c) => {
+        if (c.tracking_id !== trackingId) return false;
+        if (c.consumed_by_event_id !== null) return false;
+        const exp = Date.parse(c.expires_at);
+        if (Number.isFinite(exp) && exp <= nowMs) return false;
+        const normClaimMsg = normalizeGmailId(c.gmail_message_id);
+        if (normClaimMsg && normQueryMsg) {
+          if (normClaimMsg !== normQueryMsg) return false;
+        }
+        return true;
+      });
+      if (active.length === 0) return null;
+      active.sort((a, b) => {
+        const normA = normalizeGmailId(a.gmail_message_id);
+        const normB = normalizeGmailId(b.gmail_message_id);
+        if (normQueryMsg) {
+          const aExact = normA === normQueryMsg ? 1 : 0;
+          const bExact = normB === normQueryMsg ? 1 : 0;
+          if (aExact !== bExact) return bExact - aExact;
+        }
+        return (Date.parse(b.last_observed_at) || 0) - (Date.parse(a.last_observed_at) || 0);
+      });
+      return { ...active[0]! };
+    },
+    async consumeClaim(claimId, eventId, consumedAt, ua, ipHash) {
+      const cur = state.claims.get(claimId);
+      if (!cur || cur.consumed_by_event_id !== null) return false;
+      state.claims.set(claimId, {
+        ...cur,
+        consumed_by_event_id: eventId,
+        consumed_at: consumedAt || new Date().toISOString(),
+        consumed_ua: ua ?? null,
+        consumed_ip_hash: ipHash ?? null,
+      });
+      return true;
+    },
+    async getRecentConsumedClaim(trackingId, nowMs = Date.now(), graceMs = 1000, ua, ipHash) {
+      const consumed = [...state.claims.values()].filter((c) => {
+        if (c.tracking_id !== trackingId) return false;
+        if (!c.consumed_by_event_id || !c.consumed_at) return false;
+        const consumedMs = Date.parse(c.consumed_at);
+        if (!Number.isFinite(consumedMs) || Math.abs(nowMs - consumedMs) > graceMs) return false;
+        if (ua && c.consumed_ua && c.consumed_ua !== ua) return false;
+        if (ipHash && c.consumed_ip_hash && c.consumed_ip_hash !== ipHash) return false;
+        return true;
+      });
+      if (consumed.length === 0) return null;
+      consumed.sort((a, b) => (Date.parse(b.consumed_at || '') || 0) - (Date.parse(a.consumed_at || '') || 0));
+      return { ...consumed[0]! };
+    },
+    async hasClaims(trackingId) {
+      return [...state.claims.values()].some((c) => c.tracking_id === trackingId);
     },
   };
 }
@@ -225,6 +329,88 @@ function supabaseStore(url: string, serviceRoleKey: string): TrackerStore {
         .maybeSingle();
       if (error) throw new StoreError(error.message);
       return (data as LinkRow | null) ?? null;
+    },
+    async insertClaim(row) {
+      const { error } = await supabase.from('tracking_self_view_claims').upsert(row, { onConflict: 'id' });
+      if (error) throw new StoreError(error.message);
+    },
+    async updateClaim(id, patch) {
+      const { error } = await supabase.from('tracking_self_view_claims').update(patch).eq('id', id);
+      if (error) throw new StoreError(error.message);
+    },
+    async getClaim(id) {
+      const { data, error } = await supabase
+        .from('tracking_self_view_claims')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+      if (error) throw new StoreError(error.message);
+      return (data as ClaimRow | null) ?? null;
+    },
+    async getActiveClaim(trackingId, gmailMessageId, nowMs = Date.now()) {
+      const normQueryMsg = normalizeGmailId(gmailMessageId);
+      const { data, error } = await supabase
+        .from('tracking_self_view_claims')
+        .select('*')
+        .eq('tracking_id', trackingId)
+        .is('consumed_by_event_id', null)
+        .gt('expires_at', new Date(nowMs).toISOString())
+        .order('last_observed_at', { ascending: false });
+      if (error) throw new StoreError(error.message);
+      const rows = (data as ClaimRow[] | null) ?? [];
+      if (!rows.length) return null;
+      if (normQueryMsg) {
+        const exact = rows.find((r) => normalizeGmailId(r.gmail_message_id) === normQueryMsg);
+        if (exact) return exact;
+        const unspecific = rows.find((r) => !normalizeGmailId(r.gmail_message_id));
+        if (unspecific) return unspecific;
+        return null;
+      }
+      return rows[0] ?? null;
+    },
+    async consumeClaim(claimId, eventId, consumedAt, ua, ipHash) {
+      const patch: Record<string, unknown> = {
+        consumed_by_event_id: eventId,
+        consumed_at: consumedAt || new Date().toISOString(),
+      };
+      if (ua !== undefined) patch.consumed_ua = ua;
+      if (ipHash !== undefined) patch.consumed_ip_hash = ipHash;
+      const { data, error } = await supabase
+        .from('tracking_self_view_claims')
+        .update(patch)
+        .eq('id', claimId)
+        .is('consumed_by_event_id', null)
+        .select();
+      if (error) throw new StoreError(error.message);
+      return Boolean(data && data.length > 0);
+    },
+    async getRecentConsumedClaim(trackingId, nowMs = Date.now(), graceMs = 1000, ua, ipHash) {
+      const minConsumed = new Date(nowMs - graceMs).toISOString();
+      const maxConsumed = new Date(nowMs + graceMs).toISOString();
+      const { data, error } = await supabase
+        .from('tracking_self_view_claims')
+        .select('*')
+        .eq('tracking_id', trackingId)
+        .not('consumed_by_event_id', 'is', null)
+        .gte('consumed_at', minConsumed)
+        .lte('consumed_at', maxConsumed)
+        .order('consumed_at', { ascending: false });
+      if (error) throw new StoreError(error.message);
+      const rows = (data as ClaimRow[] | null) ?? [];
+      const match = rows.find((c) => {
+        if (ua && c.consumed_ua && c.consumed_ua !== ua) return false;
+        if (ipHash && c.consumed_ip_hash && c.consumed_ip_hash !== ipHash) return false;
+        return true;
+      });
+      return match ?? null;
+    },
+    async hasClaims(trackingId) {
+      const { count, error } = await supabase
+        .from('tracking_self_view_claims')
+        .select('*', { count: 'exact', head: true })
+        .eq('tracking_id', trackingId);
+      if (error) throw new StoreError(error.message);
+      return (count ?? 0) > 0;
     },
   };
 }

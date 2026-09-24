@@ -73,14 +73,25 @@ export function classifyOpenEvent(opts: {
   eventTs: number;
   sentAt: number | null;
   userAgent?: string | null;
-  ipHash?: string | null;
   selfViewTs?: number | null;
+  hasActiveSenderClaim?: boolean;
 }): OpenVerdict {
   const sentAt = opts.sentAt;
   const source = detectOpenRequestSource(opts.userAgent);
 
   // Pre-send fetches (composer / draft previews)
   if (sentAt == null || !Number.isFinite(sentAt) || opts.eventTs < sentAt) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source,
+    };
+  }
+
+  // Active exact sender claim takes precedence over everything including proxies/browsers
+  if (opts.hasActiveSenderClaim) {
     return {
       classification: 'SELF_LIKELY',
       suspected: true,
@@ -334,17 +345,49 @@ export function normalizeGmailId(value: string | null | undefined): string | nul
   return next || null;
 }
 
+export const TRACKER_PROTOCOL_VERSION = 3;
+export const TRACKER_REQUIRED_FEATURES = ['self_view_claims'] as const;
+export const TRACKER_SUPPORTED_FEATURES = [
+  'self_view_claims',
+  'event_reclassification',
+  'classified_clicks',
+] as const;
+
+export const CLAIM_TTL_MS = 25_000;
+
+export type SelfViewSource =
+  | 'ROW_INTERACTION'
+  | 'MESSAGE_EXPANDED'
+  | 'MESSAGE_LOAD'
+  | 'CACHE_REINSPECTION';
+
+export type SelfViewClaim = {
+  id: string;
+  trackingId: string;
+  gmailMessageId: string | null;
+  gmailThreadId: string | null;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  expiresAt: string;
+  source: SelfViewSource;
+  consumedByEventId: string | null;
+  createdAt: string;
+};
+
 export type TrackerHealthStatus =
   | 'disabled'
   | 'missing'
   | 'invalid_url'
   | 'unauthorized'
   | 'unreachable'
+  | 'outdated'
   | 'healthy';
 
 export type TrackerProbe = {
   status: TrackerHealthStatus;
   label: string;
+  protocolVersion?: number;
+  features?: string[];
 };
 
 export function trackerHealthLabel(status: TrackerHealthStatus): string {
@@ -359,6 +402,8 @@ export function trackerHealthLabel(status: TrackerHealthStatus): string {
       return 'Unauthorized token';
     case 'unreachable':
       return 'Tracker unreachable';
+    case 'outdated':
+      return 'Tracker deployment is outdated. Redeploy tracker to enable sender self-open suppression.';
     case 'healthy':
       return 'Tracker healthy';
   }
@@ -382,14 +427,58 @@ export async function probeTracker(
   } catch {
     return { status: 'invalid_url', label: trackerHealthLabel('invalid_url') };
   }
-  const health = await requestOk(fetcher, `${origin}/health`);
-  if (health === 'unreachable') return { status: 'unreachable', label: trackerHealthLabel('unreachable') };
+  const health = await requestHealth(fetcher, `${origin}/health`);
+  if (health.status === 'outdated') {
+    return {
+      status: 'outdated',
+      label: trackerHealthLabel('outdated'),
+      protocolVersion: 0,
+      features: [],
+    };
+  }
+  if (health.status === 'unreachable') return { status: 'unreachable', label: trackerHealthLabel('unreachable') };
+
+  const protocolVersion = typeof health.data?.protocolVersion === 'number' ? health.data.protocolVersion : 0;
+  const features = Array.isArray(health.data?.features) ? health.data.features : [];
+  if (protocolVersion < TRACKER_PROTOCOL_VERSION || !features.includes('self_view_claims')) {
+    return {
+      status: 'outdated',
+      label: trackerHealthLabel('outdated'),
+      protocolVersion,
+      features,
+    };
+  }
+
   const authed = await requestOk(fetcher, `${origin}/api/emails?limit=1`, {
     Authorization: `Bearer ${trimmedToken}`,
   });
   if (authed === 'unauthorized') return { status: 'unauthorized', label: trackerHealthLabel('unauthorized') };
   if (authed === 'unreachable') return { status: 'unreachable', label: trackerHealthLabel('unreachable') };
-  return { status: 'healthy', label: trackerHealthLabel('healthy') };
+  return {
+    status: 'healthy',
+    label: trackerHealthLabel('healthy'),
+    protocolVersion,
+    features,
+  };
+}
+
+async function requestHealth(
+  fetcher: typeof fetch,
+  url: string,
+): Promise<{ status: 'ok' | 'outdated' | 'unreachable'; data?: { ok?: boolean; protocolVersion?: number; features?: string[] } }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetcher(url, { signal: controller.signal });
+    if (response.status === 404) return { status: 'outdated' };
+    if (!response.ok) return { status: 'unreachable' };
+    const data = await response.json().catch(() => null);
+    return { status: 'ok', data: data && typeof data === 'object' ? data : undefined };
+  } catch {
+    return { status: 'unreachable' };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function requestOk(
@@ -438,6 +527,21 @@ export type TrackingPixelEventDiagnostic = {
   countsAsOpen: boolean;
 };
 
+export type TrackingSelfViewDiagnostic = {
+  observedAt: string;
+  source: string;
+  trackingId: string;
+  normalizedMessageId: string | null;
+  deliveryStatus: 'delivered' | 'failed' | 'pending';
+  claimId: string | null;
+  claimExpiresAt: string | null;
+  retryCount: number;
+  lastError: string | null;
+  latestOpenClassification?: string | null;
+  claimConsumed: boolean;
+  openCount?: number;
+};
+
 export type TrackingDiagnosticsReport = {
   health: TrackerHealthStatus;
   endpoint: string;
@@ -447,6 +551,7 @@ export type TrackingDiagnosticsReport = {
   composeHook: string;
   last: TrackingSendReport | null;
   lastPixelEvent?: TrackingPixelEventDiagnostic | null;
+  lastSelfView?: TrackingSelfViewDiagnostic | null;
 };
 
 export function formatTrackingReport(report: TrackingDiagnosticsReport): string {
@@ -493,6 +598,23 @@ export function formatTrackingReport(report: TrackingDiagnosticsReport): string 
       `  counted as recipient open: ${report.lastPixelEvent.countsAsOpen ? 'yes' : 'no'}`,
       `  self-view correlated: ${report.lastPixelEvent.selfViewCorrelated ? 'yes' : 'no'}`,
       `  timestamp: ${report.lastPixelEvent.timestamp}`,
+    );
+  }
+  if (report.lastSelfView) {
+    lines.push(
+      '',
+      'Last self-view claim:',
+      `  tracking ID: ${report.lastSelfView.trackingId}`,
+      `  message ID: ${report.lastSelfView.normalizedMessageId || 'none'}`,
+      `  source: ${report.lastSelfView.source}`,
+      `  observed at: ${report.lastSelfView.observedAt}`,
+      `  delivery: ${report.lastSelfView.deliveryStatus}`,
+      `  claim ID: ${report.lastSelfView.claimId || 'none'}`,
+      `  claim expires at: ${report.lastSelfView.claimExpiresAt || 'none'}`,
+      `  claim consumed: ${report.lastSelfView.claimConsumed ? 'yes' : 'no'}`,
+      `  retry count: ${report.lastSelfView.retryCount}`,
+      `  last error: ${report.lastSelfView.lastError || 'none'}`,
+      `  open count: ${report.lastSelfView.openCount ?? 'unknown'}`,
     );
   }
   if (last?.logs.length) {

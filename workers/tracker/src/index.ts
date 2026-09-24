@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { safeRedirectUrl, classifyOpen, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
-import { getStore, StoreError, type EmailRow, type TrackerStore } from './store.js';
+import { safeRedirectUrl, classifyOpen, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, detectOpenRequestSource } from './helpers.js';
+import { getStore, StoreError, type ClaimRow, type EmailRow, type TrackerStore } from './store.js';
 
-export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId } from './helpers.js';
+export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, detectOpenRequestSource } from './helpers.js';
 
 export interface Env {
   SUPABASE_URL?: string;
@@ -131,7 +131,16 @@ export default {
       }
 
       if (path === '/health') {
-        return json({ ok: true, store: store.kind });
+        return json({
+          ok: true,
+          protocolVersion: 3,
+          features: [
+            'self_view_claims',
+            'event_reclassification',
+            'classified_clicks',
+          ],
+          store: store.kind,
+        });
       }
 
       return json({ error: 'not_found' }, 404);
@@ -272,6 +281,8 @@ async function recomputeEmailStats(trackingId: string, store: TrackerStore): Pro
   return store.getEmail(trackingId);
 }
 
+const CLAIM_TTL_MS = 25_000;
+
 async function handleSelfView(
   id: string,
   request: Request,
@@ -287,16 +298,40 @@ async function handleSelfView(
   const body = (await request.json().catch(() => ({}))) as {
     timestamp?: string;
     gmailThreadId?: string | null;
+    gmail_thread_id?: string | null;
     gmailMessageId?: string | null;
+    gmail_message_id?: string | null;
+    source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
+    selfViewEventId?: string;
   };
   const ts = body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
     ? new Date(body.timestamp).toISOString()
     : new Date().toISOString();
   const selfMs = Date.parse(ts);
 
+  const normThread = normalizeGmailId(body.gmailThreadId ?? body.gmail_thread_id);
+  const normMessage = normalizeGmailId(body.gmailMessageId ?? body.gmail_message_id);
+  const source = body.source || 'MESSAGE_EXPANDED';
+
+  // Idempotency: repeated delivery with the same selfViewEventId
+  if (body.selfViewEventId) {
+    const events = await store.listEvents(id);
+    const alreadyEvt = events.find((e) => e.id === body.selfViewEventId);
+    if (alreadyEvt) {
+      const claim =
+        (await store.getActiveClaim(id, normMessage, selfMs)) ||
+        (await store.getClaim(`clm_${body.selfViewEventId}`));
+      return json({
+        ok: true,
+        claimId: claim?.id || `clm_${body.selfViewEventId}`,
+        claimExpiresAt: claim?.expires_at || new Date(selfMs + CLAIM_TTL_MS).toISOString(),
+        open_count: existing.open_count,
+        reclassifiedEventIds: [],
+      });
+    }
+  }
+
   const emailPatch: Partial<EmailRow> = {};
-  const normThread = normalizeGmailId(body.gmailThreadId);
-  const normMessage = normalizeGmailId(body.gmailMessageId);
   if (normThread && !existing.gmail_thread_id) {
     emailPatch.gmail_thread_id = normThread;
   }
@@ -307,8 +342,63 @@ async function handleSelfView(
     await store.updateEmail(id, emailPatch);
   }
 
+  // Active claim create or refresh
+  const activeClaim = await store.getActiveClaim(id, normMessage, selfMs);
+  let claimId: string;
+  let claimExpiresAt: string;
+
+  if (activeClaim) {
+    claimId = activeClaim.id;
+    if (source === 'CACHE_REINSPECTION') {
+      claimExpiresAt = activeClaim.expires_at;
+      const patch: Partial<ClaimRow> = {};
+      if (normMessage && !activeClaim.gmail_message_id) patch.gmail_message_id = normMessage;
+      if (normThread && !activeClaim.gmail_thread_id) patch.gmail_thread_id = normThread;
+      if (Object.keys(patch).length > 0) await store.updateClaim(activeClaim.id, patch);
+    } else {
+      claimExpiresAt = new Date(selfMs + CLAIM_TTL_MS).toISOString();
+      const patch: Partial<ClaimRow> = {
+        last_observed_at: ts,
+        expires_at: claimExpiresAt,
+        source,
+      };
+      if (normMessage && !activeClaim.gmail_message_id) patch.gmail_message_id = normMessage;
+      if (normThread && !activeClaim.gmail_thread_id) patch.gmail_thread_id = normThread;
+      await store.updateClaim(activeClaim.id, patch);
+    }
+  } else {
+    claimId = body.selfViewEventId ? `clm_${body.selfViewEventId}` : newId('clm');
+    claimExpiresAt = new Date(selfMs + CLAIM_TTL_MS).toISOString();
+    const existingClaim = await store.getClaim(claimId);
+    if (existingClaim) {
+      await store.updateClaim(claimId, {
+        last_observed_at: ts,
+        expires_at: claimExpiresAt,
+        source,
+      });
+    } else {
+      const newClaim: ClaimRow = {
+        id: claimId,
+        tracking_id: id,
+        gmail_message_id: normMessage,
+        gmail_thread_id: normThread,
+        first_observed_at: ts,
+        last_observed_at: ts,
+        expires_at: claimExpiresAt,
+        source,
+        consumed_by_event_id: null,
+        created_at: new Date().toISOString(),
+      };
+      await store.insertClaim(newClaim);
+    }
+  }
+
+  const eventId =
+    body.selfViewEventId && /^[\w-]+$/.test(body.selfViewEventId) && body.selfViewEventId.length <= 160
+      ? body.selfViewEventId
+      : newId('evt');
   await store.insertEvent({
-    id: newId('evt'),
+    id: eventId,
     tracking_id: id,
     type: 'SELF_VIEW',
     timestamp: ts,
@@ -320,21 +410,40 @@ async function handleSelfView(
   });
 
   const events = await store.listEvents(id);
+  const reclassifiedEventIds: string[] = [];
+  let claimConsumed = false;
+
+  const claimExpiresAtMs = Date.parse(claimExpiresAt);
+  const claimStartMs = selfMs - 5_000;
+
   for (const evt of events) {
     if (evt.type === 'OPEN' || evt.type === 'CLICK') {
       const evtMs = Date.parse(evt.timestamp);
-      if (Number.isFinite(evtMs) && isSelfViewCorrelated(evtMs, selfMs)) {
-        await store.updateEvent(evt.id, {
-          classification: 'SELF_LIKELY',
-          suspected_self_open: true,
-          confidence: 1,
-        });
+      if (Number.isFinite(evtMs) && evtMs >= claimStartMs && evtMs <= claimExpiresAtMs) {
+        if (evt.classification !== 'SELF_LIKELY') {
+          await store.updateEvent(evt.id, {
+            classification: 'SELF_LIKELY',
+            suspected_self_open: true,
+            confidence: 1,
+          });
+          reclassifiedEventIds.push(evt.id);
+        }
+        if (evt.type === 'OPEN' && !claimConsumed) {
+          claimConsumed = true;
+          await store.consumeClaim(claimId, evt.id, evt.timestamp, evt.user_agent, evt.ip_hash);
+        }
       }
     }
   }
 
   const updated = await recomputeEmailStats(id, store);
-  return json({ ok: true, open_count: updated?.open_count ?? 0 });
+  return json({
+    ok: true,
+    claimId,
+    claimExpiresAt,
+    open_count: updated?.open_count ?? 0,
+    reclassifiedEventIds,
+  });
 }
 
 async function handleOpen(
@@ -359,20 +468,54 @@ async function handleOpen(
         '';
       const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
       const now = Date.now();
-
-      const events = await store.listEvents(trackingId);
-      const recentSelfView = events.find((e) => {
-        if (e.type !== 'SELF_VIEW') return false;
-        const svMs = Date.parse(e.timestamp);
-        return isSelfViewCorrelated(now, svMs);
-      });
-      const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
-
-      const verdict = classifyOpen({ sentAt: email.sent_at, now, ua, selfViewTs });
       const ts = new Date(now).toISOString();
+      const eventId = newId('evt');
+
+      const activeClaim = await store.getActiveClaim(trackingId, email.gmail_message_id, now);
+      let claimConsumed = false;
+      if (activeClaim) {
+        claimConsumed = await store.consumeClaim(activeClaim.id, eventId, ts, ua, ip_hash);
+      }
+
+      let verdict: ReturnType<typeof classifyOpen>;
+      if (claimConsumed) {
+        const source = detectOpenRequestSource(ua);
+        verdict = {
+          classification: 'SELF_LIKELY',
+          suspected: true,
+          confidence: 1,
+          countsAsOpen: false,
+          source,
+        };
+      } else {
+        const recentConsumed = await store.getRecentConsumedClaim(trackingId, now, 1000, ua, ip_hash);
+        if (recentConsumed) {
+          const source = detectOpenRequestSource(ua);
+          verdict = {
+            classification: 'SELF_LIKELY',
+            suspected: true,
+            confidence: 1,
+            countsAsOpen: false,
+            source,
+          };
+        } else {
+          let selfViewTs: number | null = null;
+          const hasClaims = await store.hasClaims(trackingId);
+          if (!hasClaims) {
+            const events = await store.listEvents(trackingId);
+            const recentSelfView = events.find((e) => {
+              if (e.type !== 'SELF_VIEW') return false;
+              const svMs = Date.parse(e.timestamp);
+              return isSelfViewCorrelated(now, svMs);
+            });
+            selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
+          }
+          verdict = classifyOpen({ sentAt: email.sent_at, now, ua, selfViewTs, hasActiveSenderClaim: false });
+        }
+      }
 
       await store.insertEvent({
-        id: newId('evt'),
+        id: eventId,
         tracking_id: trackingId,
         type: 'OPEN',
         timestamp: ts,

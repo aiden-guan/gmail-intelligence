@@ -320,7 +320,7 @@ export class AgentLoop {
       };
     }
 
-    const jobId = `job_sum_${input.threadId}_${Date.now()}`;
+    const jobId = `job_sum_${input.threadId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     await this.deps.db.ai_jobs?.put({
       id: jobId,
       kind: 'summary',
@@ -439,7 +439,7 @@ export class AgentLoop {
       return { ok: true, jobId: inFlight.jobId, status: inFlight.status };
     }
 
-    const jobId = `job_draft_${input.threadId}_${Date.now()}`;
+    const jobId = `job_draft_${input.threadId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     await this.deps.db.ai_jobs?.put({
       id: jobId,
       kind: 'draft',
@@ -472,7 +472,7 @@ export class AgentLoop {
         );
         const placeholders = detectPlaceholders(result.body);
         const suggestion = { ...result, placeholders };
-        const id = `draft_${input.threadId}_${Date.now()}`;
+        const id = `draft_${input.threadId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         await this.deps.db.draft_suggestions.put({
           id,
           threadId: input.threadId,

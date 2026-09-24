@@ -68,6 +68,8 @@ function reportTrackingSelfView(
     return;
   }
 
+  const selfViewEventId = `sv_${trackingId}_${normMessageId || 'nomessage'}_${source}_${observedAt}`;
+
   void send({
     type: 'TRACKING_SELF_VIEW',
     trackingId,
@@ -75,6 +77,7 @@ function reportTrackingSelfView(
     gmailMessageId: normMessageId,
     timestamp: new Date(observedAt).toISOString(),
     source,
+    selfViewEventId,
   });
 }
 
@@ -353,6 +356,9 @@ function mountSdkUi(sdk: InboxSdkLike): void {
       getEmails: () => cachedTrackedEmails,
       onSelfView: (trackingId, threadId, msgId, observedAt, source) => {
         reportTrackingSelfView(trackingId, threadId, msgId, observedAt, source);
+      },
+      onCollapsed: (trackingId, msgId) => {
+        selfViewDeduplicator.clearRecord(trackingId, msgId);
       },
     });
 

@@ -258,5 +258,60 @@ describe('open pixel urls', () => {
     expect(finalStats.firstOpenedAt).toBeNull();
     expect(finalStats.lastOpenedAt).toBeNull();
   });
+
+  it('classifies as SELF_LIKELY when hasActiveSenderClaim is true even with normal browser UA', () => {
+    const sentAt = Date.parse('2026-09-23T12:00:00.000Z');
+    const openTs = sentAt + 30_000;
+    const verdict = classifyOpenEvent({
+      eventTs: openTs,
+      sentAt,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      hasActiveSenderClaim: true,
+    });
+    expect(verdict.classification).toBe('SELF_LIKELY');
+    expect(verdict.countsAsOpen).toBe(false);
+    expect(verdict.suspected).toBe(true);
+  });
+
+  it('active claim overrides GoogleImageProxy to SELF_LIKELY instead of PROXY_LIKELY', () => {
+    const sentAt = Date.parse('2026-09-23T12:00:00.000Z');
+    const openTs = sentAt + 15_000;
+    const verdict = classifyOpenEvent({
+      eventTs: openTs,
+      sentAt,
+      userAgent: 'GoogleImageProxy',
+      hasActiveSenderClaim: true,
+    });
+    expect(verdict.classification).toBe('SELF_LIKELY');
+    expect(verdict.countsAsOpen).toBe(false);
+  });
+
+  it('suppresses delayed pixel (>8s after send/view) with active sender claim', () => {
+    const sentAt = Date.parse('2026-09-23T12:00:00.000Z');
+    const selfViewTs = sentAt + 5_000;
+    const openTs = selfViewTs + 9_500; // T+9.5s after self-view
+
+    // Without active claim, old correlation logic fails:
+    expect(isSelfViewCorrelated(openTs, selfViewTs)).toBe(false);
+    const withoutClaim = classifyOpenEvent({
+      eventTs: openTs,
+      sentAt,
+      selfViewTs,
+      userAgent: 'Mozilla/5.0 Chrome/120',
+      hasActiveSenderClaim: false,
+    });
+    expect(withoutClaim.classification).toBe('RECIPIENT_LIKELY');
+
+    // With active claim, it is safely suppressed:
+    const withClaim = classifyOpenEvent({
+      eventTs: openTs,
+      sentAt,
+      selfViewTs,
+      userAgent: 'Mozilla/5.0 Chrome/120',
+      hasActiveSenderClaim: true,
+    });
+    expect(withClaim.classification).toBe('SELF_LIKELY');
+    expect(withClaim.countsAsOpen).toBe(false);
+  });
 });
 

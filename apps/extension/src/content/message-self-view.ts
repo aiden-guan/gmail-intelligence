@@ -31,9 +31,11 @@ export interface MessageSelfViewController {
 export type ActiveMessageViewState = {
   view: InboxSdkMessageViewLike;
   expandedAt: number | null;
+  loadedAt: number | null;
   lastReportedTrackingId?: string;
   lastReportedMessageId?: string;
-  lastReportedExpandedAt?: number;
+  lastExpandedClaimAt?: number;
+  lastLoadedClaimAt?: number;
 };
 
 export function createMessageSelfViewHandler(opts: {
@@ -45,12 +47,14 @@ export function createMessageSelfViewHandler(opts: {
     observedAt: number,
     trigger: SelfViewSource,
   ) => void;
+  onCollapsed?: (trackingId: string, gmailMessageId: string | null) => void;
 }): MessageSelfViewController {
   const activeMessageViews = new Map<InboxSdkMessageViewLike, ActiveMessageViewState>();
 
   async function inspectMessageView(
     state: ActiveMessageViewState,
     source: SelfViewSource = 'MESSAGE_EXPANDED',
+    specificTimestamp?: number,
   ): Promise<void> {
     const messageView = state.view;
     try {
@@ -64,9 +68,15 @@ export function createMessageSelfViewHandler(opts: {
         return;
       }
 
-      // Preserve real observation time
-      const observedAt = state.expandedAt ?? Date.now();
-      state.expandedAt = observedAt;
+      // Determine observation time based on source
+      let observedAt: number;
+      if (source === 'MESSAGE_LOAD') {
+        observedAt = specificTimestamp ?? state.loadedAt ?? Date.now();
+        state.loadedAt = observedAt;
+      } else {
+        observedAt = specificTimestamp ?? state.expandedAt ?? Date.now();
+        state.expandedAt = observedAt;
+      }
 
       const rawMessageId = await resolveMessageId(messageView);
       const messageId = normalizeGmailId(rawMessageId);
@@ -75,18 +85,36 @@ export function createMessageSelfViewHandler(opts: {
       const emails = opts.getEmails();
       const match = emails.find((item) => normalizeGmailId(item.gmailMessageId) === messageId);
       if (match) {
-        // If already reported for this view and this expansion timestamp, do not emit again
-        if (
-          state.lastReportedTrackingId === match.trackingId &&
-          state.lastReportedMessageId === messageId &&
-          state.lastReportedExpandedAt === observedAt
-        ) {
-          return;
+        // Source-specific deduplication
+        if (source === 'MESSAGE_LOAD') {
+          if (
+            state.lastReportedTrackingId === match.trackingId &&
+            state.lastReportedMessageId === messageId &&
+            state.lastLoadedClaimAt === observedAt
+          ) {
+            return;
+          }
+          state.lastLoadedClaimAt = observedAt;
+        } else if (source === 'MESSAGE_EXPANDED') {
+          if (
+            state.lastReportedTrackingId === match.trackingId &&
+            state.lastReportedMessageId === messageId &&
+            state.lastExpandedClaimAt === observedAt
+          ) {
+            return;
+          }
+          state.lastExpandedClaimAt = observedAt;
+        } else if (source === 'CACHE_REINSPECTION') {
+          if (
+            state.lastReportedTrackingId === match.trackingId &&
+            state.lastReportedMessageId === messageId
+          ) {
+            return;
+          }
         }
 
         state.lastReportedTrackingId = match.trackingId;
         state.lastReportedMessageId = messageId;
-        state.lastReportedExpandedAt = observedAt;
 
         const threadView = typeof messageView.getThreadView === 'function' ? messageView.getThreadView() : null;
         const rawThreadId = threadView ? await resolveThreadId(threadView) : null;
@@ -104,6 +132,7 @@ export function createMessageSelfViewHandler(opts: {
       state = {
         view: messageView,
         expandedAt: null,
+        loadedAt: null,
       };
       activeMessageViews.set(messageView, state);
     }
@@ -118,13 +147,16 @@ export function createMessageSelfViewHandler(opts: {
           ? messageView.getViewState()
           : event?.newViewState;
         if (currentState === 'EXPANDED') {
-          if (!state.expandedAt) {
-            state.expandedAt = Date.now();
-          }
-          void inspectMessageView(state, 'MESSAGE_EXPANDED');
+          state.expandedAt = Date.now();
+          void inspectMessageView(state, 'MESSAGE_EXPANDED', state.expandedAt);
         } else {
+          if (state.lastReportedTrackingId) {
+            opts.onCollapsed?.(state.lastReportedTrackingId, state.lastReportedMessageId || null);
+          }
           state.expandedAt = null;
-          state.lastReportedExpandedAt = undefined;
+          state.loadedAt = null;
+          state.lastExpandedClaimAt = undefined;
+          state.lastLoadedClaimAt = undefined;
           state.lastReportedTrackingId = undefined;
           state.lastReportedMessageId = undefined;
         }
@@ -135,10 +167,8 @@ export function createMessageSelfViewHandler(opts: {
           ? messageView.getViewState()
           : null;
         if (currentState === 'EXPANDED') {
-          if (!state.expandedAt) {
-            state.expandedAt = Date.now();
-          }
-          void inspectMessageView(state, 'MESSAGE_LOAD');
+          state.loadedAt = Date.now();
+          void inspectMessageView(state, 'MESSAGE_LOAD', state.loadedAt);
         }
       });
     }
@@ -148,7 +178,7 @@ export function createMessageSelfViewHandler(opts: {
       if (!state.expandedAt) {
         state.expandedAt = Date.now();
       }
-      void inspectMessageView(state, 'MESSAGE_EXPANDED');
+      void inspectMessageView(state, 'MESSAGE_EXPANDED', state.expandedAt);
     }
   }
 
@@ -165,7 +195,7 @@ export function createMessageSelfViewHandler(opts: {
         if (!state.expandedAt) {
           state.expandedAt = Date.now();
         }
-        promises.push(inspectMessageView(state, 'CACHE_REINSPECTION'));
+        promises.push(inspectMessageView(state, 'CACHE_REINSPECTION', state.expandedAt));
       }
     }
     await Promise.all(promises);

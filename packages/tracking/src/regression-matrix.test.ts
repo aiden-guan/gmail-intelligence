@@ -9,7 +9,13 @@ import {
   matchTrackedEmail,
   normalizeGmailId,
   transformOutgoingHtml,
+  classifyOpenEvent,
+  probeTracker,
+  formatTrackingReport,
+  TrackingClient,
+  TRACKER_PROTOCOL_VERSION,
   type TrackedEmailSummary,
+  type TrackingDiagnosticsReport,
   type TrackingEvent,
 } from './index';
 
@@ -626,5 +632,209 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(stats.pixelLoadCount).toBe(250);
     expect(stats.firstOpenedAt).toBe(new Date(baseTime).toISOString());
     expect(stats.lastOpenedAt).toBe(new Date(baseTime + 249 * 2000).toISOString());
+  });
+
+  // Case Q: probeTracker detects outdated protocol version (< 3)
+  it('Case Q: probeTracker flags outdated protocol version', async () => {
+    const mockFetcher = (async (url: string) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, protocolVersion: 2, features: ['self_view_claims'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const probe = await probeTracker('https://track.example.com', 'secret-token', mockFetcher);
+    expect(probe.status).toBe('outdated');
+    expect(probe.protocolVersion).toBe(2);
+    expect(probe.label).toContain('outdated');
+  });
+
+  // Case R: probeTracker detects missing self_view_claims feature
+  it('Case R: probeTracker flags missing self_view_claims feature', async () => {
+    const mockFetcher = (async (url: string) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, protocolVersion: 3, features: ['event_reclassification'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const probe = await probeTracker('https://track.example.com', 'secret-token', mockFetcher);
+    expect(probe.status).toBe('outdated');
+    expect(probe.features).toEqual(['event_reclassification']);
+    expect(probe.label).toContain('outdated');
+  });
+
+  // Case S: probeTracker succeeds when protocolVersion >= 3 and self_view_claims present
+  it('Case S: probeTracker succeeds with protocolVersion >= 3 and self_view_claims', async () => {
+    const mockFetcher = (async (url: string) => {
+      if (url.endsWith('/health')) {
+        return new Response(
+          JSON.stringify({ ok: true, protocolVersion: 3, features: ['self_view_claims', 'event_reclassification'] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.includes('/api/emails')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const probe = await probeTracker('https://track.example.com', 'secret-token', mockFetcher);
+    expect(probe.status).toBe('healthy');
+    expect(probe.protocolVersion).toBe(TRACKER_PROTOCOL_VERSION);
+    expect(probe.label).toBe('Tracker healthy');
+  });
+
+  // Case T: classifyOpenEvent with active sender claim suppresses even standard browser UA or GoogleImageProxy
+  it('Case T: classifyOpenEvent with hasActiveSenderClaim classifies as SELF_LIKELY', () => {
+    const baseTime = Date.parse('2026-09-24T10:00:00.000Z');
+    const openTime = baseTime + 10_000; // T+10s (outside legacy correlation window)
+
+    // With hasActiveSenderClaim: true, browser UA is suppressed as SELF_LIKELY
+    const browserVerdict = classifyOpenEvent({
+      eventTs: openTime,
+      sentAt: baseTime,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      hasActiveSenderClaim: true,
+    });
+    expect(browserVerdict.classification).toBe('SELF_LIKELY');
+    expect(browserVerdict.countsAsOpen).toBe(false);
+    expect(browserVerdict.suspected).toBe(true);
+
+    // With hasActiveSenderClaim: true, GoogleImageProxy UA is suppressed as SELF_LIKELY
+    const proxyVerdict = classifyOpenEvent({
+      eventTs: openTime,
+      sentAt: baseTime,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy',
+      hasActiveSenderClaim: true,
+    });
+    expect(proxyVerdict.classification).toBe('SELF_LIKELY');
+    expect(proxyVerdict.countsAsOpen).toBe(false);
+
+    // Without active claim or self-view at T+10s, browser UA is RECIPIENT_LIKELY
+    const recipientVerdict = classifyOpenEvent({
+      eventTs: openTime,
+      sentAt: baseTime,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      hasActiveSenderClaim: false,
+    });
+    expect(recipientVerdict.classification).toBe('RECIPIENT_LIKELY');
+    expect(recipientVerdict.countsAsOpen).toBe(true);
+  });
+
+  // Case U: formatTrackingReport formats diagnostics report including lastSelfView
+  it('Case U: formatTrackingReport includes lastSelfView diagnostic details', () => {
+    const report: TrackingDiagnosticsReport = {
+      health: 'healthy',
+      endpoint: 'https://track.example.com',
+      auth: 'configured',
+      inboxSdk: 'ready',
+      pageWorld: 'ready',
+      composeHook: 'ready',
+      last: null,
+      lastSelfView: {
+        observedAt: '2026-09-24T09:59:00.000Z',
+        source: 'MESSAGE_LOAD',
+        trackingId: 'trk_xyz',
+        normalizedMessageId: 'msg_123',
+        deliveryStatus: 'delivered',
+        claimId: 'clm_abc',
+        claimExpiresAt: '2026-09-24T09:59:25.000Z',
+        retryCount: 0,
+        lastError: null,
+        claimConsumed: false,
+        openCount: 0,
+      },
+    };
+
+    const formatted = formatTrackingReport(report);
+    expect(formatted).toContain('Tracker healthy');
+    expect(formatted).toContain('trk_xyz');
+    expect(formatted).toContain('msg_123');
+    expect(formatted).toContain('MESSAGE_LOAD');
+    expect(formatted).toContain('clm_abc');
+    expect(formatted).toContain('2026-09-24T09:59:25.000Z');
+  });
+
+  // Case V: Requirement 37 - Old architecture failure vs New claim architecture on delayed pixel
+  it('Case V: Proves old timestamp correlation fails on T+9.5s pixel while claim-based architecture succeeds', () => {
+    const t0 = 1000;
+    const tPixel = t0 + 9500; // T+9.5s
+    const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+    // 1. Old architecture: uses ONLY timestamp correlation ([-3s, +8s])
+    const oldCorrelated = isSelfViewCorrelated(tPixel, t0);
+    expect(oldCorrelated).toBe(false); // 9500 > 8000 -> FAILS TO CORRELATE!
+    const oldVerdict = classifyOpenEvent({
+      eventTs: tPixel,
+      sentAt: t0 - 10_000,
+      userAgent: ua,
+      selfViewTs: t0,
+      hasActiveSenderClaim: false, // Old architecture had no claim concept
+    });
+    // Old architecture incorrectly counted sender open as recipient open!
+    expect(oldVerdict.classification).toBe('RECIPIENT_LIKELY');
+    expect(oldVerdict.countsAsOpen).toBe(true);
+
+    // 2. New architecture: hasActiveSenderClaim (with 25s TTL)
+    const newVerdict = classifyOpenEvent({
+      eventTs: tPixel,
+      sentAt: t0 - 10_000,
+      userAgent: ua,
+      selfViewTs: t0,
+      hasActiveSenderClaim: true,
+    });
+    // New architecture correctly suppresses the delayed open!
+    expect(newVerdict.classification).toBe('SELF_LIKELY');
+    expect(newVerdict.countsAsOpen).toBe(false);
+  });
+
+  // Case W: Requirement 40 - 401 Unauthorized handling in probeTracker and TrackingClient
+  it('Case W: 401 token failure marks probe as unauthorized and TrackingClient throws', async () => {
+    const mockFetcher: typeof fetch = async (input, _init) => {
+      const url = String(input);
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, protocolVersion: 3, features: ['self_view_claims'] }), { status: 200 });
+      }
+      if (url.includes('/api/emails')) {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+      }
+      return new Response(null, { status: 404 });
+    };
+
+    const probe = await probeTracker('https://track.example.com', 'bad-token', mockFetcher);
+    expect(probe.status).toBe('unauthorized');
+    expect(probe.label).toContain('Unauthorized');
+
+    const client = new TrackingClient('https://track.example.com', 'bad-token');
+    // Using global fetch mock for client
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = mockFetcher;
+      await expect(client.recordSelfView('trk_test', { timestamp: new Date().toISOString() })).rejects.toThrow('401');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  // Case X: Requirement 41 - Probe /health returning 404 flags tracker as outdated
+  it('Case X: Probe /health returning 404 identifies outdated tracker deployment', async () => {
+    const mockFetcher: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 });
+      }
+      return new Response(null, { status: 200 });
+    };
+
+    const probe = await probeTracker('https://track.example.com', 'secret-token', mockFetcher);
+    expect(probe.status).toBe('outdated');
+    expect(probe.label).toContain('outdated');
   });
 });

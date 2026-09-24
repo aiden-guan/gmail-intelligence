@@ -30,25 +30,48 @@ export class SelfViewDeduplicator {
     const last = this.recent.get(key);
 
     if (last) {
-      // If we already reported a strong signal (MESSAGE_EXPANDED or MESSAGE_LOAD),
-      // a subsequent weak ROW_INTERACTION should never override or re-report
-      if (source === 'ROW_INTERACTION' && (last.source === 'MESSAGE_EXPANDED' || last.source === 'MESSAGE_LOAD')) {
+      // 1. Weak ROW_INTERACTION cannot override stronger signals
+      if (source === 'ROW_INTERACTION' && last.source !== 'ROW_INTERACTION') {
         return false;
       }
 
-      // If previous was a weak ROW_INTERACTION, the strong MESSAGE_EXPANDED/MESSAGE_LOAD
-      // signal MUST be allowed to supersede it!
-      if (last.source === 'ROW_INTERACTION' && (source === 'MESSAGE_EXPANDED' || source === 'MESSAGE_LOAD')) {
+      // 2. Strong signals supersede weak ROW_INTERACTION
+      if (last.source === 'ROW_INTERACTION' && source !== 'ROW_INTERACTION') {
         this.recent.set(key, { observedAt, source });
         return true;
       }
 
-      // Same observation time (repeated inspection of same view)
+      // 3. Strongest rendering signal: MESSAGE_LOAD must NOT be deduped against MESSAGE_EXPANDED or CACHE_REINSPECTION
+      if (source === 'MESSAGE_LOAD' && last.source !== 'MESSAGE_LOAD') {
+        this.recent.set(key, { observedAt, source });
+        return true;
+      }
+
+      // 4. Repeated inspection with identical observation time
       if (observedAt === last.observedAt) {
         return false;
       }
 
-      // Deduplicate within the window
+      // 5. CACHE_REINSPECTION with older or identical observation time
+      if (source === 'CACHE_REINSPECTION' && observedAt <= last.observedAt) {
+        return false;
+      }
+
+      // 6. Deliberate re-expansion after >1000ms is allowed (e.g. user collapsed and re-expanded)
+      if (source === 'MESSAGE_EXPANDED') {
+        if (Math.abs(observedAt - last.observedAt) <= 1000) {
+          return false;
+        }
+        this.recent.set(key, { observedAt, source });
+        return true;
+      }
+
+      // 7. Deduplicate same-source within window (e.g. repeated ROW_INTERACTION or MESSAGE_LOAD)
+      if (source === last.source && Math.abs(observedAt - last.observedAt) <= this.windowMs) {
+        return false;
+      }
+
+      // 8. General fallback within window for remaining weaker transitions
       if (Math.abs(observedAt - last.observedAt) <= this.windowMs) {
         return false;
       }
@@ -56,6 +79,12 @@ export class SelfViewDeduplicator {
 
     this.recent.set(key, { observedAt, source });
     return true;
+  }
+
+  clearRecord(trackingId: string, gmailMessageId?: string | null): void {
+    const normMessageId = normalizeGmailId(gmailMessageId);
+    this.recent.delete(`${trackingId}:${normMessageId || 'unknown'}`);
+    this.recent.delete(`${trackingId}:unknown`);
   }
 
   clear(): void {

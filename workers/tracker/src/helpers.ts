@@ -78,6 +78,7 @@ export function classifyOpen(opts: {
   now: number;
   ua: string | null;
   selfViewTs?: number | null;
+  hasActiveSenderClaim?: boolean;
 }): {
   classification: OpenClassification;
   suspected: boolean;
@@ -90,6 +91,17 @@ export function classifyOpen(opts: {
 
   // Pre-send fetches
   if (!opts.sentAt || !Number.isFinite(sentMs) || opts.now < sentMs) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source,
+    };
+  }
+
+  // Active sender claim overrides everything
+  if (opts.hasActiveSenderClaim) {
     return {
       classification: 'SELF_LIKELY',
       suspected: true,

@@ -327,6 +327,37 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     expect(onSelfView).toHaveBeenLastCalledWith('trk_B', 'thread_X', 'def456', expect.any(Number), 'MESSAGE_EXPANDED');
   });
 
+  // Re-firing with distinct loadedAt on delayed load
+  it('fires MESSAGE_EXPANDED at T0 and MESSAGE_LOAD at T+9s with fresh loadedAt timestamp', async () => {
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      onSelfView,
+    });
+
+    const mv = createMockMessageView({ id: 'msg-a:abc123', loaded: true, state: 'COLLAPSED' });
+    handler.handleMessageView(mv);
+
+    // T = 1000: expanded
+    const t0 = 1000;
+    vi.setSystemTime(t0);
+    mv.setState('EXPANDED');
+
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
+    expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread-1', 'abc123', t0, 'MESSAGE_EXPANDED');
+
+    // T = 10000 (T+9s): message body finishes streaming / loading
+    const tLoad = t0 + 9000;
+    vi.setSystemTime(tLoad);
+    mv.emit('load', { messageView: mv });
+
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(2));
+    // Must capture fresh loadedAt (tLoad), NEVER reusing expandedAt (t0)
+    expect(onSelfView).toHaveBeenLastCalledWith('trk_A', 'thread-1', 'abc123', tLoad, 'MESSAGE_LOAD');
+
+    vi.useRealTimers();
+  });
+
   // MessageView destruction cleans up active set
   it('removes destroyed MessageViews from active registry', async () => {
     let emails: TrackedEmailSummary[] = [];
@@ -349,5 +380,27 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     emails = [trackedEmailA];
     await handler.reinspectActive();
     expect(onSelfView).not.toHaveBeenCalled();
+  });
+
+  it('notifies onCollapsed when view state transitions from EXPANDED to COLLAPSED', async () => {
+    const onSelfView = vi.fn();
+    const onCollapsed = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      onSelfView,
+      onCollapsed,
+    });
+
+    const mv = createMockMessageView({ id: 'msg-a:abc123', loaded: true, state: 'COLLAPSED' });
+    handler.handleMessageView(mv);
+
+    // Expand message
+    mv.setState('EXPANDED');
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledTimes(1));
+
+    // Collapse message
+    mv.setState('COLLAPSED');
+    expect(onCollapsed).toHaveBeenCalledTimes(1);
+    expect(onCollapsed).toHaveBeenCalledWith('trk_A', 'abc123');
   });
 });

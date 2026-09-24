@@ -34,8 +34,12 @@ beforeEach(() => {
 describe('local memory tracker', () => {
   it('reports memory mode on /health without Supabase', async () => {
     const res = await worker.fetch(new Request('http://127.0.0.1:8787/health'), env);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, store: 'memory' });
+    expect(await res.json()).toEqual({
+      ok: true,
+      protocolVersion: 3,
+      features: ['self_view_claims', 'event_reclassification', 'classified_clicks'],
+      store: 'memory',
+    });
   });
 
   it('rejects management calls without the token', async () => {
@@ -737,5 +741,713 @@ describe('local memory tracker', () => {
     ).json()) as { gmail_message_id: string; gmail_thread_id: string };
     expect(email2.gmail_message_id).toBe('linked-msg-456');
     expect(email2.gmail_thread_id).toBe('linked-thread-789');
+  });
+
+  it('Delayed pixel at T+9s is suppressed by active claim (fixes the fixed 8s window bug)', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ subject: 'Delayed Pixel Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      // Mark SENT at baseTime
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender views email in Sent folder at T+0
+      const selfViewRes = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+          }),
+        }),
+        env,
+      );
+      expect(selfViewRes.status).toBe(200);
+      const selfViewBody = (await selfViewRes.json()) as { ok: boolean; claimId: string; claimExpiresAt: string };
+      expect(selfViewBody.ok).toBe(true);
+      expect(selfViewBody.claimId).toBeDefined();
+
+      // Gmail delays image loading until T+9.2s (beyond old fixed 8s window)
+      vi.advanceTimersByTime(9200);
+      const pixelRes = await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+      expect(pixelRes.status).toBe(200);
+
+      // The open MUST be suppressed by the claim, open_count MUST remain 0!
+      const email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      const events = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+      ).json()) as Array<{ type: string; classification: string }>;
+      const openEvent = events.find((e) => e.type === 'OPEN');
+      expect(openEvent?.classification).toBe('SELF_LIKELY');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('One-shot claim consumption: first pixel consumes claim, grace period protects burst, subsequent recipient open counts', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ subject: 'One Shot Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender self-view at T+0 creates claim
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ timestamp: new Date(baseTime).toISOString(), source: 'MESSAGE_EXPANDED' }),
+        }),
+        env,
+      );
+
+      // First pixel fetch at T+2s consumes the claim
+      vi.advanceTimersByTime(2000);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      let email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      // Duplicate burst pixel fetch at T+2.3s (within 1000ms grace period)
+      vi.advanceTimersByTime(300);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      // Recipient legitimately opens at T+4.0s (claim was consumed at T+2.0s, grace period 1000ms expired at T+3.0s;
+      // must NOT be suppressed by legacy 8s timestamp correlation window from T+0)
+      vi.advanceTimersByTime(1700);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Claim expires after 25s TTL without suppressing late recipient opens', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ subject: 'Expiry Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender self-view at T+0 (expires at T+25s)
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ timestamp: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Recipient opens at T+30s (past the 25s TTL, and outside correlation window)
+      vi.advanceTimersByTime(30_000);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      const email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Self-view idempotency on retry with identical selfViewEventId', async () => {
+    const created = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ subject: 'Idempotency Test', sender: 'me@example.com', recipients: ['r@example.com'] }),
+      }),
+      env,
+    );
+    const { tracking_id } = (await created.json()) as { tracking_id: string };
+
+    const firstRes = await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          selfViewEventId: 'evt_idempotent_123',
+          timestamp: new Date().toISOString(),
+          source: 'MESSAGE_EXPANDED',
+        }),
+      }),
+      env,
+    );
+    expect(firstRes.status).toBe(200);
+    const firstBody = (await firstRes.json()) as { ok: boolean; claimId: string };
+    expect(firstBody.ok).toBe(true);
+
+    // Second call with SAME selfViewEventId
+    const secondRes = await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          selfViewEventId: 'evt_idempotent_123',
+          timestamp: new Date().toISOString(),
+          source: 'MESSAGE_EXPANDED',
+        }),
+      }),
+      env,
+    );
+    expect(secondRes.status).toBe(200);
+    const secondBody = (await secondRes.json()) as { ok: boolean; claimId: string };
+    expect(secondBody.ok).toBe(true);
+    expect(secondBody.claimId).toBe(firstBody.claimId);
+
+    // Ensure only 1 event recorded
+    const events = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+    ).json()) as Array<{ id: string }>;
+    expect(events.filter((e) => e.id === 'evt_idempotent_123')).toHaveLength(1);
+  });
+
+  it('Isolates self-view claims between different messages in the same thread', async () => {
+    // Message A in thread_shared
+    const createA = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          subject: 'Thread Message A',
+          sender: 'me@example.com',
+          recipients: ['r@example.com'],
+          gmail_thread_id: 'thread_shared',
+          gmail_message_id: 'msg_aaa',
+        }),
+      }),
+      env,
+    );
+    const { tracking_id: trkA } = (await createA.json()) as { tracking_id: string };
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${trkA}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: '2026-09-24T12:00:00.000Z' }),
+      }),
+      env,
+    );
+
+    // Message B in thread_shared
+    const createB = await worker.fetch(
+      new Request('http://127.0.0.1:8787/api/emails', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          subject: 'Thread Message B',
+          sender: 'me@example.com',
+          recipients: ['r@example.com'],
+          gmail_thread_id: 'thread_shared',
+          gmail_message_id: 'msg_bbb',
+        }),
+      }),
+      env,
+    );
+    const { tracking_id: trkB, pixel_url: pixelUrlB } = (await createB.json()) as { tracking_id: string; pixel_url: string };
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${trkB}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status: 'SENT', sent_at: '2026-09-24T12:01:00.000Z' }),
+      }),
+      env,
+    );
+
+    // Sender views Message A only
+    await worker.fetch(
+      new Request(`http://127.0.0.1:8787/api/emails/${trkA}/self-view`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          gmailMessageId: 'msg_aaa',
+          gmailThreadId: 'thread_shared',
+        }),
+      }),
+      env,
+    );
+
+    // Message B's pixel is requested (e.g. by recipient)
+    await worker.fetch(new Request(pixelUrlB, { headers: browserHeaders() }), env);
+
+    // Message B's open count MUST increment to 1 (not suppressed by Message A's claim)
+    const emailB = (await (
+      await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${trkB}`, { headers: authHeaders() }), env)
+    ).json()) as { open_count: number };
+    expect(emailB.open_count).toBe(1);
+  });
+
+  // Requirement 36: Exact reproduction case:
+  // T=0 MESSAGE_EXPANDED, T=9 MESSAGE_LOAD, claim refreshed to T=9, T=9.5 pixel arrives -> SELF_LIKELY, open_count = 0
+  it('Requirement 36: MESSAGE_EXPANDED at T0, MESSAGE_LOAD at T+9s, pixel at T+9.5s -> SELF_LIKELY and open_count = 0', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            subject: 'Req 36 Test',
+            sender: 'sender@example.com',
+            recipients: ['recipient@example.com'],
+            gmail_message_id: 'msg_req36',
+          }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // T = 0: Sender expands message view
+      const expandedRes = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+            gmailMessageId: 'msg_req36',
+          }),
+        }),
+        env,
+      );
+      const expandedBody = (await expandedRes.json()) as { ok: boolean; claimId: string; claimExpiresAt: string };
+      expect(expandedBody.ok).toBe(true);
+
+      // T = 9s: MessageView finishes rendering body and emits load
+      vi.advanceTimersByTime(9000);
+      const loadRes = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(Date.now()).toISOString(),
+            source: 'MESSAGE_LOAD',
+            gmailMessageId: 'msg_req36',
+          }),
+        }),
+        env,
+      );
+      const loadBody = (await loadRes.json()) as { ok: boolean; claimId: string; claimExpiresAt: string };
+      expect(loadBody.ok).toBe(true);
+      // Same claim is refreshed
+      expect(loadBody.claimId).toBe(expandedBody.claimId);
+      expect(Date.parse(loadBody.claimExpiresAt)).toBeGreaterThan(Date.parse(expandedBody.claimExpiresAt));
+
+      // T = 9.5s: Gmail remote image proxy fetches pixel
+      vi.advanceTimersByTime(500);
+      const pixelRes = await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+      expect(pixelRes.status).toBe(200);
+
+      // Open count MUST remain 0!
+      const email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      const events = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+      ).json()) as Array<{ type: string; classification: string }>;
+      const openEvent = events.find((e) => e.type === 'OPEN');
+      expect(openEvent?.classification).toBe('SELF_LIKELY');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Requirement 30: Duplicate pixel burst from one sender render is suppressed even with delayed load
+  it('Requirement 30: Duplicate pixel burst after delayed render at T+9.2s and T+9.5s suppresses both, while subsequent recipient open at T+15s counts', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            subject: 'Req 30 Burst Test',
+            sender: 'sender@example.com',
+            recipients: ['recipient@example.com'],
+          }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender self-view at T=0
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+          }),
+        }),
+        env,
+      );
+
+      // Gmail delays image rendering until T+9.2s
+      vi.advanceTimersByTime(9200);
+      // Pixel 1 arrives: consumes claim
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      let email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      // Duplicate pixel 2 arrives at T+9.5s (300ms after pixel 1, same render burst)
+      vi.advanceTimersByTime(300);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      // Real recipient opens at T+15s (grace window <1000ms expired, claim consumed)
+      vi.advanceTimersByTime(5500);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Requirement 45: Late cache arrival preserves original expansion timestamp and does NOT extend expiry
+  it('Requirement 45: CACHE_REINSPECTION preserves original T0 timestamp and does not extend claim expiry', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            subject: 'Cache Reinspection Test',
+            sender: 'sender@example.com',
+            recipients: ['recipient@example.com'],
+          }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // T = 0: Sender opens email, but cache was missing.
+      // Cache arrives at T = 20s. Content script sends CACHE_REINSPECTION with observedAt = T0 (baseTime).
+      vi.advanceTimersByTime(20_000);
+      const reinspectRes = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(), // Original T0 timestamp!
+            source: 'CACHE_REINSPECTION',
+          }),
+        }),
+        env,
+      );
+      const reinspectBody = (await reinspectRes.json()) as { ok: boolean; claimExpiresAt: string };
+      expect(reinspectBody.ok).toBe(true);
+
+      // Expiry must be based on original T0 (baseTime + 25s = 25s), NOT T20 + 25s = 45s!
+      const expiresMs = Date.parse(reinspectBody.claimExpiresAt);
+      expect(expiresMs).toBe(baseTime + 25_000);
+
+      // Pixel at T = 24s is within 25s TTL -> suppressed
+      vi.advanceTimersByTime(4000); // Now at T = 24s
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      let email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+
+      // Advance past T = 25s (to T = 30s)
+      vi.advanceTimersByTime(6000);
+      // Now claim is consumed and expired. New open from recipient at T = 30s must count
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Retroactive reclassification beyond 8s window
+  it('Retroactively reclassifies delayed open arriving at T+8.5s when SELF_VIEW claim arrives at T+9s', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            subject: 'Retroactive Delayed Test',
+            sender: 'sender@example.com',
+            recipients: ['recipient@example.com'],
+          }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      // Sender rendered message at T=0. Pixel arrives at T+8.5s before SELF_VIEW was delivered
+      vi.advanceTimersByTime(8500);
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+
+      // Temporarily open_count is 1
+      let email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(1);
+
+      // Background wake-up delay: SELF_VIEW claim reaches server at T+9s
+      vi.advanceTimersByTime(500);
+      const svRes = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+          }),
+        }),
+        env,
+      );
+      const svBody = (await svRes.json()) as { ok: boolean; open_count: number; reclassifiedEventIds: string[] };
+      expect(svBody.ok).toBe(true);
+      expect(svBody.reclassifiedEventIds.length).toBeGreaterThan(0);
+      expect(svBody.open_count).toBe(0);
+
+      // Open count was retroactively corrected to 0
+      email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Requirement 38: Backend delivery retry simulation with same idempotency key
+  it('Requirement 38: Backend delivery retries with same idempotency key create single claim and suppress sender pixel', async () => {
+    const baseTime = Date.parse('2026-09-24T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(baseTime);
+
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            subject: 'Retry Test',
+            sender: 'sender@example.com',
+            recipients: ['recipient@example.com'],
+          }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(baseTime).toISOString() }),
+        }),
+        env,
+      );
+
+      const idempotencyKey = 'sv_idempotent_test_key_abc';
+
+      // Simulate attempt 1 failure (e.g. invalid endpoint or token)
+      const attempt1 = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer bad-token', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ timestamp: new Date(baseTime).toISOString(), selfViewEventId: idempotencyKey }),
+        }),
+        env,
+      );
+      expect(attempt1.status).toBe(401);
+
+      // Simulate attempt 2 after 500ms failure (e.g. malformed id)
+      vi.advanceTimersByTime(500);
+      const attempt2 = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/bad_id%2Fwith_slash/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ timestamp: new Date(baseTime).toISOString(), selfViewEventId: idempotencyKey }),
+        }),
+        env,
+      );
+      expect(attempt2.status).toBe(400);
+
+      // Simulate attempt 3 after 2000ms: succeeds with same idempotency key
+      vi.advanceTimersByTime(2000);
+      const attempt3 = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+            selfViewEventId: idempotencyKey,
+          }),
+        }),
+        env,
+      );
+      expect(attempt3.status).toBe(200);
+      const body3 = (await attempt3.json()) as { ok: boolean; claimId: string };
+      expect(body3.ok).toBe(true);
+
+      // Repeated retry with same idempotency key returns same claim and doesn't duplicate
+      const retrySame = await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(baseTime).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+            selfViewEventId: idempotencyKey,
+          }),
+        }),
+        env,
+      );
+      const retryBody = (await retrySame.json()) as { ok: boolean; claimId: string };
+      expect(retryBody.claimId).toBe(body3.claimId);
+
+      // Pixel open is suppressed
+      await worker.fetch(new Request(pixel_url, { headers: browserHeaders() }), env);
+      const email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

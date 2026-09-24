@@ -43,11 +43,14 @@ import {
   detectOpenRequestSource,
   formatSentTrackingBadge,
   formatTrackingReport,
+  normalizeGmailId,
   probeTracker,
   summaryFromRemote,
+  trackerHealthLabel,
   type TrackedEmailSummary,
   type TrackingDiagnosticsReport,
   type TrackingPixelEventDiagnostic,
+  type TrackingSelfViewDiagnostic,
   type TrackingSendReport,
 } from '@gi/tracking';
 import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
@@ -329,7 +332,7 @@ async function runDiagnostics() {
   } catch {
     mailboxDb = 'error';
   }
-  let tracking: 'not_configured' | 'healthy' | 'unreachable' | 'unauthorized' | 'invalid_url' | 'disabled' = 'not_configured';
+  let tracking: 'not_configured' | 'healthy' | 'unreachable' | 'unauthorized' | 'invalid_url' | 'outdated' | 'disabled' = 'not_configured';
   let trackingProbe: Awaited<ReturnType<typeof probeTracker>> | null = null;
   if (!settings.trackingEnabled) tracking = 'disabled';
   else if (settings.trackerBaseUrl || settings.personalApiToken) {
@@ -342,7 +345,9 @@ async function runDiagnostics() {
           ? 'invalid_url'
           : trackingProbe.status === 'missing'
             ? 'not_configured'
-            : 'unreachable';
+            : trackingProbe.status === 'outdated'
+              ? 'outdated'
+              : 'unreachable';
   }
   const storedTracking = await chrome.storage.session.get('trackingReport');
   const trackingSnapshot = (storedTracking.trackingReport || null) as {
@@ -353,6 +358,22 @@ async function runDiagnostics() {
     last?: TrackingSendReport | null;
   } | null;
   const storedPixel = (await chrome.storage.session.get('lastPixelEvent'))?.lastPixelEvent as TrackingPixelEventDiagnostic | undefined;
+  const storedSelfView = (await chrome.storage.session.get('lastSelfViewDiagnostic'))?.lastSelfViewDiagnostic as TrackingSelfViewDiagnostic | undefined;
+  if (tracking === 'healthy' && storedSelfView?.deliveryStatus === 'failed') {
+    if (storedSelfView.lastError?.includes('404')) {
+      tracking = 'outdated';
+      if (trackingProbe) {
+        trackingProbe.status = 'outdated';
+        trackingProbe.label = trackerHealthLabel('outdated');
+      }
+    } else if (storedSelfView.lastError?.includes('401')) {
+      tracking = 'unauthorized';
+      if (trackingProbe) {
+        trackingProbe.status = 'unauthorized';
+        trackingProbe.label = trackerHealthLabel('unauthorized');
+      }
+    }
+  }
   const trackingDiagnostics: TrackingDiagnosticsReport = {
     health: tracking === 'disabled' ? 'disabled' : trackingProbe?.status || (tracking === 'not_configured' ? 'missing' : 'unreachable'),
     endpoint: trackingProbe?.status === 'healthy' || trackingProbe?.status === 'unauthorized' ? 'reachable' : trackingProbe?.status === 'invalid_url' ? 'invalid URL' : trackingProbe ? 'unreachable' : 'not configured',
@@ -362,6 +383,7 @@ async function runDiagnostics() {
     composeHook: trackingSnapshot?.composeHookAttached ? 'attached' : 'not attached',
     last: trackingSnapshot?.last || null,
     lastPixelEvent: storedPixel || null,
+    lastSelfView: storedSelfView || null,
   };
   let aiStatus: 'ready' | 'disabled' | 'not_signed_in' | 'missing_permissions' | 'missing_key' | 'error' = 'ready';
   let configStatus: string = 'provider selected';
@@ -1330,20 +1352,105 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case 'TRACKING_SELF_VIEW': {
-        if (settings.trackerBaseUrl && settings.personalApiToken && msg.trackingId) {
-          const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+        if (!settings.trackerBaseUrl || !settings.personalApiToken || !msg.trackingId) {
+          sendResponse({
+            ok: false,
+            recorded: false,
+            error: 'Tracking is not configured or tracking ID is missing',
+          });
+          break;
+        }
+
+        const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+        const normMessageId = normalizeGmailId(msg.gmailMessageId);
+        const normThreadId = normalizeGmailId(msg.gmailThreadId);
+        const source = msg.source || 'MESSAGE_EXPANDED';
+        const timestamp = msg.timestamp || new Date().toISOString();
+        const selfViewEventId =
+          msg.selfViewEventId ||
+          `sv_${msg.trackingId}_${normMessageId || 'nomessage'}_${source}_${Date.parse(timestamp) || Date.now()}`;
+
+        let lastErr: unknown = null;
+        let result: Awaited<ReturnType<typeof client.recordSelfView>> | null = null;
+        const delays = [0, 500, 2000];
+        let attempt = 0;
+
+        for (attempt = 0; attempt < delays.length; attempt++) {
+          if (delays[attempt] > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+          }
           try {
-            await client.recordSelfView(msg.trackingId, {
-              timestamp: msg.timestamp || new Date().toISOString(),
-              gmailThreadId: msg.gmailThreadId || null,
-              gmailMessageId: msg.gmailMessageId || null,
+            result = await client.recordSelfView(msg.trackingId, {
+              timestamp,
+              gmailThreadId: normThreadId,
+              gmailMessageId: normMessageId,
+              source,
+              selfViewEventId,
             });
-            await pollTracking();
-          } catch (e) {
-            console.error('tracking self-view failed', e);
+            lastErr = null;
+            break;
+          } catch (err) {
+            lastErr = err;
+            const errStr = err instanceof Error ? err.message : String(err ?? '');
+            if (errStr.includes('401') || errStr.includes('404')) {
+              break;
+            }
           }
         }
-        sendResponse({ ok: true });
+
+        if (result && result.ok) {
+          await pollTracking();
+          try {
+            await chrome.storage.session?.set?.({
+              lastSelfViewDiagnostic: {
+                observedAt: timestamp,
+                source,
+                trackingId: msg.trackingId,
+                normalizedMessageId: normMessageId,
+                deliveryStatus: 'delivered',
+                claimId: result.claimId ?? null,
+                claimExpiresAt: result.claimExpiresAt ?? null,
+                retryCount: attempt,
+                lastError: null,
+                claimConsumed: Boolean(result.reclassifiedEventIds && result.reclassifiedEventIds.length > 0),
+                openCount: result.open_count ?? result.openCount,
+              },
+            });
+          } catch (err) {
+            console.warn('[gi][tracking] Failed to save session diagnostic', err);
+          }
+
+          sendResponse({
+            recorded: true,
+            ...result,
+          });
+        } else {
+          const errMessage = lastErr instanceof Error ? lastErr.message : String(lastErr ?? 'Self-view failed');
+          try {
+            await chrome.storage.session?.set?.({
+              lastSelfViewDiagnostic: {
+                observedAt: timestamp,
+                source,
+                trackingId: msg.trackingId,
+                normalizedMessageId: normMessageId,
+                deliveryStatus: 'failed',
+                claimId: null,
+                claimExpiresAt: null,
+                retryCount: attempt,
+                lastError: errMessage,
+                claimConsumed: false,
+              },
+            });
+          } catch (err) {
+            console.warn('[gi][tracking] Failed to save session diagnostic', err);
+          }
+
+          sendResponse({
+            ok: false,
+            recorded: false,
+            error: errMessage,
+          });
+        }
         break;
       }
       case 'CHATGPT_LOGIN':

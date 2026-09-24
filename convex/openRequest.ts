@@ -80,6 +80,7 @@ export function classifyOpenEvent(opts: {
   sentAt: number | null;
   userAgent?: string | null;
   selfViewTs?: number | null;
+  hasActiveSenderClaim?: boolean;
 }): {
   classification: OpenClassification;
   suspected: boolean;
@@ -92,6 +93,17 @@ export function classifyOpenEvent(opts: {
 
   // Pre-send fetches
   if (sentAt == null || !Number.isFinite(sentAt) || opts.eventTs < sentAt) {
+    return {
+      classification: "SELF_LIKELY",
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source,
+    };
+  }
+
+  // Active sender claim overrides everything
+  if (opts.hasActiveSenderClaim) {
     return {
       classification: "SELF_LIKELY",
       suspected: true,

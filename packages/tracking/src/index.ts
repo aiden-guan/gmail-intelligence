@@ -141,15 +141,35 @@ export class TrackingClient {
 
   async recordSelfView(
     id: string,
-    data?: { timestamp?: string; gmailThreadId?: string | null; gmailMessageId?: string | null },
-  ): Promise<{ ok: boolean; open_count?: number }> {
+    data?: {
+      timestamp?: string;
+      gmailThreadId?: string | null;
+      gmailMessageId?: string | null;
+      source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
+      selfViewEventId?: string;
+    },
+  ): Promise<{
+    ok: boolean;
+    claimId?: string;
+    claimExpiresAt?: string;
+    open_count?: number;
+    openCount?: number;
+    reclassifiedEventIds?: string[];
+  }> {
     const res = await fetch(`${trim(this.baseUrl)}/api/emails/${encodeURIComponent(id)}/self-view`, {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify(data || {}),
     });
     if (!res.ok) throw new Error(`tracking self-view failed: ${res.status}`);
-    return res.json() as Promise<{ ok: boolean; open_count?: number }>;
+    return res.json() as Promise<{
+      ok: boolean;
+      claimId?: string;
+      claimExpiresAt?: string;
+      open_count?: number;
+      openCount?: number;
+      reclassifiedEventIds?: string[];
+    }>;
   }
 }
 
@@ -772,6 +792,7 @@ function clickCountLabel(count: number): string {
 }
 
 export {
+  CLAIM_TTL_MS,
   classifyClickEvent,
   classifyOpenEvent,
   deriveTrackingStats,
@@ -783,6 +804,9 @@ export {
   probeTracker,
   SELF_VIEW_POST_WINDOW_MS,
   SELF_VIEW_PRE_WINDOW_MS,
+  TRACKER_PROTOCOL_VERSION,
+  TRACKER_REQUIRED_FEATURES,
+  TRACKER_SUPPORTED_FEATURES,
   trackerHealthLabel,
 } from './lifecycle.js';
 export type {
@@ -793,10 +817,13 @@ export type {
   OpenClassification,
   OpenRequestSource,
   OpenVerdict,
+  SelfViewClaim,
+  SelfViewSource,
   TrackerHealthStatus,
   TrackerProbe,
   TrackingDiagnosticsReport,
   TrackingEventLike,
   TrackingPixelEventDiagnostic,
+  TrackingSelfViewDiagnostic,
   TrackingSendReport,
 } from './lifecycle.js';

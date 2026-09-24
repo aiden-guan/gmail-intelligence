@@ -36,6 +36,26 @@ describe('SelfViewDeduplicator', () => {
     expect(dedupe.shouldReport('trk_123', 'msg_1', 12000, 'ROW_INTERACTION')).toBe(true);
   });
 
+  it('allows MESSAGE_LOAD to report even after MESSAGE_EXPANDED within window', () => {
+    const dedupe = new SelfViewDeduplicator(10_000);
+
+    // T = 0: sender expands message
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 0, 'MESSAGE_EXPANDED')).toBe(true);
+
+    // T = 9000: Gmail loads message body and fires MESSAGE_LOAD at T+9s
+    // MUST NOT be suppressed by the T0 MESSAGE_EXPANDED!
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 9000, 'MESSAGE_LOAD')).toBe(true);
+
+    // Repeated MESSAGE_LOAD at same observation time is suppressed
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 9000, 'MESSAGE_LOAD')).toBe(false);
+
+    // Repeated MESSAGE_LOAD within window is suppressed
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 12000, 'MESSAGE_LOAD')).toBe(false);
+
+    // Outside window MESSAGE_LOAD is allowed
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 20000, 'MESSAGE_LOAD')).toBe(true);
+  });
+
   it('isolates different tracking IDs and message IDs', () => {
     const dedupe = new SelfViewDeduplicator(10_000);
 
@@ -44,5 +64,52 @@ describe('SelfViewDeduplicator', () => {
     expect(dedupe.shouldReport('trk_1', 'msg_2', 1000, 'MESSAGE_EXPANDED')).toBe(true);
     // Different tracking ID
     expect(dedupe.shouldReport('trk_2', 'msg_1', 1000, 'MESSAGE_EXPANDED')).toBe(true);
+  });
+
+  it('allows MESSAGE_LOAD to report after CACHE_REINSPECTION', () => {
+    const dedupe = new SelfViewDeduplicator(10_000);
+
+    // T = 0: message expanded, but cache was missing so CACHE_REINSPECTION reports at T=0
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 0, 'CACHE_REINSPECTION')).toBe(true);
+
+    // T = 9000: message load completes
+    // MUST NOT be suppressed by the prior CACHE_REINSPECTION
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 9000, 'MESSAGE_LOAD')).toBe(true);
+  });
+
+  it('allows CACHE_REINSPECTION to upgrade an earlier weak ROW_INTERACTION', () => {
+    const dedupe = new SelfViewDeduplicator(10_000);
+
+    // T = 0: row interaction
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 0, 'ROW_INTERACTION')).toBe(true);
+
+    // T = 500: cache reinspection resolves the actual message expansion
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 500, 'CACHE_REINSPECTION')).toBe(true);
+  });
+
+  it('allows deliberate re-expansion of message after >1s', () => {
+    const dedupe = new SelfViewDeduplicator(10_000);
+
+    // T = 0: sender expands message
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 0, 'MESSAGE_EXPANDED')).toBe(true);
+
+    // T = 200: immediate duplicate event for same UI action is suppressed
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 200, 'MESSAGE_EXPANDED')).toBe(false);
+
+    // T = 3000: sender collapsed and re-expanded after 3s -> deliberate re-expansion is allowed
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 3000, 'MESSAGE_EXPANDED')).toBe(true);
+  });
+
+  it('clearRecord on collapse allows immediate re-expansion', () => {
+    const dedupe = new SelfViewDeduplicator(10_000);
+
+    // T = 0: sender expands message
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 0, 'MESSAGE_EXPANDED')).toBe(true);
+
+    // Collapse event clears the deduplicator record
+    dedupe.clearRecord('trk_123', 'msg_1');
+
+    // T = 500: re-expansion immediately after collapse is allowed
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 500, 'MESSAGE_EXPANDED')).toBe(true);
   });
 });

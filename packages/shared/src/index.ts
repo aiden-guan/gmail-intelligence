@@ -247,6 +247,15 @@ export const RuntimeMessageSchema = z.discriminatedUnion('type', [
     timestamp: z.string().optional(),
     gmailThreadId: z.string().nullable().optional(),
     gmailMessageId: z.string().nullable().optional(),
+    source: z
+      .enum([
+        'ROW_INTERACTION',
+        'MESSAGE_EXPANDED',
+        'MESSAGE_LOAD',
+        'CACHE_REINSPECTION',
+      ])
+      .optional(),
+    selfViewEventId: z.string().optional(),
   }),
   z.object({
     type: z.literal('REQUEST_SUMMARY'),

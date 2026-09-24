@@ -49,4 +49,27 @@ export default defineSchema({
   })
     .index("by_trackingId", ["trackingId"])
     .index("by_timestamp", ["timestamp"]),
+  selfViewClaims: defineTable({
+    claimId: v.string(),
+    trackingId: v.string(),
+    gmailMessageId: v.union(v.string(), v.null()),
+    gmailThreadId: v.union(v.string(), v.null()),
+    firstObservedAt: v.string(),
+    lastObservedAt: v.string(),
+    expiresAt: v.string(),
+    source: v.union(
+      v.literal("ROW_INTERACTION"),
+      v.literal("MESSAGE_EXPANDED"),
+      v.literal("MESSAGE_LOAD"),
+      v.literal("CACHE_REINSPECTION"),
+    ),
+    consumedByEventId: v.union(v.string(), v.null()),
+    consumedAt: v.optional(v.union(v.string(), v.null())),
+    consumedUa: v.optional(v.union(v.string(), v.null())),
+    consumedIpHash: v.optional(v.union(v.string(), v.null())),
+    createdAt: v.string(),
+  })
+    .index("by_trackingId", ["trackingId"])
+    .index("by_trackingId_expiresAt", ["trackingId", "expiresAt"])
+    .index("by_claimId", ["claimId"]),
 });

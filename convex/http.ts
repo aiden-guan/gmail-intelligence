@@ -73,6 +73,10 @@ function validId(id: string): boolean {
   return Boolean(id) && id.length <= 80 && /^[\w-]+$/.test(id);
 }
 
+function validEventId(id: string): boolean {
+  return Boolean(id) && id.length <= 160 && /^[\w-]+$/.test(id);
+}
+
 type EmailDoc = {
   trackingId: string;
   subject: string;
@@ -146,7 +150,14 @@ const http = httpRouter();
 http.route({
   path: "/health",
   method: "GET",
-  handler: httpAction(async () => json({ ok: true, store: "convex" })),
+  handler: httpAction(async () =>
+    json({
+      ok: true,
+      protocolVersion: 3,
+      features: ["self_view_claims", "event_reclassification", "classified_clicks"],
+      store: "convex",
+    }),
+  ),
 });
 
 http.route({
@@ -161,28 +172,17 @@ http.route({
       if (email) {
         const now = Date.now();
         const ua = request.headers.get("User-Agent");
-        const sentMs = email.sentAt ? Date.parse(email.sentAt) : null;
-        const events = await ctx.runQuery(internal.tracking.listEvents, { trackingId });
-        const recentSelfView = events.find(
-          (e) => e.type === "SELF_VIEW" && isSelfViewCorrelated(now, Date.parse(e.timestamp)),
-        );
-        const selfViewTs = recentSelfView ? Date.parse(recentSelfView.timestamp) : null;
-        const verdict = classifyOpenEvent({
-          eventTs: now,
-          sentAt: sentMs != null && Number.isFinite(sentMs) ? sentMs : null,
-          userAgent: ua,
-          selfViewTs,
-        });
+        const eventId = newId("evt");
+        const ipHash = await hashIp(clientIp(request));
         const event = {
-          eventId: newId("evt"),
+          eventId,
           trackingId,
           type: "OPEN" as const,
           timestamp: new Date(now).toISOString(),
           userAgent: ua,
-          ipHash: await hashIp(clientIp(request)),
-          suspectedSelfOpen: verdict.suspected,
-          confidence: verdict.confidence,
-          classification: verdict.classification,
+          ipHash,
+          suspectedSelfOpen: false,
+          confidence: 0,
           clickId: null,
           destination: null,
         };
@@ -354,6 +354,8 @@ http.route({
       gmail_thread_id?: string | null;
       gmailMessageId?: string | null;
       gmail_message_id?: string | null;
+      source?: "ROW_INTERACTION" | "MESSAGE_EXPANDED" | "MESSAGE_LOAD" | "CACHE_REINSPECTION";
+      selfViewEventId?: string;
     };
     const ts = body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
       ? new Date(body.timestamp).toISOString()
@@ -361,18 +363,29 @@ http.route({
     const ua = request.headers.get("User-Agent");
     const threadId = body.gmailThreadId ?? body.gmail_thread_id ?? null;
     const messageId = body.gmailMessageId ?? body.gmail_message_id ?? null;
+    const eventId = body.selfViewEventId && validEventId(body.selfViewEventId)
+      ? body.selfViewEventId
+      : newId("evt");
 
     const result = await ctx.runMutation(internal.tracking.recordSelfView, {
-      eventId: newId("evt"),
+      eventId,
       trackingId: id,
       timestamp: ts,
       userAgent: ua,
       gmailThreadId: typeof threadId === "string" ? threadId.slice(0, 128) : null,
       gmailMessageId: typeof messageId === "string" ? messageId.slice(0, 128) : null,
+      source: body.source,
     });
 
     if (!result.ok) return json({ error: "not_found" }, 404);
-    return json({ ok: true, open_count: result.openCount });
+    return json({
+      ok: true,
+      claimId: result.claimId,
+      claimExpiresAt: result.claimExpiresAt,
+      open_count: result.openCount,
+      openCount: result.openCount,
+      reclassifiedEventIds: result.reclassifiedEventIds,
+    });
   }),
 });
 
