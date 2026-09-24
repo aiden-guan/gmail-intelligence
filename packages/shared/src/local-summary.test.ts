@@ -111,5 +111,36 @@ describe('local thread summary', () => {
     expect(tightened.unansweredQuestions).toEqual([]);
     expect(tightened.keyPoints).toEqual([]);
   });
+
+  it('preserves model reasoning and synthesized oneLine without false positive restatement rejection', () => {
+    const body = [
+      'Hi team,',
+      'Following up on the auth bug on iOS 17 reported by John earlier today.',
+      'We reproduced the issue with expired session tokens.',
+      'I will deploy a hotfix to production tomorrow morning at 9am.',
+      'Best,',
+      'Sarah',
+    ].join('\n');
+    const modelSummary = {
+      reasoning: 'Sarah investigated the iOS 17 auth bug reported by John and will release a hotfix tomorrow at 9am.',
+      oneLine: 'Sarah investigated the auth bug on iOS 17 and will deploy a hotfix to production tomorrow at 9am.',
+      keyPoints: ['Issue was caused by expired session tokens.'],
+      decisions: ['Deploy hotfix to production tomorrow morning.'],
+      unansweredQuestions: [],
+      commitments: ['Sarah: deploy hotfix tomorrow at 9am'],
+      dates: ['Tomorrow at 9am'],
+      actionItems: [],
+    };
+    const tightened = tightenSummary(modelSummary, {
+      subject: 'Re: iOS 17 Auth Bug',
+      messages: [{ bodyText: body }],
+    });
+    expect(tightened.reasoning).toMatch(/Sarah investigated the iOS 17 auth bug/);
+    expect(tightened.oneLine).toBe(modelSummary.oneLine);
+    expect(tightened.keyPoints).toEqual(['Issue was caused by expired session tokens.']);
+    expect(tightened.decisions).toEqual(['Deploy hotfix to production tomorrow morning.']);
+    expect(tightened.commitments).toEqual(['Sarah: deploy hotfix tomorrow at 9am']);
+    expect(isPastedSummary(tightened.oneLine, [{ bodyText: body }])).toBe(false);
+  });
 });
 

@@ -10,7 +10,7 @@ import {
   type VoiceProfile,
 } from '@gi/shared';
 import { z } from 'zod';
-import { EMAIL_SUMMARY_SYSTEM_PROMPT, summaryUserContent } from './summary-prompt.js';
+import { EMAIL_SUMMARY_SYSTEM_PROMPT, formatThreadForSummary, summaryUserContent } from './summary-prompt.js';
 import { coerceThreadSummary } from './prompt-provider.js';
 
 export type ClassifyInput = {
@@ -162,18 +162,17 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
   }
 
   async summarizeThread(input: SummarizeInput) {
+    const formatted = formatThreadForSummary({
+      subject: input.subject,
+      messages: input.messages.slice(-8).map((message) => ({
+        sender: message.sender,
+        timestamp: message.timestamp,
+        bodyText: message.bodyText.slice(0, 4000),
+      })),
+    });
     const { data, usage } = await this.chatJson(
       EMAIL_SUMMARY_SYSTEM_PROMPT,
-      summaryUserContent(
-        JSON.stringify({
-          subject: input.subject,
-          messages: input.messages.slice(-8).map((message) => ({
-            sender: message.sender,
-            timestamp: message.timestamp,
-            bodyText: message.bodyText.slice(0, 4000),
-          })),
-        }),
-      ),
+      summaryUserContent(formatted),
       z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
     );
     return { result: data, usage };

@@ -251,9 +251,9 @@ describe('prompt-backed provider', () => {
       subject: 'Berkeley China Summit',
       messages: [{ sender: 'aca@example.com', bodyText: 'Hi all, we are excited to share an opportunity.', timestamp: '' }],
     });
-    expect(system).toContain('Never quote');
-    expect(system).toContain('you can sign up here');
-    expect(user).toContain('Do not copy its sentences');
+    expect(system).toContain('reasoning');
+    expect(system).toContain('oneLine');
+    expect(user).toContain('Analyze and synthesize this email thread');
     expect(system).toContain('actionItems');
     expect(system).toContain('Return one JSON object only');
   });

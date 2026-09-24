@@ -71,29 +71,32 @@ export default defineConfig(({ mode }) => ({
     react(),
     extensionPages(),
     flattenExtensionHtml(),
-    keepSingleOnnxWasm(),
-    viteStaticCopy({
-      targets: [
-        { src: 'manifest.json', dest: '.' },
-        { src: 'public/icons/*', dest: 'icons' },
-        {
-          src: '../../node_modules/@inboxsdk/core/pageWorld.js',
-          dest: 'inboxsdk',
-        },
-        {
-          src: '../../node_modules/@inboxsdk/core/background.js',
-          dest: 'inboxsdk',
-        },
-        {
-          src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm',
-          dest: 'ort',
-        },
-        {
-          src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.mjs',
-          dest: 'ort',
-        },
-      ],
-    }),
+    ...(mode !== 'content'
+      ? [
+          viteStaticCopy({
+            targets: [
+              { src: 'manifest.json', dest: '.' },
+              { src: 'public/icons/*', dest: 'icons' },
+              {
+                src: '../../node_modules/@inboxsdk/core/pageWorld.js',
+                dest: 'inboxsdk',
+              },
+              {
+                src: '../../node_modules/@inboxsdk/core/background.js',
+                dest: 'inboxsdk',
+              },
+              {
+                src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm',
+                dest: 'ort',
+              },
+              {
+                src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.mjs',
+                dest: 'ort',
+              },
+            ],
+          }),
+        ]
+      : []),
   ],
   build: {
     outDir: 'dist',

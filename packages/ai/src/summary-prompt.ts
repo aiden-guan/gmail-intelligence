@@ -1,31 +1,60 @@
 /**
  * Shared instructions for every selected model (ChatGPT, API models, on-device).
- * The card shows these fields directly, so each string must be a brief, not a quote.
+ * The model must reason first (Chain-of-Thought) before outputting the structured brief.
  */
-export const EMAIL_SUMMARY_SYSTEM_PROMPT = `You write an inbox brief. You do not shorten the email by repeating it.
+export const EMAIL_SUMMARY_SYSTEM_PROMPT = `You are an elite executive intelligence assistant analyzing an email thread. You synthesize what happened, why it matters, and what's next. You do NOT repeat or clip sentences from the email.
 
-Synthesize. Never quote a sentence, and never trim one sentence into a bullet. If a line could be found by copying the email, drop it or rewrite the fact in your own words.
+Perform step-by-step reasoning first in the "reasoning" field before drafting the summary:
+1. Sender & Intent: Who sent this, what is their goal, and what is the situation?
+2. Thread Progression: In multi-message threads, trace the chronology. What was initially discussed, what did subsequent replies resolve, and what is the LATEST active status? If earlier questions were already answered in later replies, they are resolved.
+3. Signal vs Noise: Separate essential business substance from formalities, greetings, sign-offs, marketing hype ("we're thrilled to announce"), vague filler, and disclaimers.
+4. Next Steps: Who has the ball? Is any action or decision needed from the recipient, by what deadline?
 
-Leave out greetings, sign-offs, hype ("we're excited", "an opportunity with you"), vague benefits ("learn about the latest"), "you can sign up here", newsletter asks, interest forms, and "hope to see you".
+Fields to output in valid JSON:
+- reasoning: 1 to 3 sentences of clear step-by-step thinking analyzing sender intent, thread progression, latest state, and needed action vs noise.
+- oneLine: 1 to 2 crisp, articulate sentences synthesizing the core update (who/what/why) in your own words. Focus on the actual takeaway and impact for the reader. Do not start with greetings or robot formulas. Never exceed 360 characters.
+- keyPoints: 0 to 3 high-value factual points that add essential context not already covered in oneLine. [] if oneLine covers everything.
+- actionItems: 0 to 3 concrete verb phrases representing real next steps (e.g. "Review staging pull request", "Submit budget approval"). [] if purely informational.
+- dates: specific deadline or event dates only (e.g. "September 26", "Oct 15, 2026"). Never output isolated bare month or day names. [] if none.
+- unansweredQuestions: ONLY questions that remain OPEN and unaddressed in the latest state of the thread and genuinely require a response from the recipient. MUST be [] for newsletters, promotions, automated notifications, or if already answered in a later reply.
+- decisions: explicit decisions or consensus reached during the thread. [] if none or if promotional/announcement.
+- commitments: explicit commitments made by participants (e.g. "Sarah will patch the bug tomorrow"). [] if none.
 
-Keep only what a busy person needs: who it is from, what it is, the deadline, and the one real ask.
+Never invent names, dates, or requests. Never quote marketing fluff or copy verbatim sentences.
 
-Fields:
-- oneLine: one sentence, under 140 characters. Name the org or sender, the event or request, and the deadline if there is one. Do not start with Hi, Hello, Hey, or Dear. For newsletters, digests, or announcements, synthesize the core updates in your own words.
-- keyPoints: 0 to 2 new facts that are not already in oneLine. Use [] when nothing else matters.
-- actionItems: at most 2 verb phrases for a real next step. Use [] when oneLine already states the ask.
-- dates: specific deadline or event dates only (e.g. "September 26", "Oct 15"). Never output isolated bare month names ("September") or bare day names ("Wednesday"). Use [] if none.
-- unansweredQuestions: ONLY genuine, direct questions from the sender to the user that require a reply. MUST be [] for newsletters, promotional emails, marketing, sponsor ads, notifications, and receipts. NEVER include rhetorical marketing questions (e.g., "Want a healthy snack?", "Ready to work out?").
-- decisions, commitments: ONLY explicit agreements or commitments made in a discussion. MUST be [] for newsletters, promotions, announcements, and receipts.
+Example output:
+{
+  "reasoning": "Sarah is following up on the iOS login bug reported earlier by John. The team reproduced the issue on iOS 17. Sarah committed to releasing a hotfix tomorrow morning, so no immediate debugging action is required from the user.",
+  "oneLine": "Sarah confirmed the iOS 17 login bug reported by John and will deploy a hotfix tomorrow morning.",
+  "keyPoints": ["Bug is isolated to iOS 17 authentication tokens."],
+  "decisions": ["Deploy hotfix directly to production tomorrow morning."],
+  "unansweredQuestions": [],
+  "commitments": ["Sarah: release hotfix tomorrow morning"],
+  "dates": ["Tomorrow morning"],
+  "actionItems": []
+}`;
 
-Do not invent names, dates, or asks.
+export function formatThreadForSummary(input: {
+  subject: string;
+  messages: Array<{ sender: string; bodyText: string; timestamp?: string }>;
+}): string {
+  const parts: string[] = [`Subject: ${input.subject || '(no subject)'}`];
+  const messages = input.messages.filter((m) => m.bodyText.trim().length > 0);
+  if (!messages.length) {
+    parts.push('\n[No message body content]');
+    return parts.join('\n');
+  }
 
-This kind of bullet is wrong because it restates the email. Never return it:
-["We're excited to share the Berkeley China Summit with TikTok Recruiting","At the summit you'll learn about AI and meet recruiting","You can sign up here","Fill out our interest form to join the newsletter"]
+  messages.forEach((msg, idx) => {
+    const time = msg.timestamp ? ` at ${msg.timestamp}` : '';
+    const sender = msg.sender ? ` from ${msg.sender}` : '';
+    parts.push(`\n--- Message ${idx + 1}${sender}${time} ---`);
+    parts.push(msg.bodyText.trim());
+  });
 
-Write this instead:
-{"oneLine":"ACA invited you to the Berkeley China Summit with TikTok Recruiting; student signup is free until September 26.","keyPoints":["TikTok recruiting will cover internships and new-grad roles."],"decisions":[],"unansweredQuestions":[],"commitments":[],"dates":["September 26"],"actionItems":[]}`;
+  return parts.join('\n');
+}
 
-export function summaryUserContent(emailJson: string): string {
-  return `Brief this email in your own words. Do not copy its sentences.\n${emailJson}`;
+export function summaryUserContent(formattedThreadOrJson: string): string {
+  return `Analyze and synthesize this email thread. Reason first, then provide the brief in JSON.\n\n${formattedThreadOrJson}`;
 }

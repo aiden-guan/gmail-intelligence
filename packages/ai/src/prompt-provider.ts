@@ -16,7 +16,7 @@ import type {
   SummarizeInput,
   UsageStats,
 } from './index.js';
-import { EMAIL_SUMMARY_SYSTEM_PROMPT, summaryUserContent } from './summary-prompt.js';
+import { EMAIL_SUMMARY_SYSTEM_PROMPT, formatThreadForSummary, summaryUserContent } from './summary-prompt.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -58,12 +58,21 @@ export function createPromptBackedProvider(
     try {
       return { data: schema.parse(extractJsonObject(first.text)), usage: first.usage };
     } catch (error) {
+      try {
+        return { data: schema.parse(first.text), usage: first.usage };
+      } catch {
+        /* proceed to repair */
+      }
       const reason = error instanceof Error ? error.message : 'invalid JSON';
       const repair = await complete(
         `Fix the JSON so it matches the requested object. Include every required key. Use empty arrays or empty strings when a value is missing. ${JSON_RULE}`,
         clip(`Problem: ${reason}\n\nPrevious output:\n${first.text}`, maxUserChars),
       );
-      return { data: schema.parse(extractJsonObject(repair.text)), usage: repair.usage ?? first.usage };
+      try {
+        return { data: schema.parse(extractJsonObject(repair.text)), usage: repair.usage ?? first.usage };
+      } catch {
+        return { data: schema.parse(repair.text), usage: repair.usage ?? first.usage };
+      }
     }
   }
 
@@ -82,18 +91,17 @@ export function createPromptBackedProvider(
       return { result: data, usage };
     },
     async summarizeThread(input: SummarizeInput) {
+      const formatted = formatThreadForSummary({
+        subject: input.subject,
+        messages: input.messages.slice(-8).map((message) => ({
+          sender: message.sender,
+          timestamp: message.timestamp,
+          bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),
+        })),
+      });
       const { data, usage } = await chatJson(
         EMAIL_SUMMARY_SYSTEM_PROMPT,
-        summaryUserContent(
-          JSON.stringify({
-            subject: input.subject,
-            messages: input.messages.slice(-8).map((message) => ({
-              sender: message.sender,
-              timestamp: message.timestamp,
-              bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),
-            })),
-          }),
-        ),
+        summaryUserContent(formatted),
         z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
       );
       return { result: data, usage };
@@ -155,7 +163,7 @@ async function draft(
         bodyText: message.bodyText.slice(0, 4000),
       })),
     }),
-    DraftSuggestionSchema,
+    z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
   );
   return {
     result: {
@@ -169,10 +177,51 @@ async function draft(
   };
 }
 
+export function coerceDraftSuggestion(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const cleaned = stripMarkdownPreamble(value.trim());
+    return {
+      mode: 'direct',
+      body: cleaned,
+      placeholders: [],
+    };
+  }
+  const record = asRecord(value);
+  if (!record) return value;
+  const body = firstString(record, [
+    'body',
+    'reply',
+    'text',
+    'draft',
+    'message',
+    'content',
+    'response',
+    'email',
+    'suggestion',
+  ]);
+  if (!body) return value;
+  return {
+    mode: firstString(record, ['mode']) || 'direct',
+    subject: firstString(record, ['subject']) || undefined,
+    body: stripMarkdownPreamble(body.trim()),
+    placeholders: Array.isArray(record.placeholders) ? record.placeholders : [],
+    confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
+  };
+}
+
+function stripMarkdownPreamble(text: string): string {
+  return text
+    .replace(/^```(?:markdown|email|text|json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .replace(/^(?:Here is a (?:draft|reply|response)[^:\n]*:?\s*)+/i, '')
+    .trim();
+}
+
 /** Accept the shorter objects models actually return. */
 export function coerceThreadSummary(value: unknown): unknown {
   const record = asRecord(value);
   if (!record) return value;
+  const reasoning = firstString(record, ['reasoning', 'analysis', 'thought', 'thoughts', 'explanation']);
   const oneLine = firstString(record, ['oneLine', 'one_line', 'summary', 'tldr', 'tl_dr']);
   if (!oneLine) return value;
   const rawQuestions = stringList(record.unansweredQuestions ?? record.unanswered_questions ?? record.questions);
@@ -183,7 +232,8 @@ export function coerceThreadSummary(value: unknown): unknown {
       ),
   );
   return {
-    oneLine: clip(oneLine, 280),
+    reasoning: reasoning ? clip(reasoning, 1000) : undefined,
+    oneLine: clip(oneLine, 400),
     keyPoints: stringList(record.keyPoints ?? record.key_points ?? record.points),
     decisions: stringList(record.decisions),
     unansweredQuestions: filteredQuestions,

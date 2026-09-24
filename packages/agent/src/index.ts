@@ -244,7 +244,7 @@ export class AgentLoop {
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
   }): Promise<void> {
     const existing = await this.deps.db.thread_summaries.get(input.threadId);
-    const fingerprint = `${input.fingerprint}:sum4`;
+    const fingerprint = `${input.fingerprint}:sum5`;
     const storedLine = existing?.summary.oneLine || '';
     const stalePaste = Boolean(storedLine) && isPastedSummary(storedLine, input.messages);
     if (existing?.fingerprint === fingerprint && existing.source === 'model' && !stalePaste) return;
@@ -261,7 +261,7 @@ export class AgentLoop {
           }),
         );
         const summary = tightenSummary(result, input);
-        if (summary.oneLine && !isPastedSummary(summary.oneLine, input.messages)) {
+        if (summary.oneLine) {
           await this.deps.db.thread_summaries.put({
             threadId: input.threadId,
             fingerprint,

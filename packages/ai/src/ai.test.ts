@@ -38,3 +38,77 @@ describe('draft prompt placeholders', () => {
     expect(detectPlaceholders('Pay [AMOUNT] via [LINK]')).toEqual(['[AMOUNT]', '[LINK]']);
   });
 });
+
+describe('draft suggestion coercion', () => {
+  it('accepts raw strings and non-standard JSON keys from smaller models', async () => {
+    const { coerceDraftSuggestion, createPromptBackedProvider } = await import('./prompt-provider.js');
+
+    expect(coerceDraftSuggestion('Hi Alice, thanks for the update.')).toEqual({
+      mode: 'direct',
+      body: 'Hi Alice, thanks for the update.',
+      placeholders: [],
+    });
+
+    expect(coerceDraftSuggestion({ reply: 'Here is my reply.' })).toEqual({
+      mode: 'direct',
+      subject: undefined,
+      body: 'Here is my reply.',
+      placeholders: [],
+      confidence: undefined,
+    });
+
+    const provider = createPromptBackedProvider('test', async () => ({
+      text: 'Thanks for reaching out! Let us meet tomorrow.',
+    }));
+
+    const result = await provider.draftReply({
+      subject: 'Meeting',
+      messages: [{ sender: 'alice@example.com', bodyText: 'Can we meet?', timestamp: 'now' }],
+    });
+
+    expect(result.result.body).toBe('Thanks for reaching out! Let us meet tomorrow.');
+  });
+});
+
+describe('summary thread formatting and coercion', () => {
+  it('formats thread cleanly with senders, timestamps, and message blocks', async () => {
+    const { formatThreadForSummary } = await import('./summary-prompt.js');
+    const formatted = formatThreadForSummary({
+      subject: 'Bug report: login failure',
+      messages: [
+        { sender: 'john@example.com', bodyText: 'Login fails on iOS 17.', timestamp: '2026-09-23 10:00' },
+        { sender: 'sarah@example.com', bodyText: 'Confirmed, hotfix tomorrow.', timestamp: '2026-09-23 10:15' },
+      ],
+    });
+
+    expect(formatted).toContain('Subject: Bug report: login failure');
+    expect(formatted).toContain('--- Message 1 from john@example.com at 2026-09-23 10:00 ---');
+    expect(formatted).toContain('Login fails on iOS 17.');
+    expect(formatted).toContain('--- Message 2 from sarah@example.com at 2026-09-23 10:15 ---');
+    expect(formatted).toContain('Confirmed, hotfix tomorrow.');
+  });
+
+  it('coerceThreadSummary extracts reasoning and sanitizes output', async () => {
+    const { coerceThreadSummary } = await import('./prompt-provider.js');
+    const coerced = coerceThreadSummary({
+      reasoning: 'John found a bug, Sarah confirmed and will deploy a hotfix tomorrow.',
+      one_line: 'Sarah verified the login bug reported by John and will patch it tomorrow.',
+      key_points: ['Issue affects iOS 17 only.'],
+      decisions: ['Deploy patch tomorrow.'],
+      questions: ['Want a discount?'], // rhetorical marketing question should be stripped
+      commitments: ['Sarah will deploy patch'],
+      dates: ['Tomorrow'],
+      actions: ['Review patch PR'],
+    }) as any;
+
+    expect(coerced.reasoning).toBe('John found a bug, Sarah confirmed and will deploy a hotfix tomorrow.');
+    expect(coerced.oneLine).toBe('Sarah verified the login bug reported by John and will patch it tomorrow.');
+    expect(coerced.keyPoints).toEqual(['Issue affects iOS 17 only.']);
+    expect(coerced.decisions).toEqual(['Deploy patch tomorrow.']);
+    expect(coerced.unansweredQuestions).toEqual([]);
+    expect(coerced.commitments).toEqual(['Sarah will deploy patch']);
+    expect(coerced.dates).toEqual(['Tomorrow']);
+    expect(coerced.actionItems).toEqual(['Review patch PR']);
+  });
+});
+

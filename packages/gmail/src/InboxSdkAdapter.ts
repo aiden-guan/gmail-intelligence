@@ -24,6 +24,7 @@ export class InboxSdkAdapter implements GmailAdapter {
   private started = false;
   private rowTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingRows = new Map<string, VisibleThreadRow>();
+  private activeComposeView: unknown = null;
 
   constructor(
     private readonly appId: string,
@@ -92,6 +93,12 @@ export class InboxSdkAdapter implements GmailAdapter {
 
     try {
       sdk.Compose.registerComposeViewHandler((composeView) => {
+        this.activeComposeView = composeView;
+        composeView.on?.('destroy', () => {
+          if (this.activeComposeView === composeView) {
+            this.activeComposeView = null;
+          }
+        });
         void mapCompose(composeView).then((compose) => {
           emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
           composeView.on?.('sent', () => {
@@ -186,9 +193,41 @@ export class InboxSdkAdapter implements GmailAdapter {
     return this.fallback.starThread(threadId);
   }
   async createReplyDraft(threadId: string) {
-    return this.fallback.createReplyDraft(threadId);
+    const fallbackRes = await this.fallback.createReplyDraft(threadId);
+    if (fallbackRes.success) return fallbackRes;
+
+    if (this.sdk?.Compose?.openNewComposeView) {
+      try {
+        const composeView = await this.sdk.Compose.openNewComposeView();
+        if (composeView) {
+          this.activeComposeView = composeView;
+          return { ...ok('createReplyDraft'), threadId };
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    return fallbackRes;
   }
   async insertComposeBody(text: string) {
+    const view = this.activeComposeView as {
+      setBodyText?: (text: string) => void;
+      insertTextIntoBodyAtCursor?: (text: string) => void;
+    } | null;
+    if (view) {
+      try {
+        if (typeof view.setBodyText === 'function') {
+          view.setBodyText(text);
+          return { ...ok('insertComposeBody'), verified: true, reason: 'Inserted via InboxSDK' };
+        }
+        if (typeof view.insertTextIntoBodyAtCursor === 'function') {
+          view.insertTextIntoBodyAtCursor(text);
+          return { ...ok('insertComposeBody'), verified: true, reason: 'Inserted via InboxSDK' };
+        }
+      } catch {
+        /* fall back to DOM */
+      }
+    }
     return this.fallback.insertComposeBody(text);
   }
   async navigateToSearch(query: string) {
@@ -328,6 +367,7 @@ export type InboxSdkLike = {
   };
   Compose: {
     registerComposeViewHandler: (cb: (cv: ComposeViewLike) => void) => void;
+    openNewComposeView?: () => Promise<ComposeViewLike | null | undefined>;
   };
   Lists: {
     registerThreadRowViewHandler: (cb: (rv: ThreadRowViewLike) => void) => void;

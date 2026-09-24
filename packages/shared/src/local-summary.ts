@@ -1,4 +1,5 @@
 export type LocalThreadSummary = {
+  reasoning?: string;
   oneLine: string;
   keyPoints: string[];
   decisions: string[];
@@ -94,13 +95,14 @@ export function tightenSummary(
   const body = input.messages.map((message) => message.bodyText).join('\n');
   const local = localThreadSummary(input);
   const isMarketing = MARKETING_PATTERN.test(`${input.subject} ${body}`);
-  const oneLineIsPasted = !summary.oneLine?.trim() || isRestatement(summary.oneLine, body);
-  const oneLine = oneLineIsPasted ? local.oneLine : clip(summary.oneLine, 200);
+  const hasModelLine = Boolean(summary.oneLine?.trim());
+  const oneLineIsPasted = !hasModelLine || isRestatement(summary.oneLine, body);
+  const oneLine = oneLineIsPasted ? local.oneLine : clip(summary.oneLine, 360);
   const said = oneLine.toLowerCase();
 
   const keyPoints = unique(
-    summary.keyPoints.map((item) => clip(item, 120)).filter((item) => keepPoint(item, body, said)),
-  ).slice(0, 2);
+    summary.keyPoints.map((item) => clip(item, 200)).filter((item) => keepPoint(item, body, said)),
+  ).slice(0, 4);
 
   const finalKeyPoints =
     keyPoints.length > 0
@@ -130,9 +132,10 @@ export function tightenSummary(
     ? []
     : unique(summary.commitments.filter((item) => keepPoint(item, body, said))).slice(0, 3);
 
-  const actionItems = unique(summary.actionItems.filter((item) => keepPoint(item, body, said))).slice(0, 2);
+  const actionItems = unique(summary.actionItems.filter((item) => keepPoint(item, body, said))).slice(0, 3);
 
   return {
+    reasoning: summary.reasoning ? clip(summary.reasoning, 1000) : undefined,
     oneLine,
     keyPoints: finalKeyPoints,
     decisions,
@@ -196,12 +199,12 @@ function isRestatement(text: string, body: string): boolean {
   if (!line) return false;
   if (GREETING.test(line)) return true;
   if (SIGN_OFF.test(line)) return true;
-  if (isFiller(line) && source.includes(line)) return true;
-  if (line.length >= 50 && source.includes(line)) return true;
+  if (isFiller(line)) return true;
+  if (line.length >= 60 && source.includes(line)) return true;
   const words = line.split(' ').filter(Boolean);
-  if (words.length < 12) return false;
-  for (let i = 0; i <= words.length - 12; i += 1) {
-    if (source.includes(words.slice(i, i + 12).join(' '))) return true;
+  if (words.length < 18) return false;
+  for (let i = 0; i <= words.length - 18; i += 1) {
+    if (source.includes(words.slice(i, i + 18).join(' '))) return true;
   }
   return false;
 }

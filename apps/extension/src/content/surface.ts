@@ -210,6 +210,14 @@ export const SURFACE_CSS = `
   text-transform: uppercase;
 }
 .gi-more .gi-eyebrow:first-child { margin-top: 0; }
+.gi-reasoning-block { margin: 0 0 10px; }
+.gi-reasoning-text {
+  margin: 4px 0 0;
+  color: #c9cdd8;
+  font-size: 12px;
+  line-height: 1.5;
+  user-select: text;
+}
 .gi-points {
   margin: 10px 0 0;
   padding: 0;

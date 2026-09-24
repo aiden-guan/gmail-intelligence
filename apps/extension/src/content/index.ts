@@ -4,6 +4,7 @@ import type { ExtensionSettings } from '@gi/shared';
 import { DEFAULT_SETTINGS, localThreadSummary } from '@gi/shared';
 import {
   CompositeGmailAdapter,
+  findComposeBody,
   findNotice,
   resolveThreadId,
   findThreadRows,
@@ -366,14 +367,15 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
   }
   const tracking = sentStatus?.openThreadStatus() ?? null;
   const note = summaryNotes.get(threadId);
-  const preview = intel?.summary?.summary?.oneLine ? null : note?.preview || null;
-  const pending = intel?.summary?.summary?.oneLine
+  const summaryLine = intel?.summary?.summary?.oneLine;
+  const preview = summaryLine ? null : note?.preview || null;
+  const pending = summaryLine
     ? null
-    : preview
-      ? null
-      : note?.pending
-        ? 'Reading this thread…'
-        : note?.reason || (intel?.classification ? null : 'Reading this thread…');
+    : note?.pending
+      ? 'Analyzing thread…'
+      : preview
+        ? null
+        : note?.reason || (intel?.classification ? null : 'Analyzing thread…');
   root.render(
     createElement(ThreadIntelCard, {
       intel,
@@ -415,12 +417,12 @@ function previewLine(thread: NormalizedThread): string | null {
 }
 
 async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
-  const preview = previewLine(thread);
-  summaryNotes.set(thread.threadId, { pending: !preview, reason: null, preview });
+  const hasBody = thread.messages.some((message) => message.bodyText.trim().length > 0);
+  summaryNotes.set(thread.threadId, { pending: hasBody, reason: null, preview: null });
   await refreshThread(thread.threadId);
   const direction = thread.route === 'sent' ? 'outbound' : 'inbound';
   await send({ type: 'INGEST_THREAD', direction, thread });
-  if (!preview) {
+  if (!hasBody) {
     summaryNotes.set(thread.threadId, { pending: false, reason: 'The message text is not on screen yet.', preview: null });
     await refreshThread(thread.threadId);
     return;
@@ -435,10 +437,11 @@ async function summarizeOpenThread(thread: NormalizedThread): Promise<void> {
       timestamp: message.timestamp || '',
     })),
   });
+  const fallback = res?.ok ? null : previewLine(thread);
   summaryNotes.set(thread.threadId, {
     pending: false,
     reason: res?.ok ? null : res?.reason || null,
-    preview,
+    preview: fallback,
   });
   await refreshThread(thread.threadId);
 }
@@ -542,19 +545,31 @@ async function archiveThread(threadId: string) {
   };
 }
 
+async function waitForComposeBody(timeoutMs = 4000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const compose = await adapter.getCurrentCompose();
+    if (compose.compose) return true;
+    if (typeof document !== 'undefined' && findComposeBody(document)) return true;
+    await wait(100);
+  }
+  return false;
+}
+
 async function insertDraft(threadId: string, text: string) {
   const opened = await adapter.actions.enqueueAndWait({ kind: 'CREATE_REPLY_DRAFT', threadId });
   if (!opened.success) {
     return { success: false, verified: false, action: 'CREATE_REPLY_DRAFT', threadId, reason: opened.reason || 'Could not open reply' };
   }
-  await wait(700);
+  await waitForComposeBody(4000);
   await adapter.insertComposeBody(text);
-  await wait(200);
+  await wait(300);
   const compose = await adapter.getCurrentCompose();
   const thread = await adapter.getCurrentThread();
+  const currentBody = compose.compose?.bodyText || (typeof document !== 'undefined' ? findComposeBody(document)?.textContent || '' : '');
   const check = verifyDraftInserted({
-    composeOpen: Boolean(compose.compose),
-    bodyText: compose.compose?.bodyText || '',
+    composeOpen: Boolean(compose.compose) || Boolean(typeof document !== 'undefined' && findComposeBody(document)),
+    bodyText: currentBody,
     expectedText: text,
     activeThreadId: thread.thread?.threadId ?? null,
     expectedThreadId: threadId,
@@ -796,7 +811,18 @@ async function runCommand(id: string): Promise<void> {
 
 async function draftReply(threadId: string): Promise<void> {
   showToast('Drafting reply…');
-  const res = await send<{ ok?: boolean; body?: string; reason?: string }>({ type: 'DRAFT_REPLY', threadId });
+  const current = await adapter.getCurrentThread();
+  const thread = current.thread ? normalizeOpenedThread(current.thread, 'dom') : null;
+  const res = await send<{ ok?: boolean; body?: string; reason?: string }>({
+    type: 'DRAFT_REPLY',
+    threadId,
+    subject: thread?.subject,
+    messages: thread?.messages.map((m) => ({
+      sender: m.sender.email,
+      bodyText: m.bodyText,
+      timestamp: m.timestamp || '',
+    })),
+  });
   if (!res?.ok || !res.body) {
     showToast(res?.reason || 'Could not draft a reply.');
     return;

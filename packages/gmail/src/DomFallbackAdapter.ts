@@ -249,20 +249,21 @@ export class DomFallbackAdapter implements GmailAdapter {
   }
 
   extractCompose(root: ParentNode): ComposeViewState | null {
-    const rootEl = findComposeRoot(root);
-    if (!rootEl) return null;
-    const body = findComposeBody(rootEl);
-    const subject = queryFirst(rootEl, SELECTORS.composeSubject) as HTMLInputElement | null;
-    const to = queryFirst(rootEl, SELECTORS.composeTo) as HTMLInputElement | null;
-    const label = (rootEl.getAttribute('aria-label') || '').toLowerCase();
+    const body = findComposeBody(root);
+    const rootEl = findComposeRoot(root) || body?.closest<HTMLElement>('form, div[role="dialog"], [role="main"]') || (body ? (root as HTMLElement) : null);
+    if (!body && !rootEl) return null;
+    const subject = rootEl ? (queryFirst(rootEl, SELECTORS.composeSubject) as HTMLInputElement | null) : null;
+    const to = rootEl ? (queryFirst(rootEl, SELECTORS.composeTo) as HTMLInputElement | null) : null;
+    const label = (rootEl?.getAttribute?.('aria-label') || '').toLowerCase();
+    const container = rootEl || body!;
     return {
-      composeId: stableComposeId(rootEl),
+      composeId: stableComposeId(container),
       to: to?.value ? [{ email: to.value }] : [],
       cc: [],
       bcc: [],
       subject: subject?.value || '',
       bodyText: body?.textContent || '',
-      isReply: label.includes('reply') || label.includes('forward'),
+      isReply: label.includes('reply') || label.includes('forward') || !subject?.value,
     };
   }
 
@@ -328,7 +329,34 @@ export class DomFallbackAdapter implements GmailAdapter {
   }
 
   async createReplyDraft(threadId: string) {
-    return { ...this.clickToolbar(SELECTORS.replyButton, 'createReplyDraft'), threadId };
+    if (typeof document !== 'undefined' && findComposeBody(document)) {
+      return { ...ok('createReplyDraft'), threadId };
+    }
+    const result = this.clickToolbar(SELECTORS.replyButton, 'createReplyDraft');
+    if (result.success) return { ...result, threadId };
+
+    if (typeof document !== 'undefined') {
+      const main = findMain(document) || document;
+      const candidates = Array.from(main.querySelectorAll<HTMLElement>('span, div, button'));
+      const replyEl = candidates.find((el) => {
+        const text = el.textContent?.trim();
+        return (
+          (text === 'Reply' || text === 'Reply all') &&
+          el.children.length === 0 &&
+          (el.getAttribute('role') === 'button' ||
+            el.getAttribute('role') === 'link' ||
+            el.classList.contains('ams') ||
+            el.tabIndex >= 0 ||
+            el.onclick != null ||
+            (typeof window !== 'undefined' && window.getComputedStyle(el).cursor === 'pointer'))
+        );
+      });
+      if (replyEl) {
+        replyEl.click();
+        return { ...ok('createReplyDraft'), threadId };
+      }
+    }
+    return { ...result, threadId };
   }
 
   async insertComposeBody(text: string) {
@@ -339,10 +367,33 @@ export class DomFallbackAdapter implements GmailAdapter {
       return fail('insertComposeBody', 'compose body not found', true);
     }
     body.focus();
+    if (typeof window !== 'undefined') {
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(body);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
     const inserted = document.execCommand?.('insertText', false, text);
-    if (!inserted) {
-      body.textContent = (body.textContent || '') + text;
+    const needle = text.trim().slice(0, 40);
+    if (!inserted || !(body.textContent || '').includes(needle)) {
+      const lines = text.split('\n');
+      const fragment = document.createDocumentFragment();
+      for (const line of lines) {
+        const div = document.createElement('div');
+        if (line.trim()) {
+          div.textContent = line;
+        } else {
+          div.appendChild(document.createElement('br'));
+        }
+        fragment.appendChild(div);
+      }
+      body.prepend(fragment);
       body.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      body.dispatchEvent(new Event('change', { bubbles: true }));
     }
     const verified = (body.textContent || '').includes(text.slice(0, 80));
     return {

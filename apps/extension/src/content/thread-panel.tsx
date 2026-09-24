@@ -7,6 +7,7 @@ export type ThreadIntelData = {
   classification?: { category?: string; needsReply?: boolean; reason?: string };
   summary?: {
     summary?: {
+      reasoning?: string;
       oneLine?: string;
       keyPoints?: string[];
       decisions?: string[];
@@ -46,13 +47,14 @@ export function ThreadIntelCard(props: {
   const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
   const brief = props.intel?.summary?.summary;
+  const reasoning = brief?.reasoning?.trim() || null;
   const points = sanitizeList(brief?.keyPoints || []);
   const dates = sanitizeDateTags(brief?.dates || []);
   const actions = sanitizeList(brief?.actionItems || []);
   const decisions = isMarketing ? [] : sanitizeList(brief?.decisions || []);
   const questions = isMarketing ? [] : sanitizeList(brief?.unansweredQuestions || []);
   const commitments = isMarketing ? [] : sanitizeList(brief?.commitments || []);
-  const hasDetails = Boolean(actions.length || decisions.length || questions.length || commitments.length);
+  const hasDetails = Boolean(reasoning || actions.length || decisions.length || questions.length || commitments.length);
   const line = summary || props.pending || 'No summary yet.';
   const waiting = !summary && Boolean(props.pending);
 
@@ -152,6 +154,12 @@ export function ThreadIntelCard(props: {
         </div>
         {expanded && hasDetails ? (
           <div className="gi-more">
+            {reasoning ? (
+              <div className="gi-reasoning-block">
+                <div className="gi-eyebrow">Reasoning</div>
+                <p className="gi-reasoning-text">{reasoning}</p>
+              </div>
+            ) : null}
             <DetailList title="Decisions" items={decisions} />
             <DetailList title="Open questions" items={questions} />
             <DetailList title="Commitments" items={commitments} />

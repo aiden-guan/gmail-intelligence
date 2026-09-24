@@ -42,7 +42,8 @@ export const NeedsReplyResultSchema = z.object({
 export type NeedsReplyResult = z.infer<typeof NeedsReplyResultSchema>;
 
 export const ThreadSummarySchema = z.object({
-  oneLine: z.string().max(280),
+  reasoning: z.string().optional(),
+  oneLine: z.string().max(400),
   keyPoints: z.array(z.string()).max(12),
   decisions: z.array(z.string()).max(8),
   unansweredQuestions: z.array(z.string()).max(8),
