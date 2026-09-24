@@ -173,6 +173,9 @@ async function boot(): Promise<void> {
       const panel = document.getElementById('gi-thread-panel');
       if (panel) void refreshPanel(panel, currentThreadId);
     },
+    onLink: (trackingId, gmailThreadId) => {
+      linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
+    },
   });
   installDomComposeTracking({ ...trackingDeps(), sdkOwnsCompose: () => sdkOwnsCompose });
   chrome.storage.onChanged.addListener((changes, area) => {

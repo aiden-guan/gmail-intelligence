@@ -29,6 +29,7 @@ export function installSentStatus(opts: {
   trackerBaseUrl?: string;
   onNotify: (trackingId: string, enabled: boolean) => void;
   onStatus?: () => void;
+  onLink?: (trackingId: string, gmailThreadId: string) => void;
 }): SentStatusController {
   let emails = opts.emails || [];
   let trackerBaseUrl = opts.trackerBaseUrl || '';
@@ -40,7 +41,7 @@ export function installSentStatus(opts: {
 
   const paint = () => {
     paintRows(document, emails, trackerBaseUrl, opts.onNotify);
-    paintConversation(document, emails, trackerBaseUrl, opts.onNotify);
+    paintConversation(document, emails, trackerBaseUrl, opts.onNotify, opts.onLink);
     refreshOpenCard(emails, trackerBaseUrl);
     const next = statusSignatureFor(document, emails, trackerBaseUrl);
     if (next !== statusSignature) {
@@ -164,6 +165,7 @@ export function paintConversation(
   emails: TrackedEmailSummary[],
   trackerBaseUrl: string,
   onNotify: (trackingId: string, enabled: boolean) => void,
+  onLink?: (trackingId: string, gmailThreadId: string) => void,
 ): void {
   const heading = conversationHeading(root);
   if (!heading) return;
@@ -173,6 +175,11 @@ export function paintConversation(
   if (!match) {
     existing?.remove();
     return;
+  }
+  const hashId = threadIdFromLocation();
+  if (hashId && !match.gmailThreadId && onLink) {
+    match.gmailThreadId = hashId;
+    onLink(match.trackingId, hashId);
   }
   const slot = existing || createSlotAfter(heading);
   const opened = match.openCount > 0 || match.clickCount > 0;

@@ -1,6 +1,7 @@
 import type { ExtensionSettings } from '@gi/shared';
 import {
   applyTrackingToOutgoingHtml,
+  buildTrackingPixelHtml,
   extractHttpLinks,
   pairRewrittenLinks,
   type CreateTrackedEmailInput,
@@ -36,6 +37,7 @@ export type SdkComposeView = {
   getElement?: () => HTMLElement | null;
   getThreadID?: () => string | null | undefined | Promise<string | null | undefined>;
   addButton?: (desc: unknown) => void;
+  insertHTMLIntoBodyAtCursor?: (html: string) => HTMLElement | null | undefined | void;
 };
 
 export type ComposeTrackingDeps = {
@@ -186,19 +188,25 @@ export function attachSdkComposeTracking(view: SdkComposeView, deps: ComposeTrac
     if (current?.releasing) {
       current.releasing = false;
       installModifier();
-      if (planTrackingInjection(current) === 'inject') stampBody(view, current);
+      if (current && planTrackingInjection(current) === 'inject') stampBody(view, current);
       return;
     }
     if (!wantsTracking(current, deps)) return;
-    if (installModifier()) return;
-    if (!event?.cancel || !view.send) return;
+    installModifier();
+    if (!event?.cancel || !view.send) {
+      if (current && planTrackingInjection(current) === 'inject') stampBody(view, current);
+      return;
+    }
     event.cancel();
     void (async () => {
       const ready = await ensureReady(composeId, view, deps);
       installModifier();
       const session = sessions.get(composeId);
       if (session) session.releasing = true;
-      if (ready && planTrackingInjection(ready) === 'inject') stampBody(view, ready);
+      if (ready && planTrackingInjection(ready) === 'inject') {
+        stampBody(view, ready);
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+      }
       view.send?.();
     })();
   });
@@ -403,15 +411,52 @@ function plainTextToHtml(text: string): string {
 
 function stampBody(view: SdkComposeView, session: ComposeTrackState): void {
   const currentHtml = view.getHTMLContent?.() || view.getBodyElement?.()?.innerHTML || '';
-  const next = injectReady(currentHtml, session);
-  if (next === currentHtml) return;
-  if (view.setBodyHTML) view.setBodyHTML(next);
-  else applyToElementIfPresent(view, next);
+  if (session.pixelUrl && currentHtml.includes(session.pixelUrl)) return;
+
+  const body = view.getBodyElement?.();
+  let inserted = false;
+  if (body && session.pixelUrl && typeof view.insertHTMLIntoBodyAtCursor === 'function') {
+    try {
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(body);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      const pixelTag = buildTrackingPixelHtml(session.pixelUrl);
+      view.insertHTMLIntoBodyAtCursor(pixelTag);
+      const afterInsert = view.getHTMLContent?.() || body.innerHTML || '';
+      if (afterInsert.includes(session.pixelUrl)) {
+        inserted = true;
+      }
+    } catch {
+      /* fallback to setBodyHTML/applyToElementIfPresent */
+    }
+  }
+
+  if (!inserted) {
+    const next = injectReady(currentHtml, session);
+    if (next === currentHtml) return;
+    try {
+      if (view.setBodyHTML) view.setBodyHTML(next);
+    } catch {
+      /* fallback to direct DOM */
+    }
+    applyToElementIfPresent(view, next);
+  }
 }
 
 function applyToElementIfPresent(view: SdkComposeView, html: string): void {
   const body = view.getBodyElement?.();
-  if (body) body.innerHTML = html;
+  if (body) {
+    if (body.innerHTML !== html) {
+      body.innerHTML = html;
+    }
+    body.dispatchEvent(new Event('input', { bubbles: true }));
+    body.dispatchEvent(new Event('change', { bubbles: true }));
+  }
 }
 
 function wantsTracking(session: ComposeTrackState | undefined, deps: ComposeTrackingDeps): boolean {
@@ -421,7 +466,12 @@ function wantsTracking(session: ComposeTrackState | undefined, deps: ComposeTrac
 }
 
 function applyToElement(body: HTMLElement, session: ComposeTrackState): void {
-  body.innerHTML = injectReady(body.innerHTML, session);
+  const next = injectReady(body.innerHTML, session);
+  if (body.innerHTML !== next) {
+    body.innerHTML = next;
+    body.dispatchEvent(new Event('input', { bubbles: true }));
+    body.dispatchEvent(new Event('change', { bubbles: true }));
+  }
 }
 
 function mountTrackingControl(compose: HTMLElement, composeId: string, deps: ComposeTrackingDeps): void {

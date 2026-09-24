@@ -219,4 +219,60 @@ describe('compose tracking does not block send', () => {
     expect(dialogs[0]!.querySelector('[aria-label="Message Body"]')?.innerHTML).toContain('/open/trk_1');
     expect(dialogs[1]!.querySelector('[aria-label="Message Body"]')?.innerHTML || '').not.toContain('/open/trk_1');
   });
+
+  it('cancels presending, stamps the compose body with pixel HTML, and calls view.send', async () => {
+    resetComposeSessionsForTests();
+    const element = document.createElement('div');
+    const body = document.createElement('div');
+    body.innerHTML = '<p>Hello friend</p>';
+    element.append(body);
+    let presendCb: ((event: { cancel: () => void }) => void) | null = null;
+    let cancelled = false;
+    let sendCalls = 0;
+    const view: SdkComposeView = {
+      registerRequestModifier() {},
+      on(event, cb) {
+        if (event === 'presending') presendCb = cb as typeof presendCb;
+      },
+      getSubject: () => 'Test Subject',
+      getToRecipients: () => [{ emailAddress: 'friend@example.com' }],
+      getBodyElement: () => body,
+      getHTMLContent: () => body.innerHTML,
+      setBodyHTML: (html: string) => {
+        body.innerHTML = html;
+      },
+      getElement: () => element,
+      send: () => {
+        sendCalls += 1;
+        // Trigger presending again as real InboxSDK does on view.send()
+        presendCb?.({
+          cancel: () => {
+            cancelled = true;
+          },
+        });
+      },
+    };
+
+    attachSdkComposeTracking(view, deps());
+
+    // First send attempt by user
+    let firstCancelled = false;
+    presendCb?.({
+      cancel: () => {
+        firstCancelled = true;
+      },
+    });
+
+    expect(firstCancelled).toBe(true);
+
+    // Wait for the async ensureReady, stampBody, and view.send() to complete
+    await vi.waitFor(() => expect(sendCalls).toBe(1));
+
+    // Compose body must contain the tracking pixel
+    expect(body.innerHTML).toContain('https://track.example/open/trk_1');
+    expect(body.innerHTML).toContain('<p>Hello friend</p>');
+    // The second send from releasing pass was not cancelled
+    expect(cancelled).toBe(false);
+  });
 });
+

@@ -146,8 +146,10 @@ http.route({
   pathPrefix: "/open/",
   method: "GET",
   handler: httpAction(async (ctx, request) => {
-    const trackingId = decodeURIComponent(new URL(request.url).pathname.slice("/open/".length));
-    if (!validId(trackingId)) return gif();
+    let rawId = decodeURIComponent(new URL(request.url).pathname.slice("/open/".length)).trim();
+    rawId = rawId.replace(/\/+$/, "").replace(/\.(gif|png|jpe?g|webp)$/i, "");
+    if (!validId(rawId)) return gif();
+    const trackingId = rawId;
     try {
       const email = await ctx.runQuery(internal.tracking.getEmail, { trackingId });
       if (email) {
@@ -178,8 +180,10 @@ http.route({
   pathPrefix: "/c/",
   method: "GET",
   handler: httpAction(async (ctx, request) => {
-    const clickId = decodeURIComponent(new URL(request.url).pathname.slice("/c/".length));
-    if (!validId(clickId)) return json({ error: "bad_id" }, 400);
+    let rawId = decodeURIComponent(new URL(request.url).pathname.slice("/c/".length)).trim();
+    rawId = rawId.replace(/\/+$/, "");
+    if (!validId(rawId)) return json({ error: "bad_id" }, 400);
+    const clickId = rawId;
     const link = await ctx.runQuery(internal.tracking.getLink, { clickId });
     if (!link) return json({ error: "not_found" }, 404);
     const destination = safeRedirectUrl(link.destination);
