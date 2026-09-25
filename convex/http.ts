@@ -354,7 +354,7 @@ http.route({
       gmail_thread_id?: string | null;
       gmailMessageId?: string | null;
       gmail_message_id?: string | null;
-      source?: "ROW_INTERACTION" | "MESSAGE_EXPANDED" | "MESSAGE_LOAD" | "CACHE_REINSPECTION";
+      source?: "ROW_INTERACTION" | "MESSAGE_EXPANDED" | "MESSAGE_LOAD" | "CACHE_REINSPECTION" | "PAGE_RELOAD";
       selfViewEventId?: string;
       reconcileGmailIds?: boolean;
       reconcile_gmail_ids?: boolean;

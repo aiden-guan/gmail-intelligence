@@ -64,7 +64,7 @@ export type ClaimRow = {
   first_observed_at: string;
   last_observed_at: string;
   expires_at: string;
-  source: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
+  source: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION' | 'PAGE_RELOAD';
   consumed_by_event_id: string | null;
   consumed_at?: string | null;
   consumed_ua?: string | null;

@@ -253,6 +253,7 @@ export const RuntimeMessageSchema = z.discriminatedUnion('type', [
         'MESSAGE_EXPANDED',
         'MESSAGE_LOAD',
         'CACHE_REINSPECTION',
+        'PAGE_RELOAD',
       ])
       .optional(),
     selfViewEventId: z.string().optional(),

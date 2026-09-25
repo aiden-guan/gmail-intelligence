@@ -19,7 +19,26 @@ export type SelfViewSource =
   | 'ROW_INTERACTION'
   | 'MESSAGE_EXPANDED'
   | 'MESSAGE_LOAD'
-  | 'CACHE_REINSPECTION';
+  | 'CACHE_REINSPECTION'
+  | 'PAGE_RELOAD';
+
+export type PageReloadContext = {
+  navigationStartedAt: number;
+};
+
+/** Stable id for one document reload. Repeated inspections of the same message share it. */
+export function buildSelfViewEventId(
+  trackingId: string,
+  gmailMessageId: string | null | undefined,
+  source: SelfViewSource,
+  observedAt: number,
+): string {
+  if (source === 'PAGE_RELOAD') {
+    return `sv_${trackingId}_PAGE_RELOAD_${observedAt}`;
+  }
+  const messageId = normalizeGmailId(gmailMessageId);
+  return `sv_${trackingId}_${messageId || 'nomessage'}_${source}_${observedAt}`;
+}
 
 /** Backwards-compatible alias */
 export type MessageSelfViewTrigger =
@@ -49,11 +68,13 @@ export type ActiveMessageViewState = {
   lastReportedMessageId?: string;
   lastExpandedClaimAt?: number;
   lastLoadedClaimAt?: number;
+  pendingPageReload?: boolean;
 };
 
 export function createMessageSelfViewHandler(opts: {
   getEmails: () => TrackedEmailSummary[];
   getTrackerBaseUrl?: () => string | null | undefined;
+  pageReload?: PageReloadContext | null;
   onSelfView: (
     trackingId: string,
     gmailThreadId: string | null,
@@ -66,6 +87,7 @@ export function createMessageSelfViewHandler(opts: {
   onCollapsed?: (trackingId: string, gmailMessageId: string | null) => void;
 }): MessageSelfViewController {
   const activeMessageViews = new Map<InboxSdkMessageViewLike, ActiveMessageViewState>();
+  const pageReloadReported = new Set<string>();
 
   async function inspectMessageView(
     state: ActiveMessageViewState,
@@ -150,6 +172,21 @@ export function createMessageSelfViewHandler(opts: {
       }
 
       const threadId = viewThreadId || normalizeGmailId(stored?.gmailThreadId);
+      const navigationStartedAt = opts.pageReload?.navigationStartedAt;
+      if (
+        state.pendingPageReload &&
+        navigationStartedAt != null &&
+        Number.isFinite(navigationStartedAt) &&
+        identity === 'pixel' &&
+        trackingId
+      ) {
+        if (!pageReloadReported.has(trackingId)) {
+          pageReloadReported.add(trackingId);
+          opts.onSelfView(trackingId, threadId, messageId, navigationStartedAt, 'PAGE_RELOAD');
+        }
+        state.pendingPageReload = false;
+      }
+
       const storedMessageId = normalizeGmailId(stored?.gmailMessageId);
       const shouldReconcile = Boolean(
         messageId &&
@@ -195,6 +232,7 @@ export function createMessageSelfViewHandler(opts: {
 
   function handleMessageView(messageView: InboxSdkMessageViewLike): void {
     let state = activeMessageViews.get(messageView);
+    const created = !state;
     if (!state) {
       state = {
         view: messageView,
@@ -222,6 +260,7 @@ export function createMessageSelfViewHandler(opts: {
           }
           state.expandedAt = null;
           state.loadedAt = null;
+          state.pendingPageReload = false;
           state.lastExpandedClaimAt = undefined;
           state.lastLoadedClaimAt = undefined;
           state.lastReportedTrackingId = undefined;
@@ -241,6 +280,14 @@ export function createMessageSelfViewHandler(opts: {
     }
 
     const initial = typeof messageView.getViewState === 'function' ? messageView.getViewState() : null;
+    if (
+      created &&
+      initial === 'EXPANDED' &&
+      opts.pageReload &&
+      Number.isFinite(opts.pageReload.navigationStartedAt)
+    ) {
+      state.pendingPageReload = true;
+    }
     if (initial === 'EXPANDED') {
       if (!state.expandedAt) {
         state.expandedAt = Date.now();

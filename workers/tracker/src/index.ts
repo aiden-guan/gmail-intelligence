@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { safeRedirectUrl, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches, openEventMatchesSenderClaim, selectSenderProxyClaim } from './helpers.js';
+import { safeRedirectUrl, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches, openEventMatchesSenderClaim, planPageReloadProxy, selectSenderProxyClaim } from './helpers.js';
 import { getStore, StoreError, type ClaimRow, type EmailRow, type TrackerStore } from './store.js';
 
 export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, detectOpenRequestSource, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches } from './helpers.js';
@@ -302,7 +302,7 @@ async function handleSelfView(
     gmail_thread_id?: string | null;
     gmailMessageId?: string | null;
     gmail_message_id?: string | null;
-    source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
+    source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION' | 'PAGE_RELOAD';
     selfViewEventId?: string;
     reconcileGmailIds?: boolean;
     reconcile_gmail_ids?: boolean;
@@ -460,6 +460,56 @@ async function handleSelfView(
     if (evt.type === 'OPEN' && !claimConsumed) {
       claimConsumed = true;
       await store.consumeClaim(claimId, evt.id, evt.timestamp, evt.user_agent, evt.ip_hash);
+    }
+  }
+
+  if (source === 'PAGE_RELOAD') {
+    const reloadEvents = await store.listEvents(id);
+    const claim = await store.getClaim(claimId);
+    const observedProxy = {
+      proxyConsumedByEventId: claim?.proxy_consumed_by_event_id ?? null,
+      proxyConsumedAt: claim?.proxy_consumed_at ?? null,
+    };
+    const plan = planPageReloadProxy(
+      reloadEvents.map((evt) => ({
+        id: evt.id,
+        type: evt.type,
+        timestamp: evt.timestamp,
+        classification: evt.classification,
+        user_agent: evt.user_agent,
+      })),
+      selfMs,
+      observedProxy,
+    );
+    if (plan.reclassifyEventId) {
+      const evt = reloadEvents.find((row) => row.id === plan.reclassifyEventId);
+      if (evt && evt.classification !== 'SELF_LIKELY') {
+        await store.updateEvent(evt.id, {
+          classification: 'SELF_LIKELY',
+          suspected_self_open: true,
+          confidence: 1,
+        });
+        reclassifiedEventIds.push(evt.id);
+      }
+    }
+    if (plan.updateProxySlot && claim) {
+      if (plan.proxyConsumedByEventId) {
+        await store.updateClaim(claimId, {
+          proxy_consumed_by_event_id: plan.proxyConsumedByEventId,
+          proxy_consumed_at: plan.proxyConsumedAt,
+        });
+      } else {
+        const latest = await store.getClaim(claimId);
+        const unchanged =
+          (latest?.proxy_consumed_by_event_id ?? null) === observedProxy.proxyConsumedByEventId &&
+          (latest?.proxy_consumed_at ?? null) === observedProxy.proxyConsumedAt;
+        if (unchanged) {
+          await store.updateClaim(claimId, {
+            proxy_consumed_by_event_id: null,
+            proxy_consumed_at: null,
+          });
+        }
+      }
     }
   }
 

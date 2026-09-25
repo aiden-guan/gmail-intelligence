@@ -64,6 +64,7 @@ export default defineSchema({
       v.literal("MESSAGE_EXPANDED"),
       v.literal("MESSAGE_LOAD"),
       v.literal("CACHE_REINSPECTION"),
+      v.literal("PAGE_RELOAD"),
     ),
     consumedByEventId: v.union(v.string(), v.null()),
     consumedAt: v.optional(v.union(v.string(), v.null())),

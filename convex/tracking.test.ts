@@ -818,4 +818,269 @@ describe('Convex tracking mutations and self-view suppression', () => {
     expect(cleared.openCount).toBe(0);
     expect(cleared.firstOpenedAt).toBeNull();
   });
+
+  const proxyUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy';
+  const browserUa =
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  async function seedReloadEmail(ctx: any, trackingId: string, sentAt: string) {
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId,
+      subject: trackingId,
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: 'thread_reload',
+      gmailMessageId: 'msg_reload',
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+  }
+
+  function openArgs(trackingId: string, eventId: string, timestamp: string, userAgent: string, ipHash: string) {
+    return {
+      eventId,
+      trackingId,
+      type: 'OPEN' as const,
+      timestamp,
+      userAgent,
+      ipHash,
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    };
+  }
+
+  it('suppresses a second sender proxy after PAGE_RELOAD and still counts a later recipient proxy', async () => {
+    const { ctx, db } = createMockDb();
+    const base = Date.parse('2026-09-24T16:00:00.000Z');
+    const trackingId = 'trk_page_reload';
+    await seedReloadEmail(ctx, trackingId, new Date(base - 60_000).toISOString());
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'sv_open',
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, openArgs(trackingId, 'evt_first_proxy', new Date(base + 200).toISOString(), proxyUa, 'ip_google'));
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(0);
+
+    const navigationStartedAt = base + 3_000;
+    const reload = await callMutation(tracking.recordSelfView, ctx, {
+      eventId: `sv_${trackingId}_PAGE_RELOAD_${navigationStartedAt}`,
+      trackingId,
+      timestamp: new Date(navigationStartedAt).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'PAGE_RELOAD',
+    });
+    expect(reload.ok).toBe(true);
+    const rearmed = (await db.query('selfViewClaims').collect()).find((row) => row.trackingId === trackingId);
+    expect(rearmed?.proxyConsumedByEventId ?? null).toBeNull();
+
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_reload_proxy', new Date(navigationStartedAt + 400).toISOString(), proxyUa, 'ip_google'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(0);
+    const consumed = (await db.query('selfViewClaims').collect()).find((row) => row.trackingId === trackingId);
+    expect(consumed?.proxyConsumedByEventId).toBe('evt_reload_proxy');
+
+    for (const source of ['MESSAGE_EXPANDED', 'MESSAGE_LOAD', 'CACHE_REINSPECTION'] as const) {
+      await callMutation(tracking.recordSelfView, ctx, {
+        eventId: `sv_after_${source}`,
+        trackingId,
+        timestamp: new Date(navigationStartedAt + 800).toISOString(),
+        userAgent: browserUa,
+        ipHash: 'ip_sender',
+        gmailMessageId: 'msg_reload',
+        source,
+      });
+    }
+    const afterSources = (await db.query('selfViewClaims').collect()).find((row) => row.trackingId === trackingId);
+    expect(afterSources?.proxyConsumedByEventId).toBe('evt_reload_proxy');
+
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_later_recipient', new Date(navigationStartedAt + 12_000).toISOString(), proxyUa, 'ip_google'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(1);
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((event: any) => event.eventId === 'evt_first_proxy').classification).toBe('SELF_LIKELY');
+    expect(events.find((event: any) => event.eventId === 'evt_reload_proxy').classification).toBe('SELF_LIKELY');
+    expect(events.find((event: any) => event.eventId === 'evt_later_recipient').classification).toBe('PROXY_LIKELY');
+  });
+
+  it('reclassifies a GoogleImageProxy that arrives before PAGE_RELOAD reaches the backend', async () => {
+    const { ctx } = createMockDb();
+    const base = Date.parse('2026-09-24T16:30:00.000Z');
+    const trackingId = 'trk_page_reload_race';
+    await seedReloadEmail(ctx, trackingId, new Date(base - 60_000).toISOString());
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'sv_race_open',
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, openArgs(trackingId, 'evt_first_proxy', new Date(base + 200).toISOString(), proxyUa, 'ip_google'));
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(0);
+
+    const navigationStartedAt = base + 3_000;
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_raced_proxy', new Date(navigationStartedAt + 500).toISOString(), proxyUa, 'ip_google'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(1);
+
+    const reload = await callMutation(tracking.recordSelfView, ctx, {
+      eventId: `sv_${trackingId}_PAGE_RELOAD_${navigationStartedAt}`,
+      trackingId,
+      timestamp: new Date(navigationStartedAt).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'PAGE_RELOAD',
+    });
+    expect(reload.reclassifiedEventIds).toContain('evt_raced_proxy');
+    expect(reload.openCount).toBe(0);
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((event: any) => event.eventId === 'evt_raced_proxy').classification).toBe('SELF_LIKELY');
+
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_recipient_after', new Date(navigationStartedAt + 12_000).toISOString(), proxyUa, 'ip_google'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(1);
+    const after = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(after.find((event: any) => event.eventId === 'evt_recipient_after').classification).toBe('PROXY_LIKELY');
+  });
+
+  it('does not re-arm proxy suppression for expand, load, or cache reinspection', async () => {
+    const { ctx, db } = createMockDb();
+    const base = Date.parse('2026-09-24T17:00:00.000Z');
+    const trackingId = 'trk_no_rearm';
+    await seedReloadEmail(ctx, trackingId, new Date(base - 60_000).toISOString());
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'sv_guard_open',
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, openArgs(trackingId, 'evt_guard_proxy', new Date(base + 200).toISOString(), proxyUa, 'ip_google'));
+    for (const source of ['MESSAGE_EXPANDED', 'MESSAGE_LOAD', 'CACHE_REINSPECTION'] as const) {
+      await callMutation(tracking.recordSelfView, ctx, {
+        eventId: `sv_guard_${source}`,
+        trackingId,
+        timestamp: new Date(base + 3_000).toISOString(),
+        userAgent: browserUa,
+        ipHash: 'ip_sender',
+        gmailMessageId: 'msg_reload',
+        source,
+      });
+    }
+    const claim = (await db.query('selfViewClaims').collect()).find((row) => row.trackingId === trackingId);
+    expect(claim?.proxyConsumedByEventId).toBe('evt_guard_proxy');
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_guard_recipient', new Date(base + 4_000).toISOString(), proxyUa, 'ip_google'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(1);
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((event: any) => event.eventId === 'evt_guard_recipient').classification).toBe('PROXY_LIKELY');
+  });
+
+  it('does not reclassify a browser recipient open when applying PAGE_RELOAD', async () => {
+    const { ctx } = createMockDb();
+    const base = Date.parse('2026-09-24T17:30:00.000Z');
+    const trackingId = 'trk_page_reload_browser';
+    await seedReloadEmail(ctx, trackingId, new Date(base - 60_000).toISOString());
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'sv_browser_open',
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, openArgs(trackingId, 'evt_sender_proxy', new Date(base + 200).toISOString(), proxyUa, 'ip_google'));
+    const navigationStartedAt = base + 3_000;
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_raced_proxy', new Date(navigationStartedAt + 500).toISOString(), proxyUa, 'ip_google'),
+    );
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_browser_recipient', new Date(navigationStartedAt + 2_000).toISOString(), browserUa, 'ip_recipient'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(2);
+    const reload = await callMutation(tracking.recordSelfView, ctx, {
+      eventId: `sv_${trackingId}_PAGE_RELOAD_${navigationStartedAt}`,
+      trackingId,
+      timestamp: new Date(navigationStartedAt).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'PAGE_RELOAD',
+    });
+    expect(reload.reclassifiedEventIds).toEqual(['evt_raced_proxy']);
+    expect(reload.openCount).toBe(1);
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId });
+    expect(events.find((event: any) => event.eventId === 'evt_browser_recipient').classification).toBe('RECIPIENT_LIKELY');
+    expect(events.find((event: any) => event.eventId === 'evt_raced_proxy').classification).toBe('SELF_LIKELY');
+  });
+
+  it('does not re-arm the slot when the same PAGE_RELOAD event is delivered again', async () => {
+    const { ctx, db } = createMockDb();
+    const base = Date.parse('2026-09-24T18:00:00.000Z');
+    const trackingId = 'trk_page_reload_retry';
+    const eventId = `sv_${trackingId}_PAGE_RELOAD_${base}`;
+    await seedReloadEmail(ctx, trackingId, new Date(base - 60_000).toISOString());
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId,
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'PAGE_RELOAD',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, openArgs(trackingId, 'evt_reload_proxy', new Date(base + 300).toISOString(), proxyUa, 'ip_google'));
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(0);
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId,
+      trackingId,
+      timestamp: new Date(base).toISOString(),
+      userAgent: browserUa,
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_reload',
+      source: 'PAGE_RELOAD',
+    });
+    const claim = (await db.query('selfViewClaims').collect()).find((row) => row.trackingId === trackingId);
+    expect(claim?.proxyConsumedByEventId).toBe('evt_reload_proxy');
+    await callMutation(
+      tracking.recordOpenEvent,
+      ctx,
+      openArgs(trackingId, 'evt_recipient_after_retry', new Date(base + 4_000).toISOString(), proxyUa, 'ip_google'),
+    );
+    expect((await callQuery(tracking.getEmail, ctx, { trackingId })).openCount).toBe(1);
+  });
 });

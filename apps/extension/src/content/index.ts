@@ -31,7 +31,13 @@ import {
 import { applyCategoryChip, rowsForThread } from './chips';
 import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
 import { attachSdkComposeTracking, type ComposeTrackingSession } from './compose-tracking';
-import { createMessageSelfViewHandler, type MessageSelfViewController, type SelfViewSource } from './message-self-view';
+import {
+  buildSelfViewEventId,
+  createMessageSelfViewHandler,
+  type MessageSelfViewController,
+  type PageReloadContext,
+  type SelfViewSource,
+} from './message-self-view';
 import { installSentStatus, type SentStatusController } from './sent-status';
 import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
 import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
@@ -45,6 +51,7 @@ let sdkOwnsCompose = false;
 let sentStatus: SentStatusController | null = null;
 let messageSelfView: MessageSelfViewController | null = null;
 let booted = false;
+let pageReload: PageReloadContext | null = null;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
 let islandMode: IslandMode | null = null;
@@ -70,7 +77,7 @@ function reportTrackingSelfView(
     return;
   }
 
-  const selfViewEventId = `sv_${trackingId}_${normMessageId || 'nomessage'}_${source}_${observedAt}`;
+  const selfViewEventId = buildSelfViewEventId(trackingId, normMessageId, source, observedAt);
 
   void send({
     type: 'TRACKING_SELF_VIEW',
@@ -187,6 +194,10 @@ function currentIslandMode(): IslandMode {
 async function boot(): Promise<void> {
   if (booted) return;
   booted = true;
+  const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
+  const isReload = nav?.type === 'reload';
+  const navigationStartedAt = performance.timeOrigin;
+  pageReload = isReload && Number.isFinite(navigationStartedAt) ? { navigationStartedAt } : null;
   ensureSurface();
   await refreshSettings();
 
@@ -341,6 +352,7 @@ function initMessageSelfView(): MessageSelfViewController {
     messageSelfView = createMessageSelfViewHandler({
       getEmails: () => cachedTrackedEmails,
       getTrackerBaseUrl: () => settings.trackerBaseUrl,
+      pageReload,
       onReconcile: (trackingId, threadId, messageId) => {
         pendingReconcile.add(trackingId);
         const row = cachedTrackedEmails.find((item) => item.trackingId === trackingId);

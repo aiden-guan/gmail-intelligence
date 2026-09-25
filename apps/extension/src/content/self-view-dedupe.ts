@@ -26,10 +26,19 @@ export class SelfViewDeduplicator {
     source: SelfViewSource,
   ): boolean {
     const normMessageId = normalizeGmailId(gmailMessageId);
-    const key = `${trackingId}:${normMessageId || 'unknown'}`;
+    const key = source === 'PAGE_RELOAD'
+      ? `${trackingId}:PAGE_RELOAD`
+      : `${trackingId}:${normMessageId || 'unknown'}`;
     const last = this.recent.get(key);
 
     if (last) {
+      // 0. One PAGE_RELOAD per tracked message per document, even after other sources.
+      if (source === 'PAGE_RELOAD') {
+        if (last.source === 'PAGE_RELOAD') return false;
+        this.recent.set(key, { observedAt, source });
+        return true;
+      }
+
       // 1. Weak ROW_INTERACTION cannot override stronger signals
       if (source === 'ROW_INTERACTION' && last.source !== 'ROW_INTERACTION') {
         return false;

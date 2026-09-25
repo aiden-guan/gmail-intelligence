@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { decideTrackedOpen as convexDecide, deriveTrackingStats as convexStats, selectSenderProxyClaim as convexSelect } from '../../../convex/openRequest';
-import { decideTrackedOpen as workerDecide, deriveTrackingStats as workerStats, selectSenderProxyClaim as workerSelect } from '../../../workers/tracker/src/helpers';
+import {
+  decideTrackedOpen as convexDecide,
+  deriveTrackingStats as convexStats,
+  planPageReloadProxy as convexPlan,
+  selectSenderProxyClaim as convexSelect,
+} from '../../../convex/openRequest';
+import {
+  decideTrackedOpen as workerDecide,
+  deriveTrackingStats as workerStats,
+  planPageReloadProxy as workerPlan,
+  selectSenderProxyClaim as workerSelect,
+} from '../../../workers/tracker/src/helpers';
 import {
   decideTrackedOpen,
   deriveTrackingStats,
+  PAGE_RELOAD_PROXY_WINDOW_MS,
+  planPageReloadProxy,
   selectSenderProxyClaim,
+  type PageReloadProxyEvent,
+  type PageReloadProxyPlan,
   type ProxyClaimCandidate,
   type ProxySuppressionMode,
 } from './lifecycle';
@@ -277,5 +291,130 @@ describe('open decision order', () => {
         proxySuppression: 'consume',
       }),
     ).toMatchObject({ classification: 'SELF_LIKELY', countsAsOpen: false, consumeClaim: false, consumeProxySuppression: false });
+  });
+});
+
+const priorConsumption = {
+  proxyConsumedByEventId: 'evt_prior',
+  proxyConsumedAt: '2026-09-24T12:09:50.000Z',
+};
+
+function proxyEvent(
+  id: string,
+  at: number,
+  classification: string,
+  userAgent = proxyUa,
+): PageReloadProxyEvent {
+  const timestamp = new Date(at).toISOString();
+  return {
+    eventId: id,
+    id,
+    type: 'OPEN',
+    timestamp,
+    classification,
+    userAgent,
+    user_agent: userAgent,
+  };
+}
+
+function samePlan(
+  events: PageReloadProxyEvent[],
+  navigationStartedAt: number,
+  current?: { proxyConsumedByEventId?: string | null; proxyConsumedAt?: string | null } | null,
+): PageReloadProxyPlan {
+  const tracking = planPageReloadProxy(events, navigationStartedAt, current);
+  expect(convexPlan(events, navigationStartedAt, current)).toEqual(tracking);
+  expect(workerPlan(events, navigationStartedAt, current)).toEqual(tracking);
+  return tracking;
+}
+
+describe('PAGE_RELOAD proxy re-arm', () => {
+  const nav = Date.parse('2026-09-24T12:10:00.000Z');
+
+  it('re-arms a consumed sender slot when this reload has no proxy render yet', () => {
+    expect(samePlan([proxyEvent('evt_prior', nav - 10_000, 'SELF_LIKELY')], nav, priorConsumption)).toEqual({
+      reclassifyEventId: null,
+      proxyConsumedByEventId: null,
+      proxyConsumedAt: null,
+      updateProxySlot: true,
+    });
+  });
+
+  it('reclassifies the first in-window PROXY_LIKELY reload render and leaves a later one counted', () => {
+    const firstAt = nav + 500;
+    const laterAt = nav + 3_000;
+    const plan = samePlan(
+      [
+        proxyEvent('evt_reload', firstAt, 'PROXY_LIKELY'),
+        proxyEvent('evt_recipient', laterAt, 'PROXY_LIKELY'),
+        proxyEvent('evt_browser', nav + 1_000, 'RECIPIENT_LIKELY', browserUa),
+      ],
+      nav,
+      priorConsumption,
+    );
+    expect(plan).toEqual({
+      reclassifyEventId: 'evt_reload',
+      proxyConsumedByEventId: 'evt_reload',
+      proxyConsumedAt: new Date(firstAt).toISOString(),
+      updateProxySlot: true,
+    });
+    const before = [
+      proxyEvent('evt_reload', firstAt, 'PROXY_LIKELY'),
+      proxyEvent('evt_recipient', laterAt, 'PROXY_LIKELY'),
+    ];
+    expect(deriveTrackingStats(before).openCount).toBe(2);
+    expect(convexStats(before).openCount).toBe(2);
+    expect(workerStats(before).openCount).toBe(2);
+    const after = [
+      proxyEvent('evt_reload', firstAt, 'SELF_LIKELY'),
+      proxyEvent('evt_recipient', laterAt, 'PROXY_LIKELY'),
+    ];
+    expect(deriveTrackingStats(after).openCount).toBe(1);
+    expect(convexStats(after).openCount).toBe(1);
+    expect(workerStats(after).openCount).toBe(1);
+  });
+
+  it('does not reclassify a proxy outside the reload startup window, and does not re-arm over it', () => {
+    const lateAt = nav + PAGE_RELOAD_PROXY_WINDOW_MS + 1;
+    expect(samePlan([proxyEvent('evt_late', lateAt, 'PROXY_LIKELY')], nav, priorConsumption)).toEqual({
+      reclassifyEventId: null,
+      proxyConsumedByEventId: 'evt_late',
+      proxyConsumedAt: new Date(lateAt).toISOString(),
+      updateProxySlot: true,
+    });
+  });
+
+  it('keeps an already suppressed in-window sender proxy and does not reclassify the next one', () => {
+    const senderAt = nav + 400;
+    expect(
+      samePlan(
+        [
+          proxyEvent('evt_sender_reload', senderAt, 'SELF_LIKELY'),
+          proxyEvent('evt_recipient', nav + 4_000, 'PROXY_LIKELY'),
+        ],
+        nav,
+        {
+          proxyConsumedByEventId: 'evt_sender_reload',
+          proxyConsumedAt: new Date(senderAt).toISOString(),
+        },
+      ),
+    ).toEqual({
+      reclassifyEventId: null,
+      proxyConsumedByEventId: 'evt_sender_reload',
+      proxyConsumedAt: new Date(senderAt).toISOString(),
+      updateProxySlot: true,
+    });
+  });
+
+  it('does not clear a slot this reload already consumed when the open event is absent from the snapshot', () => {
+    const consumedAt = new Date(nav + 500).toISOString();
+    expect(
+      samePlan([], nav, { proxyConsumedByEventId: 'evt_live', proxyConsumedAt: consumedAt }),
+    ).toEqual({
+      reclassifyEventId: null,
+      proxyConsumedByEventId: 'evt_live',
+      proxyConsumedAt: consumedAt,
+      updateProxySlot: false,
+    });
   });
 });

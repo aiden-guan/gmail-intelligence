@@ -4,6 +4,7 @@ import {
   classifyClickEvent,
   deriveTrackingStats,
   describeTrackingStatus,
+  planPageReloadProxy,
   detectOpenRequestSource,
   isSelfViewCorrelated,
   matchTrackedEmail,
@@ -847,5 +848,48 @@ describe('Regression Matrix (Cases A through N)', () => {
     const probe = await probeTracker('https://track.example.com', 'secret-token', mockFetcher);
     expect(probe.status).toBe('outdated');
     expect(probe.label).toContain('outdated');
+  });
+
+  it('Case Y: a sender reload reclassifies one raced GoogleImageProxy and a later recipient proxy still counts', () => {
+    const nav = Date.parse('2026-09-24T18:00:00.000Z');
+    const proxyUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy';
+    const browserUa =
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    const raced = {
+      eventId: 'evt_reload_proxy',
+      type: 'OPEN',
+      timestamp: new Date(nav + 500).toISOString(),
+      classification: 'PROXY_LIKELY',
+      userAgent: proxyUa,
+      user_agent: proxyUa,
+    };
+    const browser = {
+      eventId: 'evt_browser',
+      type: 'OPEN',
+      timestamp: new Date(nav + 2_000).toISOString(),
+      classification: 'RECIPIENT_LIKELY',
+      userAgent: browserUa,
+      user_agent: browserUa,
+    };
+    expect(deriveTrackingStats([raced, browser]).openCount).toBe(2);
+    const plan = planPageReloadProxy([raced, browser], nav, {
+      proxyConsumedByEventId: 'evt_original',
+      proxyConsumedAt: new Date(nav - 5_000).toISOString(),
+    });
+    expect(plan.reclassifyEventId).toBe('evt_reload_proxy');
+    expect(plan.proxyConsumedByEventId).toBe('evt_reload_proxy');
+    expect(
+      deriveTrackingStats([
+        { ...raced, classification: 'SELF_LIKELY' },
+        browser,
+        {
+          type: 'OPEN',
+          timestamp: new Date(nav + 20_000).toISOString(),
+          classification: 'PROXY_LIKELY',
+          userAgent: proxyUa,
+          user_agent: proxyUa,
+        },
+      ]).openCount,
+    ).toBe(2);
   });
 });

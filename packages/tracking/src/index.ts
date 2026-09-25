@@ -145,7 +145,7 @@ export class TrackingClient {
       timestamp?: string;
       gmailThreadId?: string | null;
       gmailMessageId?: string | null;
-      source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION';
+      source?: 'ROW_INTERACTION' | 'MESSAGE_EXPANDED' | 'MESSAGE_LOAD' | 'CACHE_REINSPECTION' | 'PAGE_RELOAD';
       selfViewEventId?: string;
       reconcileGmailIds?: boolean;
     },
@@ -815,6 +815,8 @@ export {
   normalizeGmailId,
   normalizeUserAgentFamily,
   openEventMatchesSenderClaim,
+  PAGE_RELOAD_PROXY_WINDOW_MS,
+  planPageReloadProxy,
   probeTracker,
   selectSenderProxyClaim,
   senderProxySuppressionMode,
@@ -835,6 +837,8 @@ export type {
   OpenClassification,
   OpenRequestSource,
   OpenVerdict,
+  PageReloadProxyEvent,
+  PageReloadProxyPlan,
   ProxyClaimCandidate,
   ProxySuppressionMode,
   SelfViewClaim,

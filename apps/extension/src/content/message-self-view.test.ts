@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { TrackedEmailSummary } from '@gi/tracking';
-import { createMessageSelfViewHandler, type InboxSdkMessageViewLike } from './message-self-view';
+import { buildSelfViewEventId, createMessageSelfViewHandler, type InboxSdkMessageViewLike } from './message-self-view';
 
 type MockMessageViewOptions = {
   id?: string;
@@ -521,5 +521,94 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     handler.handleMessageView(mv);
     await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'late_id', expect.any(Number), 'MESSAGE_EXPANDED'));
     expect(onReconcile).toHaveBeenCalledWith('trk_A', 'thread_X', 'late_id');
+  });
+
+  it('emits one PAGE_RELOAD for an initially expanded tracked pixel after a document reload', async () => {
+    const navigationStartedAt = 1_758_000_000_000;
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      getTrackerBaseUrl: () => 'https://track.example',
+      pageReload: { navigationStartedAt },
+      onSelfView,
+    });
+    const mv = createMockMessageView({
+      id: 'abc123',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml: '<img src="https://track.example/open/trk_A">',
+    });
+    handler.handleMessageView(mv);
+    await vi.waitFor(() =>
+      expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', navigationStartedAt, 'PAGE_RELOAD'),
+    );
+    await handler.reinspectActive();
+    mv.setState('COLLAPSED');
+    mv.setState('EXPANDED');
+    await vi.waitFor(() => expect(onSelfView.mock.calls.filter((call) => call[4] === 'MESSAGE_EXPANDED').length).toBeGreaterThan(0));
+    expect(onSelfView.mock.calls.filter((call) => call[4] === 'PAGE_RELOAD')).toHaveLength(1);
+    expect(buildSelfViewEventId('trk_A', 'abc123', 'PAGE_RELOAD', navigationStartedAt)).toBe(
+      `sv_trk_A_PAGE_RELOAD_${navigationStartedAt}`,
+    );
+    expect(buildSelfViewEventId('trk_A', 'other', 'PAGE_RELOAD', navigationStartedAt)).toBe(
+      `sv_trk_A_PAGE_RELOAD_${navigationStartedAt}`,
+    );
+  });
+
+  it('does not emit PAGE_RELOAD for a message expanded after the reload', async () => {
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      getTrackerBaseUrl: () => 'https://track.example',
+      pageReload: { navigationStartedAt: 1_758_000_000_000 },
+      onSelfView,
+    });
+    const mv = createMockMessageView({
+      id: 'abc123',
+      loaded: true,
+      state: 'COLLAPSED',
+      threadId: 'thread_X',
+      bodyHtml: '<img src="https://track.example/open/trk_A">',
+    });
+    handler.handleMessageView(mv);
+    mv.setState('EXPANDED');
+    await vi.waitFor(() => expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED'));
+    expect(onSelfView.mock.calls.some((call) => call[4] === 'PAGE_RELOAD')).toBe(false);
+  });
+
+  it('emits PAGE_RELOAD when the embedded pixel appears after the reloaded message loads', async () => {
+    const navigationStartedAt = 1_758_000_000_000;
+    let html = '';
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      getTrackerBaseUrl: () => 'https://track.example',
+      pageReload: { navigationStartedAt },
+      onSelfView,
+    });
+    const mv = createMockMessageView({
+      id: 'abc123',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+    });
+    mv.getBodyElement = () => {
+      if (!html) return null;
+      const body = document.createElement('div');
+      body.innerHTML = html;
+      return body;
+    };
+    handler.handleMessageView(mv);
+    await vi.waitFor(() =>
+      expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED'),
+    );
+    expect(onSelfView.mock.calls.some((call) => call[4] === 'PAGE_RELOAD')).toBe(false);
+    html = '<img src="https://track.example/open/trk_A">';
+    mv.emit('load');
+    await vi.waitFor(() =>
+      expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', navigationStartedAt, 'PAGE_RELOAD'),
+    );
+    expect(onSelfView.mock.calls.filter((call) => call[4] === 'PAGE_RELOAD')).toHaveLength(1);
   });
 });

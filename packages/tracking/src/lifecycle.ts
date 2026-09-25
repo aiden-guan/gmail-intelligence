@@ -176,6 +176,99 @@ export function selectSenderProxyClaim<T extends ProxyClaimCandidate>(
   return { claim, mode };
 }
 
+/** GoogleImageProxy renders in this window after a document reload can be the sender's own refresh. */
+export const PAGE_RELOAD_PROXY_WINDOW_MS = 8_000;
+
+export type PageReloadProxyEvent = {
+  eventId?: string;
+  id?: string;
+  type: string;
+  timestamp: string;
+  classification?: string | null;
+  userAgent?: string | null;
+  user_agent?: string | null;
+};
+
+export type PageReloadProxyPlan = {
+  /** PROXY_LIKELY GoogleImageProxy event to mark SELF_LIKELY. At most one. */
+  reclassifyEventId: string | null;
+  proxyConsumedByEventId: string | null;
+  proxyConsumedAt: string | null;
+  /**
+   * False when this reload already consumed its slot and there is no PROXY_LIKELY
+   * event left to attach. Callers must leave the claim's proxy fields unchanged.
+   */
+  updateProxySlot: boolean;
+};
+
+function pageReloadEventKey(evt: PageReloadProxyEvent): string {
+  return evt.eventId || evt.id || '';
+}
+
+/**
+ * Plan the one-shot proxy slot for a PAGE_RELOAD self-view.
+ * Picks the earliest GoogleImageProxy open in [navigationStartedAt, navigationStartedAt + window].
+ * Browser opens are ignored; sender-fingerprint matching stays on the existing claim path.
+ * A consumed slot from before this reload is cleared when no GoogleImageProxy render has happened since navigationStartedAt.
+ */
+export function planPageReloadProxy(
+  events: PageReloadProxyEvent[],
+  navigationStartedAt: number,
+  current?: { proxyConsumedByEventId?: string | null; proxyConsumedAt?: string | null } | null,
+  windowMs = PAGE_RELOAD_PROXY_WINDOW_MS,
+): PageReloadProxyPlan {
+  const keep: PageReloadProxyPlan = {
+    reclassifyEventId: null,
+    proxyConsumedByEventId: current?.proxyConsumedByEventId ?? null,
+    proxyConsumedAt: current?.proxyConsumedAt ?? null,
+    updateProxySlot: false,
+  };
+  if (!Number.isFinite(navigationStartedAt)) return keep;
+  const windowEnd = navigationStartedAt + windowMs;
+  const candidates = events.filter((evt) => {
+    if (evt.type !== 'OPEN') return false;
+    const classification = evt.classification || '';
+    if (classification !== 'PROXY_LIKELY' && classification !== 'SELF_LIKELY') return false;
+    const ua = evt.userAgent ?? evt.user_agent ?? null;
+    if (detectOpenRequestSource(ua) !== 'google_image_proxy') return false;
+    const ts = Date.parse(evt.timestamp);
+    if (!Number.isFinite(ts) || ts < navigationStartedAt) return false;
+    return Boolean(pageReloadEventKey(evt));
+  });
+  candidates.sort((a, b) => {
+    const delta = Date.parse(a.timestamp) - Date.parse(b.timestamp);
+    if (delta !== 0) return delta;
+    return pageReloadEventKey(a).localeCompare(pageReloadEventKey(b));
+  });
+  const chosen = candidates[0];
+  if (chosen) {
+    const id = pageReloadEventKey(chosen);
+    const chosenMs = Date.parse(chosen.timestamp);
+    const inWindow = chosenMs <= windowEnd;
+    return {
+      reclassifyEventId: inWindow && chosen.classification === 'PROXY_LIKELY' ? id : null,
+      proxyConsumedByEventId: id,
+      proxyConsumedAt: chosen.timestamp,
+      updateProxySlot: true,
+    };
+  }
+  const consumedMs = current?.proxyConsumedAt ? Date.parse(current.proxyConsumedAt) : Number.NaN;
+  if (
+    current?.proxyConsumedByEventId &&
+    Number.isFinite(consumedMs) &&
+    consumedMs >= navigationStartedAt &&
+    consumedMs <= windowEnd
+  ) {
+    return keep;
+  }
+  return {
+    reclassifyEventId: null,
+    proxyConsumedByEventId: null,
+    proxyConsumedAt: null,
+    updateProxySlot: true,
+  };
+}
+
 function machineOpenVerdict(source: OpenRequestSource): OpenVerdict | null {
   if (source === 'headless' || source === 'scanner') {
     return {
@@ -618,7 +711,8 @@ export type SelfViewSource =
   | 'ROW_INTERACTION'
   | 'MESSAGE_EXPANDED'
   | 'MESSAGE_LOAD'
-  | 'CACHE_REINSPECTION';
+  | 'CACHE_REINSPECTION'
+  | 'PAGE_RELOAD';
 
 export type SelfViewClaim = {
   id: string;

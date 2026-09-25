@@ -112,4 +112,14 @@ describe('SelfViewDeduplicator', () => {
     // T = 500: re-expansion immediately after collapse is allowed
     expect(dedupe.shouldReport('trk_123', 'msg_1', 500, 'MESSAGE_EXPANDED')).toBe(true);
   });
+
+  it('reports one PAGE_RELOAD per tracked message even after another source', () => {
+    const dedupe = new SelfViewDeduplicator(10_000);
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 5_000, 'MESSAGE_EXPANDED')).toBe(true);
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 1_000, 'PAGE_RELOAD')).toBe(true);
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 1_000, 'PAGE_RELOAD')).toBe(false);
+    expect(dedupe.shouldReport('trk_123', 'other_msg', 4_000, 'PAGE_RELOAD')).toBe(false);
+    expect(dedupe.shouldReport('trk_123', 'msg_1', 20_000, 'PAGE_RELOAD')).toBe(false);
+    expect(dedupe.shouldReport('trk_other', 'msg_1', 1_000, 'PAGE_RELOAD')).toBe(true);
+  });
 });

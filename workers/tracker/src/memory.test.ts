@@ -48,6 +48,64 @@ function proxyHeaders(): HeadersInit {
   };
 }
 
+async function createSentTracked(sentAt: string, subject = 'Reload'): Promise<{ tracking_id: string; pixel_url: string }> {
+  const created = await worker.fetch(
+    new Request('http://127.0.0.1:8787/api/emails', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        subject,
+        sender: 'me@example.com',
+        recipients: ['r@example.com'],
+        gmail_thread_id: 'thread_reload',
+        gmail_message_id: 'msg_reload',
+      }),
+    }),
+    env,
+  );
+  const body = (await created.json()) as { tracking_id: string; pixel_url: string };
+  await worker.fetch(
+    new Request(`http://127.0.0.1:8787/api/emails/${body.tracking_id}`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ status: 'SENT', sent_at: sentAt, gmail_message_id: 'msg_reload' }),
+    }),
+    env,
+  );
+  return body;
+}
+
+async function postSelfView(trackingId: string, body: Record<string, unknown>) {
+  const res = await worker.fetch(
+    new Request(`http://127.0.0.1:8787/api/emails/${trackingId}/self-view`, {
+      method: 'POST',
+      headers: senderViewHeaders(),
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+  return (await res.json()) as {
+    ok: boolean;
+    open_count: number;
+    reclassifiedEventIds?: string[];
+    claimId?: string;
+  };
+}
+
+async function readOpenCount(trackingId: string): Promise<number> {
+  const email = (await (
+    await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${trackingId}`, { headers: authHeaders() }), env)
+  ).json()) as { open_count: number };
+  return email.open_count;
+}
+
+async function readOpenEvents(trackingId: string) {
+  const events = (await (
+    await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${trackingId}/events`, { headers: authHeaders() }), env)
+  ).json()) as Array<{ id: string; type: string; classification?: string; timestamp: string }>;
+  return events.filter((event) => event.type === 'OPEN');
+}
+
 beforeEach(() => {
   resetMemoryStore();
 });
@@ -1576,6 +1634,226 @@ describe('local memory tracker', () => {
       const claims = readMemoryClaims(tracking_id);
       expect(claims[0]?.proxy_consumed_by_event_id).toBeTruthy();
       expect(claims[0]?.consumed_by_event_id).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('suppresses a second sender proxy after PAGE_RELOAD and still counts a later recipient proxy', async () => {
+    const base = Date.parse('2026-09-24T16:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+    try {
+      const { tracking_id, pixel_url } = await createSentTracked(new Date(base - 60_000).toISOString());
+      await postSelfView(tracking_id, {
+        timestamp: new Date(base).toISOString(),
+        source: 'MESSAGE_EXPANDED',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_open',
+      });
+      vi.advanceTimersByTime(200);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(0);
+
+      vi.advanceTimersByTime(3_000);
+      const navigationStartedAt = Date.now();
+      const reload = await postSelfView(tracking_id, {
+        timestamp: new Date(navigationStartedAt).toISOString(),
+        source: 'PAGE_RELOAD',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: `sv_${tracking_id}_PAGE_RELOAD_${navigationStartedAt}`,
+      });
+      expect(reload.ok).toBe(true);
+      expect(readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id ?? null).toBeNull();
+
+      vi.advanceTimersByTime(400);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(0);
+      const consumed = readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id;
+      expect(consumed).toBeTruthy();
+
+      await postSelfView(tracking_id, {
+        timestamp: new Date(Date.now()).toISOString(),
+        source: 'MESSAGE_EXPANDED',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_expand_after_reload',
+      });
+      await postSelfView(tracking_id, {
+        timestamp: new Date(Date.now()).toISOString(),
+        source: 'MESSAGE_LOAD',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_load_after_reload',
+      });
+      await postSelfView(tracking_id, {
+        timestamp: new Date(navigationStartedAt).toISOString(),
+        source: 'CACHE_REINSPECTION',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_cache_after_reload',
+      });
+      expect(readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id).toBe(consumed);
+
+      vi.advanceTimersByTime(10_000);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(1);
+      const opens = await readOpenEvents(tracking_id);
+      expect(opens.filter((event) => event.classification === 'PROXY_LIKELY')).toHaveLength(1);
+      expect(opens.filter((event) => event.classification === 'SELF_LIKELY')).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reclassifies a GoogleImageProxy that arrives before PAGE_RELOAD reaches the backend', async () => {
+    const base = Date.parse('2026-09-24T16:30:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+    try {
+      const { tracking_id, pixel_url } = await createSentTracked(new Date(base - 60_000).toISOString(), 'Race');
+      await postSelfView(tracking_id, {
+        timestamp: new Date(base).toISOString(),
+        source: 'MESSAGE_EXPANDED',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_race_open',
+      });
+      vi.advanceTimersByTime(200);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(0);
+
+      const navigationStartedAt = base + 3_000;
+      vi.setSystemTime(navigationStartedAt + 500);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(1);
+
+      vi.setSystemTime(navigationStartedAt + 2_000);
+      const reload = await postSelfView(tracking_id, {
+        timestamp: new Date(navigationStartedAt).toISOString(),
+        source: 'PAGE_RELOAD',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: `sv_${tracking_id}_PAGE_RELOAD_${navigationStartedAt}`,
+      });
+      expect(reload.open_count).toBe(0);
+      expect(reload.reclassifiedEventIds).toHaveLength(1);
+      expect(await readOpenCount(tracking_id)).toBe(0);
+      const raced = (await readOpenEvents(tracking_id)).find((event) => event.id === reload.reclassifiedEventIds?.[0]);
+      expect(raced?.classification).toBe('SELF_LIKELY');
+
+      vi.advanceTimersByTime(10_000);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(1);
+      expect((await readOpenEvents(tracking_id)).filter((event) => event.classification === 'PROXY_LIKELY')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not re-arm proxy suppression for expand, load, or cache reinspection', async () => {
+    const base = Date.parse('2026-09-24T17:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+    try {
+      const { tracking_id, pixel_url } = await createSentTracked(new Date(base - 60_000).toISOString(), 'No rearm');
+      await postSelfView(tracking_id, {
+        timestamp: new Date(base).toISOString(),
+        source: 'MESSAGE_EXPANDED',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_guard_open',
+      });
+      vi.advanceTimersByTime(200);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      const consumed = readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id;
+      expect(consumed).toBeTruthy();
+      expect(await readOpenCount(tracking_id)).toBe(0);
+
+      vi.advanceTimersByTime(3_000);
+      for (const source of ['MESSAGE_EXPANDED', 'MESSAGE_LOAD', 'CACHE_REINSPECTION'] as const) {
+        await postSelfView(tracking_id, {
+          timestamp: new Date(base).toISOString(),
+          source,
+          gmailMessageId: 'msg_reload',
+          selfViewEventId: `sv_guard_${source}`,
+        });
+      }
+      expect(readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id).toBe(consumed);
+
+      vi.advanceTimersByTime(500);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reclassify a browser recipient open when applying PAGE_RELOAD', async () => {
+    const base = Date.parse('2026-09-24T17:30:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+    try {
+      const { tracking_id, pixel_url } = await createSentTracked(new Date(base - 60_000).toISOString(), 'Browser');
+      await postSelfView(tracking_id, {
+        timestamp: new Date(base).toISOString(),
+        source: 'MESSAGE_EXPANDED',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: 'sv_browser_open',
+      });
+      vi.advanceTimersByTime(200);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+
+      const navigationStartedAt = base + 3_000;
+      vi.setSystemTime(navigationStartedAt + 500);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      vi.setSystemTime(navigationStartedAt + 2_000);
+      await worker.fetch(new Request(pixel_url, { headers: recipientHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(2);
+
+      vi.setSystemTime(navigationStartedAt + 2_500);
+      const reload = await postSelfView(tracking_id, {
+        timestamp: new Date(navigationStartedAt).toISOString(),
+        source: 'PAGE_RELOAD',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId: `sv_${tracking_id}_PAGE_RELOAD_${navigationStartedAt}`,
+      });
+      expect(reload.reclassifiedEventIds).toHaveLength(1);
+      expect(reload.open_count).toBe(1);
+      const opens = await readOpenEvents(tracking_id);
+      expect(opens.find((event) => event.id === reload.reclassifiedEventIds?.[0])?.classification).toBe('SELF_LIKELY');
+      expect(opens.filter((event) => event.classification === 'RECIPIENT_LIKELY')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not re-arm the slot when the same PAGE_RELOAD event is delivered again', async () => {
+    const base = Date.parse('2026-09-24T18:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+    try {
+      const { tracking_id, pixel_url } = await createSentTracked(new Date(base - 60_000).toISOString(), 'Idempotent reload');
+      const navigationStartedAt = base;
+      const selfViewEventId = `sv_${tracking_id}_PAGE_RELOAD_${navigationStartedAt}`;
+      await postSelfView(tracking_id, {
+        timestamp: new Date(navigationStartedAt).toISOString(),
+        source: 'PAGE_RELOAD',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId,
+      });
+      vi.advanceTimersByTime(300);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      const consumed = readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id;
+      expect(consumed).toBeTruthy();
+      expect(await readOpenCount(tracking_id)).toBe(0);
+
+      vi.advanceTimersByTime(3_000);
+      await postSelfView(tracking_id, {
+        timestamp: new Date(navigationStartedAt).toISOString(),
+        source: 'PAGE_RELOAD',
+        gmailMessageId: 'msg_reload',
+        selfViewEventId,
+      });
+      expect(readMemoryClaims(tracking_id)[0]?.proxy_consumed_by_event_id).toBe(consumed);
+
+      vi.advanceTimersByTime(500);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      expect(await readOpenCount(tracking_id)).toBe(1);
     } finally {
       vi.useRealTimers();
     }

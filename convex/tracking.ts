@@ -8,6 +8,7 @@ import {
   normalizeGmailId,
   normalizeUserAgentFamily,
   openEventMatchesSenderClaim,
+  planPageReloadProxy,
   selectSenderProxyClaim,
   senderFingerprintMatches,
 } from "./openRequest";
@@ -226,6 +227,7 @@ export const recordSelfView = internalMutation({
         v.literal("MESSAGE_EXPANDED"),
         v.literal("MESSAGE_LOAD"),
         v.literal("CACHE_REINSPECTION"),
+        v.literal("PAGE_RELOAD"),
       ),
     ),
   },
@@ -418,6 +420,52 @@ export const recordSelfView = internalMutation({
             consumedAt: evt.timestamp,
             consumedUa: evt.userAgent,
             consumedIpHash: evt.ipHash,
+          });
+        }
+      }
+    }
+
+    if (source === "PAGE_RELOAD") {
+      const reloadEvents = await getAllEventsForEmail(ctx, args.trackingId);
+      const claimRows = await ctx.db
+        .query("selfViewClaims")
+        .withIndex("by_claimId", (q) => q.eq("claimId", claimId))
+        .take(1);
+      const claim = claimRows[0];
+      const observedProxy = {
+        proxyConsumedByEventId: claim?.proxyConsumedByEventId ?? null,
+        proxyConsumedAt: claim?.proxyConsumedAt ?? null,
+      };
+      const plan = planPageReloadProxy(
+        reloadEvents.map((evt) => ({
+          eventId: evt.eventId,
+          type: evt.type,
+          timestamp: evt.timestamp,
+          classification: evt.classification,
+          userAgent: evt.userAgent,
+        })),
+        selfMs,
+        observedProxy,
+      );
+      if (plan.reclassifyEventId) {
+        const evt = reloadEvents.find((row) => row.eventId === plan.reclassifyEventId);
+        if (evt && evt.classification !== "SELF_LIKELY") {
+          await ctx.db.patch(evt._id, {
+            classification: "SELF_LIKELY",
+            suspectedSelfOpen: true,
+            confidence: 1,
+          });
+          reclassifiedEventIds.push(evt.eventId);
+        }
+      }
+      if (plan.updateProxySlot && claim) {
+        const slotStillMatches =
+          (claim.proxyConsumedByEventId ?? null) === observedProxy.proxyConsumedByEventId &&
+          (claim.proxyConsumedAt ?? null) === observedProxy.proxyConsumedAt;
+        if (plan.proxyConsumedByEventId || slotStillMatches) {
+          await ctx.db.patch(claim._id, {
+            proxyConsumedByEventId: plan.proxyConsumedByEventId,
+            proxyConsumedAt: plan.proxyConsumedAt,
           });
         }
       }
