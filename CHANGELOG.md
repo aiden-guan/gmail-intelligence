@@ -20,10 +20,16 @@ Implemented a durable sender self-open suppression architecture based on exact m
 | **Delivery Retries & Idempotency** (`apps/extension`, `packages/tracking`) | Added exponential retry (3 attempts) with deterministic `selfViewEventId` idempotency key | Prevents transient delivery failures from disabling sender suppression; backend safely upserts single logical claim. |
 | **Tracker Protocol v3 & Health Diagnostics** (`packages/tracking`, `workers/tracker`, `convex`, `apps/extension`) | Introduced protocol version 3 and feature negotiation (`self_view_claims`) | Settings & diagnostics detect and warn on outdated tracker deployments instead of falsely reporting healthy. |
 | **Supabase & Convex Parity** (`supabase/migrations`, `convex`) | Added `tracking_self_view_claims` table, indexes, and updated classification check constraint | Added full support for `PROXY_LIKELY` and `MACHINE_LIKELY` alongside claims in Supabase and Convex. |
+| **InboxSDK Single Registration** (`packages/gmail`, `apps/extension`) | Made `InboxSdkAdapter` single owner of SDK view handlers with raw-view hooks, removing duplicate registrations in `mountSdkUi` | Eliminates duplicate handler firings and ensures handlers register strictly once per Gmail page lifecycle. |
+| **NavMenu Error Fix** (`apps/extension`) | Removed `sdk.NavMenu.addNavItem` calls from `mountSdkUi` | Eliminates InboxSDK 2.2.26 `Error("should not happen")` crashes when Gmail's nav container is unmounted on `#inbox`. |
 
 ### Detailed Changes
 
 #### Added
+- **`packages/gmail/src/InboxSdkAdapter.ts`**: Added `InboxSdkHooks` (`onThreadView`, `onMessageView`, `onComposeView`, `onThreadRowView`), `InboxSdkAdapterOptions`, and exported view type definitions (`ThreadViewLike`, `MessageViewLike`, `ComposeViewLike`, `ThreadRowViewLike`).
+- **`packages/gmail/src/index.ts`**: Added `hooks` option to `CompositeGmailOptions`, added `setHooks` and `getHooks` to `CompositeGmailAdapter`.
+- **`apps/extension/src/content/inboxsdk-integration.test.ts`**: Added regression test suite verifying `mountSdkUi()` never registers handlers or NavMenu items on SDK directly, routes all UI and tracking features via hooks, and handles restart/reload cleanly.
+- **`packages/gmail/src/lifecycle.test.ts`**: Added regression tests verifying strictly-once InboxSDK handler registration across repeated starts, stops, restarts, and multiple adapter bindings.
 - **`supabase/migrations`**: Created `20260924000000_self_view_claims.sql` adding `tracking_self_view_claims` table and expanding `tracking_events` check constraint to include `PROXY_LIKELY` and `MACHINE_LIKELY`.
 - **`convex/schema.ts` & `convex/tracking.ts`**: Added `selfViewClaims` table schema, indexes, atomic claim consumption, render-burst grace window, and retroactive reclassification.
 - **`convex/tracking.test.ts`**: Added comprehensive mutation test suite for Convex tracking claims and race conditions.
@@ -33,6 +39,8 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **`apps/extension/src/settings/SettingsApp.test.tsx`**: Added unit tests covering Email Tracking settings inputs and bundled tracker auto-loading.
 
 #### Changed / Refactored
+- **`apps/extension/src/content/index.ts`**: Refactored `mountSdkUi()` to configure `InboxSdkHooks` on the adapter rather than registering handlers on `sdk` directly; removed `sdk.NavMenu.addNavItem()` block; guarded `chrome.` runtime calls and automatic `boot()`.
+- **`packages/gmail/src/InboxSdkAdapter.ts`**: Bound SDK handlers once per SDK instance using a Symbol state record and WeakMap; dispatched events to the active adapter and invoked raw-view hooks safely.
 - **`apps/extension/message-self-view.ts`**: Captured distinct `loadedAt` on MessageView `load` events, completely removing `expandedAt` reuse.
 - **`apps/extension/self-view-dedupe.ts`**: Upgraded priority rules so `MESSAGE_LOAD` is never deduped against weaker signals.
 - **`apps/extension/background`**: Replaced silent catch with bounded retry loop using `selfViewEventId`; reported diagnostic health status to session storage.
@@ -41,6 +49,9 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **`packages/agent`**: Added random entropy suffix to `jobId` generation to prevent same-millisecond ID collisions in tests.
 
 #### Fixed
+- **InboxSDK Repeated "should not happen" Error**: Removed `sdk.NavMenu.addNavItem` splits from `mountSdkUi()`, preventing crashes on `#inbox` when Gmail's nav container is unavailable.
+- **Duplicate InboxSDK Handler Registrations**: Consolidated handler ownership exclusively into `InboxSdkAdapter`, eliminating duplicate registration of `registerThreadViewHandler`, `registerMessageViewHandler`, `registerComposeViewHandler`, and `registerThreadRowViewHandler`.
+- **Handler Stacking on Reload/Restart**: Tagged SDK instances with active registration state, ensuring handlers are registered strictly once per Gmail page lifecycle.
 - **Missing Tracker Configuration in Settings**: Restored bundled tracker auto-loading (`tracker-config.json`) in background service worker and SettingsApp when tracker settings are unconfigured, resolving `Connection: Missing configuration`.
 - **Delayed Gmail Pixel Open Regression**: Pixel arriving >8s after expansion now safely matches active or refreshed claim and is classified as `SELF_LIKELY`.
 - **False Suppression of Real Recipient Opens**: Recipient opens arriving >1000ms after claim consumption are no longer swallowed by the legacy 8-second window.
@@ -48,7 +59,7 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **Supabase Constraint Violations**: Runtime classifications `PROXY_LIKELY` and `MACHINE_LIKELY` are now valid enum values in Postgres.
 
 ### Verification Proof
-- `npm test`: 33 test files passed, 304 tests passed.
+- `npm test`: 35 test files passed, 319 tests passed.
 - `npm run typecheck`: Passed with 0 TypeScript errors across all workspaces and Convex.
 - `npm run lint`: Passed with 0 errors across packages, apps, and workers.
 - `npm run build`: Production build verified for all workspaces (`@gi/shared`, `@gi/gmail`, `@gi/mailbox`, `@gi/ai`, `@gi/search`, `@gi/agent`, `@gi/tracking`, `@gi/extension`, `@gi/tracker`).
