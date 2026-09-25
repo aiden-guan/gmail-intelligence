@@ -5,7 +5,9 @@ import { DEFAULT_SETTINGS, toPublicSettings, buildThreadSnapshot, localThreadSum
 import {
   CompositeGmailAdapter,
   findComposeBody,
+  findComposeBodies,
   findNotice,
+  isOpenThreadRoute,
   resolveThreadId,
   findThreadRows,
   normalizeOpenedThread,
@@ -54,7 +56,6 @@ let booted = false;
 let pageReload: PageReloadContext | null = null;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
-const sidebarPanels = new Map<string, HTMLElement>();
 let islandMode: IslandMode | null = null;
 let currentThreadId: string | null = null;
 let currentNormalizedThread: NormalizedThread | null = null;
@@ -260,12 +261,12 @@ async function boot(): Promise<void> {
           void summarizeOpenThread(thread);
         }
       })();
-      if (!sdkReady) showDomThreadPanel(event.thread.threadId);
+      showDomThreadPanel(event.thread.threadId);
     }
     if (event.type === 'COMPOSE_OPENED' && !sdkOwnsCompose) {
       reportTracking(null);
     }
-    if (event.type === 'ROUTE_CHANGED' && !/#\/[A-Za-z0-9]/.test(location.hash)) {
+    if (event.type === 'ROUTE_CHANGED' && !isOpenThreadRoute(location.hash)) {
       currentThreadId = null;
       currentNormalizedThread = null;
       hideDomThreadPanel();
@@ -400,8 +401,21 @@ export function mountSdkUi(
       }
     },
     onThreadView: (threadView) => {
-      void mountSdkSidebar(threadView).catch((error) => {
-        console.warn('[gi] Sidebar mount error', error);
+      const threadIdPromise = resolveThreadId(threadView);
+      void threadIdPromise.then((threadId) => {
+        if (threadId) {
+          currentThreadId = threadId;
+          showDomThreadPanel(threadId);
+        }
+      });
+      threadView.on?.('destroy', () => {
+        void threadIdPromise.then((tid) => {
+          if (tid && currentThreadId === tid) {
+            currentThreadId = null;
+            currentNormalizedThread = null;
+            hideDomThreadPanel();
+          }
+        });
       });
     },
     onMessageView: (messageView) => {
@@ -416,34 +430,6 @@ export function mountSdkUi(
     targetAdapter.setHooks(hooks);
   } else if (targetAdapter.inboxSdk && typeof targetAdapter.inboxSdk.setHooks === 'function') {
     targetAdapter.inboxSdk.setHooks(hooks);
-  }
-}
-
-async function mountSdkSidebar(threadView: {
-  getThreadID?: () => string | null | undefined | Promise<string | null | undefined>;
-  getThreadIDAsync?: () => string | Promise<string | null | undefined>;
-  addSidebarContentPanel?: (desc: unknown) => void;
-}): Promise<void> {
-  const threadId = (await resolveThreadId(threadView)) || '';
-  if (!threadId || !threadView.addSidebarContentPanel) return;
-  const el = document.createElement('div');
-  el.setAttribute('data-gi-ui', 'thread-sidebar');
-  el.setAttribute('data-gi-thread-id', threadId);
-  el.style.padding = '0';
-  el.style.background = 'transparent';
-  try {
-    const iconUrl = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('icons/icon48.png') : '';
-    threadView.addSidebarContentPanel({
-      title: 'Intelligence',
-      iconUrl,
-      el,
-    });
-    sidebarPanels.set(threadId, el);
-    currentThreadId = threadId;
-    await refreshPanel(el, threadId);
-  } catch (error) {
-    console.warn('[gi] Failed to mount SDK sidebar panel, falling back to DOM panel', error);
-    showDomThreadPanel(threadId);
   }
 }
 
@@ -495,14 +481,6 @@ async function refreshThread(threadId: string): Promise<void> {
   }
   const panel = document.getElementById('gi-thread-panel');
   if (panel && currentThreadId === threadId) await refreshPanel(panel, threadId);
-  const sidebar = sidebarPanels.get(threadId);
-  if (sidebar) {
-    if (sidebar.isConnected) {
-      await refreshPanel(sidebar, threadId);
-    } else {
-      sidebarPanels.delete(threadId);
-    }
-  }
 }
 
 async function paintVisibleChips(threadIds: string[]): Promise<void> {
@@ -517,7 +495,6 @@ async function paintVisibleChips(threadIds: string[]): Promise<void> {
 
 async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
   const host = el.id === 'gi-mount' ? ((el.getRootNode() as ShadowRoot).host as HTMLElement) : el;
-  const variant = host.getAttribute('data-gi-ui') === 'thread-sidebar' ? 'sidebar' : 'float';
   const mount = shadowMount(host);
   const intel = await getIntel(threadId);
   let root = panelRoots.get(mount);
@@ -541,7 +518,7 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       pending,
       preview,
       mode: currentIslandMode(),
-      variant,
+      variant: 'float',
       canDraft: true,
       drafting: draftJobs.has(threadId),
       onMode: (mode) => {
@@ -552,14 +529,6 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
           /* ignore */
         }
         void refreshPanel(host, threadId);
-        if (host.id === 'gi-thread-panel') {
-          document.querySelectorAll<HTMLElement>('[data-gi-ui="thread-sidebar"]').forEach((node) => {
-            void refreshPanel(node, threadId);
-          });
-        } else {
-          const floatHost = document.getElementById('gi-thread-panel');
-          if (floatHost) void refreshPanel(floatHost, threadId);
-        }
       },
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
@@ -819,18 +788,18 @@ async function archiveThread(threadId: string) {
   };
 }
 
-async function waitForComposeBody(timeoutMs = 4000): Promise<boolean> {
+async function waitForNewComposeBody(existing: ReadonlySet<HTMLElement>, timeoutMs = 4000): Promise<HTMLElement | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const compose = await adapter.getCurrentCompose();
-    if (compose.compose) return true;
-    if (typeof document !== 'undefined' && findComposeBody(document)) return true;
+    const added = findComposeBodies(document).filter((body) => !existing.has(body));
+    if (added.length === 1) return added[0];
     await wait(100);
   }
-  return false;
+  return null;
 }
 
 async function insertDraft(threadId: string, text: string) {
+  const existingBodies = new Set(findComposeBodies(document));
   const opened = (await adapter.actions.enqueueAndWait({ kind: 'CREATE_REPLY_DRAFT', threadId })) as ActionQueueResult & {
     composeHandle?: ComposeHandle;
   };
@@ -848,13 +817,34 @@ async function insertDraft(threadId: string, text: string) {
     };
   }
 
-  await waitForComposeBody(4000);
-  if (!handle.element && typeof document !== 'undefined') {
+  let body: HTMLElement | null = null;
+  if (handle.view) {
+    const view = handle.view as {
+      getBodyElement?: () => HTMLElement | null;
+      getElement?: () => HTMLElement | null;
+    };
+    body = view.getBodyElement?.() || null;
+    const viewElement = view.getElement?.() || handle.element;
+    if (!body && viewElement) body = findComposeBody(viewElement);
+  }
+  if (!body && handle.element) body = findComposeBody(handle.element);
+  if (!body && typeof document !== 'undefined') {
     const container = adapter.findThreadContainer(document, threadId);
     if (container) {
-      handle.element = findComposeBody(container);
+      body = findComposeBody(container);
     }
   }
+  if (!body) body = await waitForNewComposeBody(existingBodies);
+  if (!body) {
+    return {
+      success: false,
+      verified: false,
+      action: 'CREATE_REPLY_DRAFT',
+      threadId,
+      reason: 'Could not identify the reply editor for this thread',
+    };
+  }
+  handle.element = body;
 
   await adapter.insertComposeBody(text, handle);
   await wait(300);

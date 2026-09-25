@@ -51,10 +51,11 @@ export function extractJsonObject(text: string): unknown {
 export function createPromptBackedProvider(
   name: string,
   complete: PromptComplete,
-  options?: { maxUserChars?: number; summaryStyle?: 'compact' | 'full' },
+  options?: { maxUserChars?: number; summaryStyle?: 'compact' | 'full'; repairInvalidJson?: boolean },
 ): AIProvider {
   const maxUserChars = options?.maxUserChars ?? 12_000;
   const summaryStyle = options?.summaryStyle ?? 'full';
+  const repairInvalidJson = options?.repairInvalidJson ?? true;
 
   async function chatJson<T>(system: string, user: string, schema: z.ZodType<T>): Promise<{
     data: T;
@@ -70,6 +71,7 @@ export function createPromptBackedProvider(
         /* proceed to repair */
       }
       const reason = error instanceof Error ? error.message : 'invalid JSON';
+      if (!repairInvalidJson) throw new Error(`AI returned invalid JSON: ${reason}`);
       const repair = await complete(
         `Fix the JSON so it matches the requested object. Include every required key. Use empty arrays or empty strings when a value is missing. ${JSON_RULE}`,
         clip(`Problem: ${reason}\n\nPrevious output:\n${first.text}`, maxUserChars),
@@ -116,10 +118,10 @@ export function createPromptBackedProvider(
       return { result: data, usage };
     },
     async draftReply(input: DraftInput) {
-      return draft(chatJson, input, 'reply');
+      return draft(chatJson, input, 'reply', summaryStyle);
     },
     async draftFollowUp(input: DraftInput) {
-      return draft(chatJson, input, 'follow_up');
+      return draft(chatJson, input, 'follow_up', summaryStyle);
     },
     async rewriteText(input: RewriteInput) {
       const schema = z.object({ text: z.string() });
@@ -157,19 +159,24 @@ async function draft(
   chatJson: <T>(system: string, user: string, schema: z.ZodType<T>) => Promise<{ data: T; usage?: UsageStats }>,
   input: DraftInput,
   kind: 'reply' | 'follow_up',
+  contextStyle: 'compact' | 'full',
 ): Promise<{ result: DraftSuggestion; usage?: UsageStats }> {
   const instruction =
     kind === 'reply'
       ? `Draft a reply email in the user's voice. Never send. Use placeholders [DATE][TIME][LINK][NAME][ATTACHMENT][AMOUNT] when facts are missing. Mode=${input.mode || 'direct'}.`
       : 'Draft a polite follow-up. Never send. Use placeholders for missing facts.';
+  const messages = input.messages.slice(contextStyle === 'compact' ? -2 : -6);
   const { data, usage } = await chatJson(
     `${instruction} JSON keys: mode, subject, body, placeholders, confidence.`,
     JSON.stringify({
       ...input,
       kind,
-      messages: input.messages.slice(-6).map((message) => ({
+      messages: messages.map((message, index) => ({
         ...message,
-        bodyText: message.bodyText.slice(0, 4000),
+        bodyText: clip(
+          message.bodyText,
+          contextStyle === 'compact' ? (index === messages.length - 1 ? 2400 : 800) : 4000,
+        ),
       })),
     }),
     z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,

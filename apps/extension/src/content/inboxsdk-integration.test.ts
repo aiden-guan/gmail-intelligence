@@ -128,22 +128,26 @@ describe('InboxSDK UI and handler integration', () => {
     // Verify hooks execute on view events
     expect(threadCb).toBeDefined();
     const addSidebarContentPanel = vi.fn();
+    const destroyCbs: (() => void)[] = [];
     const mockThreadView = {
       getThreadID: () => 'thread-reg-1',
       getSubject: () => 'Test Subject',
       getMessageViewsAll: () => [],
       addSidebarContentPanel,
-      on: vi.fn(),
+      on: vi.fn((event, cb) => {
+        if (event === 'destroy') destroyCbs.push(cb);
+      }),
     };
 
     threadCb!(mockThreadView);
     await vi.waitFor(() => {
-      expect(addSidebarContentPanel).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: 'Intelligence',
-          el: expect.any(HTMLElement),
-        }),
-      );
+      expect(addSidebarContentPanel).not.toHaveBeenCalled();
+      expect(document.getElementById('gi-thread-panel')).not.toBeNull();
+    });
+
+    destroyCbs.forEach((cb) => cb());
+    await vi.waitFor(() => {
+      expect(document.getElementById('gi-thread-panel')).toBeNull();
     });
 
     // Row view sets thread id attribute

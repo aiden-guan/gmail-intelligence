@@ -287,7 +287,21 @@ export function findComposeRoot(root: ParentNode = document): HTMLElement | null
 
 export function findComposeBody(root: ParentNode = document): HTMLElement | null {
   const compose = findComposeRoot(root) || root;
-  return queryFirst(compose, SELECTORS.composeBody) as HTMLElement | null;
+  return findComposeBodies(compose)[0] || null;
+}
+
+export function findComposeBodies(root: ParentNode = document): HTMLElement[] {
+  const bodies = SELECTORS.composeBody.flatMap((selector) => safeQueryAll(root, selector));
+  if (typeof Element !== 'undefined' && root instanceof Element && SELECTORS.composeBody.some((selector) => {
+    try {
+      return root.matches(selector);
+    } catch {
+      return false;
+    }
+  })) {
+    bodies.unshift(root);
+  }
+  return [...new Set(bodies)] as HTMLElement[];
 }
 
 export function findSendButton(root: ParentNode = document): HTMLElement | null {

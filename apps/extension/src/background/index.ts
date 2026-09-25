@@ -134,7 +134,7 @@ function getAI() {
     return createPromptBackedProvider(
       'local',
       (system, user) => completeOnDevice(settings.aiModel, system, user),
-      { maxUserChars: 4_000, summaryStyle: 'compact' },
+      { maxUserChars: 4_000, summaryStyle: 'compact', repairInvalidJson: false },
     );
   }
   if (settings.aiProvider === 'chrome') {

@@ -77,7 +77,7 @@ async function generate(modelId: string, system: string, user: string): Promise<
   if (!downloaded.includes(model.id)) throw new Error('Download this model in Settings.');
   const generator = await loadedGenerator(model);
   const output = await generator(chatMessages(model, system, user), {
-    max_new_tokens: system.startsWith('You summarize') ? 160 : system.startsWith('You classify') ? 128 : 256,
+    max_new_tokens: system.startsWith('You summarize') ? 128 : system.startsWith('You classify') ? 96 : 192,
     do_sample: false,
     tokenizer_encode_kwargs: model.id === 'qwen3-0.6b' ? { enable_thinking: false } : undefined,
   });
@@ -92,9 +92,11 @@ async function loadedGenerator(model: LocalModel, onProgress?: (info: ProgressIn
   activeGenerator = null;
   activeModelId = null;
   const gpu = typeof navigator !== 'undefined'
-    ? (navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown | null> } }).gpu
+    ? (navigator as Navigator & {
+        gpu?: { requestAdapter(options?: { powerPreference?: 'low-power' }): Promise<unknown | null> };
+      }).gpu
     : undefined;
-  const adapter = await gpu?.requestAdapter();
+  const adapter = await gpu?.requestAdapter({ powerPreference: 'low-power' });
   if (!adapter) {
     throw new Error('This local model needs WebGPU. Enable WebGPU in Chrome or choose another AI provider.');
   }
@@ -124,6 +126,7 @@ async function configureRuntime(): Promise<void> {
   env.allowRemoteModels = true;
   env.useBrowserCache = true;
   env.useWasmCache = false;
+  if (env.backends.onnx.webgpu) env.backends.onnx.webgpu.powerPreference = 'low-power';
   if (configured) return;
   const wasm = wasmConfig(env.backends.onnx);
   if (wasm) {
