@@ -7,7 +7,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   if (message?.type === 'LOCAL_MODEL_RELEASE') {
-    releaseQwen();
+    void releaseQwen();
     return false;
   }
   if (message?.type === 'ON_DEVICE_DOWNLOAD') {

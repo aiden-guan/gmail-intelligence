@@ -91,6 +91,7 @@ describe('local thread summary', () => {
     });
     expect(summary.oneLine).toMatch(/reopened/i);
     expect(summary.oneLine).toMatch(/switch/i);
+    expect(summary.oneLine).not.toMatch(/week 5/i);
     expect(summary.oneLine).not.toMatch(/previous announcement|-{3,}|no tutoring sections during week 5/i);
     expect(summary.dates).toEqual(['Week 6 starts Sep 28']);
     expect(summary.dates.join(' ')).not.toMatch(/9\/23|Sep 23/);
@@ -123,6 +124,31 @@ describe('local thread summary', () => {
     expect(tightened.oneLine).toMatch(/reopened/i);
     expect(tightened.oneLine).not.toMatch(/-{3,}|no tutoring sections during week 5/i);
     expect(tightened.dates).toEqual(['Week 6 starts Sep 28']);
+  });
+
+  it('rejects a model summary that assigns the old week to the current update', () => {
+    const body = [
+      'The tutoring sections website has been reopened.',
+      'Students can switch tutoring sections. Sections resume Week 6 starting 9/28.',
+      '----------------',
+      'Previous Announcement: There will be no tutoring sections during Week 5.',
+    ].join('\n');
+    const tightened = tightenSummary(
+      {
+        oneLine: 'The tutoring sections website reopened for Week 5, allowing students to switch sections.',
+        keyPoints: ['Sections resume in Week 5.'],
+        decisions: [],
+        unansweredQuestions: [],
+        commitments: [],
+        dates: [],
+        actionItems: [],
+      },
+      { subject: 'Tutoring Sections Update for Week 5', messages: [{ bodyText: body }] },
+    );
+    expect(tightened.oneLine).toMatch(/reopened/i);
+    expect(tightened.oneLine).toMatch(/Week 6/i);
+    expect(tightened.oneLine).not.toMatch(/Week 5/i);
+    expect(tightened.keyPoints.join(' ')).not.toMatch(/Week 5/i);
   });
 
   it('handles newsletters cleanly without teaser slogans, bare month tags, or sponsor questions', () => {
@@ -194,4 +220,3 @@ describe('local thread summary', () => {
     expect(isPastedSummary(tightened.oneLine, [{ bodyText: body }])).toBe(false);
   });
 });
-

@@ -42,6 +42,7 @@ export function ThreadIntelCard(props: {
   mode?: IslandMode;
   variant?: 'float' | 'sidebar';
   canDraft?: boolean;
+  drafting?: boolean;
   onMode?: (mode: IslandMode) => void;
   onDraft: () => void;
   onRemind: () => void;
@@ -50,12 +51,20 @@ export function ThreadIntelCard(props: {
   const [uncontrolled, setUncontrolled] = useState<IslandMode>('open');
   const mode = props.mode ?? uncontrolled;
   const category = categoryLabel(props.intel?.classification?.category);
-  const summary = props.intel?.summary?.summary?.oneLine || props.preview || null;
+  const analyzing = /analyzing/i.test(props.pending || '');
+  const summaryReady =
+    !analyzing &&
+    ((props.intel?.summary?.source === 'model' && props.intel?.summary?.aiStatus === 'success') ||
+      (props.intel?.summary?.source === 'message' && props.intel?.summary?.aiStatus !== 'failed')) &&
+    Boolean(props.intel?.summary?.summary?.oneLine);
+  const summary = summaryReady ? props.intel?.summary?.summary?.oneLine || null : null;
   const needsReply = Boolean(props.intel?.classification?.needsReply || props.intel?.draft?.suggestion?.body);
   const canDraft = props.canDraft ?? needsReply;
-  const brief = props.intel?.summary?.summary;
+  const brief = summaryReady ? props.intel?.summary?.summary : null;
   const points = sanitizeList(brief?.keyPoints || []);
   const dates = sanitizeDateTags(brief?.dates || []);
+  const actions = sanitizeList(brief?.actionItems || []);
+  const modelFailed = !analyzing && (props.intel?.summary?.aiStatus === 'failed' || /failed|could not|too long/i.test(props.pending || ''));
   const line = presentSummary(summary || props.pending || 'No summary yet.');
   const waiting = !summary && Boolean(props.pending);
 
@@ -116,14 +125,13 @@ export function ThreadIntelCard(props: {
             </span>
           ) : null}
         </div>
+        <div className="gi-section-heading">Summary</div>
         <p className={waiting ? 'gi-sum is-wait' : 'gi-sum'}>{line}</p>
-        {props.intel?.summary?.aiStatus === 'failed' && props.onRetrySummary ? (
-          <div className="gi-retry-row" style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '4px 0', fontSize: '11px' }}>
-            <span style={{ color: '#e06c75' }}>Model summary failed</span>
+        {modelFailed && props.onRetrySummary ? (
+          <div className="gi-retry-row">
             <button
               type="button"
               className="gi-action is-ghost"
-              style={{ padding: '2px 6px', fontSize: '11px' }}
               onClick={props.onRetrySummary}
             >
               Retry
@@ -131,20 +139,25 @@ export function ThreadIntelCard(props: {
           </div>
         ) : null}
         {dates.length ? (
-          <div className="gi-dates">
+          <div className="gi-section"><div className="gi-section-heading">Dates</div><div className="gi-dates">
             {dates.map((date) => (
               <span className="gi-date" key={date}>
                 {date}
               </span>
             ))}
-          </div>
+          </div></div>
         ) : null}
         {points.length ? (
-          <ul className="gi-points">
+          <div className="gi-section"><div className="gi-section-heading">Key details</div><ul className="gi-points">
             {points.map((point) => (
               <li key={point}>{point}</li>
             ))}
-          </ul>
+          </ul></div>
+        ) : null}
+        {actions.length ? (
+          <div className="gi-section"><div className="gi-section-heading">To do</div><ul className="gi-points">
+            {actions.map((action) => <li key={action}>{action}</li>)}
+          </ul></div>
         ) : null}
         {props.tracking ? (
           <div className="gi-open">
@@ -159,9 +172,10 @@ export function ThreadIntelCard(props: {
             <button
               type="button"
               className={needsReply ? 'gi-action' : 'gi-action is-ghost'}
+              disabled={props.drafting}
               onClick={props.onDraft}
             >
-              Draft reply
+              {props.drafting ? 'Drafting…' : 'Draft reply'}
             </button>
           ) : null}
           <button
@@ -223,4 +237,3 @@ function sanitizeDateTags(dates: string[]): string[] {
   }
   return deduped;
 }
-

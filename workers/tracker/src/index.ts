@@ -62,8 +62,12 @@ function gifResponse(): Response {
     headers: {
       'Content-Type': 'image/gif',
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'CDN-Cache-Control': 'no-store',
+      'Cloudflare-CDN-Cache-Control': 'no-store',
       Pragma: 'no-cache',
       Expires: '0',
+      ETag: `"${crypto.randomUUID()}"`,
+      'X-Content-Type-Options': 'nosniff',
     },
   });
 }

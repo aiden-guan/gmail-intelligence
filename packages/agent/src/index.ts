@@ -18,6 +18,8 @@ import {
   type HeuristicInput,
 } from './classify.js';
 
+const SUMMARY_VERSION = 'sum7';
+
 export type AgentLoopDeps = {
   db: MailboxDatabase;
   ai: AIProvider | null;
@@ -127,6 +129,7 @@ export class AgentLoop {
             gmailCategoryHint: input.gmailCategoryHint,
             hasListUnsubscribe: input.hasListUnsubscribe,
           }),
+          { timeoutMs: this.deps.settings().aiProvider === 'local' ? 300_000 : 25_000 },
         );
         if (!applyRules(input, rules)) {
           classification = aiResult.result;
@@ -271,7 +274,7 @@ export class AgentLoop {
     if (!input.messages.some((message) => message.bodyText.trim())) {
       return { ok: false, jobId: '', status: 'failed', reason: 'Open the thread so the message can be read.' };
     }
-    const fingerprint = `${input.fingerprint}:sum6`;
+    const fingerprint = `${input.fingerprint}:${SUMMARY_VERSION}`;
     const existing = await this.deps.db.thread_summaries.get(input.threadId);
     const storedLine = existing?.summary.oneLine || '';
     const stalePaste = Boolean(storedLine) && isPastedSummary(storedLine, input.messages);
@@ -346,7 +349,7 @@ export class AgentLoop {
               subject: input.subject,
               messages: input.messages,
             }),
-          { bypassCache: Boolean(input.force) },
+          { bypassCache: Boolean(input.force), timeoutMs: this.deps.settings().aiProvider === 'local' ? 300_000 : 25_000 },
         );
         const summary = tightenSummary(result, input);
         await this.deps.db.thread_summaries.put({
@@ -375,7 +378,7 @@ export class AgentLoop {
         return { ok: true, oneLine: summary.oneLine, source: 'model' as const, aiStatus: 'success' as const };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        const fallback = existing?.summary || localThreadSummary(input);
+        const fallback = localThreadSummary(input);
         await this.deps.db.thread_summaries.put({
           threadId: input.threadId,
           fingerprint,
@@ -468,7 +471,7 @@ export class AgentLoop {
               mode: 'direct',
               kind: 'reply',
             }),
-          { bypassCache: Boolean(input.force) },
+          { bypassCache: Boolean(input.force), timeoutMs: this.deps.settings().aiProvider === 'local' ? 300_000 : 25_000 },
         );
         const placeholders = detectPlaceholders(result.body);
         const suggestion = { ...result, placeholders };
@@ -552,7 +555,7 @@ export class AgentLoop {
         oneLine: launched.oneLine,
       };
     }
-    const fingerprint = `${input.fingerprint}:sum6`;
+    const fingerprint = `${input.fingerprint}:${SUMMARY_VERSION}`;
     const key = `summary:${input.threadId}:${fingerprint}`;
     const job = this.inFlightJobs.get(key);
     if (job) {
@@ -613,7 +616,7 @@ export class AgentLoop {
       })),
     });
     if (launched.status === 'queued') {
-      const fingerprint = `${input.fingerprint}:sum6`;
+      const fingerprint = `${input.fingerprint}:${SUMMARY_VERSION}`;
       const key = `summary:${input.threadId}:${fingerprint}`;
       const job = this.inFlightJobs.get(key);
       if (job) await job.promise;

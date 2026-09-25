@@ -70,6 +70,17 @@ function sameDecision(input: {
 }
 
 describe('open decision order', () => {
+  it('counts native mobile mail clients after send across all tracker implementations', () => {
+    for (const userAgent of ['Gmail/2026.09.24 (iPhone; iOS 18)', 'Outlook-iOS/4.26', 'AppleMail/1.0']) {
+      expect(sameDecision({ eventTs: sent + 30_000, sentAt: sent, userAgent })).toEqual({
+        classification: 'RECIPIENT_LIKELY',
+        countsAsOpen: true,
+        consumeClaim: false,
+        consumeProxySuppression: false,
+      });
+    }
+  });
+
   it('A. counts a GoogleImageProxy request when no sender proxy suppression exists', () => {
     expect(
       sameDecision({

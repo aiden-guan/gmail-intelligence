@@ -41,24 +41,27 @@ Example output:
  * Short instructions for small on-device models. A long prompt crowds out the email
  * and these models copy the message instead of deciding what is current.
  */
-export const LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT = `You summarize one email for the person reading it. Think in "reasoning" first, in two short sentences: what is true now, and what (if anything) they must remember. Then fill the other fields.
+export const LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT = `You summarize an email for the person reading it. Return a short JSON object. Do not include reasoning or analysis.
 
 Rules:
 - The latest update is the truth. Ignore greetings and sign-offs. Text below a dashed line, "Previous announcement", "Earlier announcement", or a quoted reply is old. Do not summarize the old part as if it is still happening.
-- oneLine: 1 or 2 plain sentences in your own words about the current status. No dashed lines, no "Previous announcement", no copied paragraph.
+- oneLine: 1 or 2 plain sentences in your own words about the current status. Say what the email means, not the subject again. No copied paragraph.
 - keyPoints: up to 2 extra facts that are still true. [] if oneLine is enough.
 - dates: only a date the reader should put on a calendar. Write "Due Sep 26" or "Week 6 starts Sep 28", never a bare "9/28". [] if the dates are history or already happened.
 - actionItems: up to 2 things the reader should actually do. [] if none.
-- decisions, unansweredQuestions, commitments: [] unless one is explicit and still open.
+- Do not invent dates, requests, or facts.
 
-Return one JSON object with keys reasoning, oneLine, keyPoints, dates, actionItems, decisions, unansweredQuestions, commitments.`;
+Return one JSON object with keys oneLine, keyPoints, dates, actionItems. Example: {"oneLine":"The instructor shared an optional quiz to help students check their understanding of the assignment.","keyPoints":["Scores are not recorded."],"dates":[],"actionItems":[]}`;
 
 export function formatThreadForSummary(input: {
   subject: string;
   messages: Array<{ sender: string; bodyText: string; timestamp?: string }>;
+  includeOlder?: boolean;
 }): string {
-  const parts: string[] = [`Subject: ${input.subject || '(no subject)'}`];
   const messages = input.messages.filter((m) => m.bodyText.trim().length > 0);
+  const latestCurrent = splitSuperseded(messages.at(-1)?.bodyText || '').current;
+  const subject = input.includeOlder === false ? currentSubject(input.subject, latestCurrent) : input.subject;
+  const parts: string[] = [`Subject: ${subject || '(no subject)'}`];
   if (!messages.length) {
     parts.push('\n[No message body content]');
     return parts.join('\n');
@@ -70,7 +73,7 @@ export function formatThreadForSummary(input: {
     parts.push(`\n--- Message ${idx + 1}${sender}${time} ---`);
     const { current, older } = splitSuperseded(msg.bodyText);
     parts.push(current.trim());
-    if (older) {
+    if (older && input.includeOlder !== false) {
       parts.push(
         '\n[Older notice. This is not the current status unless the latest text above still depends on it.]',
       );
@@ -81,9 +84,18 @@ export function formatThreadForSummary(input: {
   return parts.join('\n');
 }
 
+function currentSubject(subject: string, current: string): string {
+  const currentWeeks = new Set([...current.matchAll(/\bweek\s+(\d+)\b/gi)].map((match) => match[1]));
+  if (!currentWeeks.size) return subject;
+  return subject
+    .replace(/\s+(?:for|in|during|of)\s+week\s+(\d+)\b/gi, (match, week: string) => currentWeeks.has(week) ? match : '')
+    .replace(/\bweek\s+(\d+)\b/gi, (match, week: string) => currentWeeks.has(week) ? match : '')
+    .trim();
+}
+
 export function summaryUserContent(formattedThreadOrJson: string, style: 'compact' | 'full' = 'full'): string {
   if (style === 'compact') {
-    return `Summarize the latest status for the reader. Reason first, then return the JSON brief.\n\n${formattedThreadOrJson}`;
+    return `Summarize the latest status for the reader as JSON.\n\n${formattedThreadOrJson}`;
   }
   return `Analyze and synthesize this email thread. Reason first, then provide the brief in JSON.\n\n${formattedThreadOrJson}`;
 }

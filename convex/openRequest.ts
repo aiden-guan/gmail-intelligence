@@ -75,6 +75,10 @@ export function detectOpenRequestSource(userAgent?: string | null): OpenRequestS
     return "browser_like";
   }
 
+  if (/(?:gmail\/|outlook[-/ ](?:ios|android)|applemail\/|iphone mail\/|android mail\/|samsung email\/|yahoo.?mail\/)/i.test(ua)) {
+    return "browser_like";
+  }
+
   return "unknown";
 }
 

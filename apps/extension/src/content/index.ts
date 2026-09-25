@@ -54,10 +54,13 @@ let booted = false;
 let pageReload: PageReloadContext | null = null;
 let paletteBound = false;
 const panelRoots = new Map<HTMLElement, Root>();
+const sidebarPanels = new Map<string, HTMLElement>();
 let islandMode: IslandMode | null = null;
 let currentThreadId: string | null = null;
+let currentNormalizedThread: NormalizedThread | null = null;
 
 const summaryNotes = new Map<string, { pending: boolean; reason: string | null; preview: string | null }>();
+const draftJobs = new Set<string>();
 const summaryKeys = new Map<string, string>();
 let cachedTrackedEmails: TrackedEmailSummary[] = [];
 const selfViewDeduplicator = new SelfViewDeduplicator();
@@ -245,6 +248,7 @@ async function boot(): Promise<void> {
     if (event.type === 'THREAD_OPENED' || event.type === 'THREAD_DATA_UPDATED') {
       currentThreadId = event.thread.threadId;
       const thread = normalizeOpenedThread(event.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
+      currentNormalizedThread = thread;
       void (async () => {
         const snapshot = await buildThreadSnapshot({
           threadId: thread.threadId,
@@ -263,6 +267,7 @@ async function boot(): Promise<void> {
     }
     if (event.type === 'ROUTE_CHANGED' && !/#\/[A-Za-z0-9]/.test(location.hash)) {
       currentThreadId = null;
+      currentNormalizedThread = null;
       hideDomThreadPanel();
     }
     reportRuntime();
@@ -423,6 +428,7 @@ async function mountSdkSidebar(threadView: {
   if (!threadId || !threadView.addSidebarContentPanel) return;
   const el = document.createElement('div');
   el.setAttribute('data-gi-ui', 'thread-sidebar');
+  el.setAttribute('data-gi-thread-id', threadId);
   el.style.padding = '0';
   el.style.background = 'transparent';
   try {
@@ -432,6 +438,7 @@ async function mountSdkSidebar(threadView: {
       iconUrl,
       el,
     });
+    sidebarPanels.set(threadId, el);
     currentThreadId = threadId;
     await refreshPanel(el, threadId);
   } catch (error) {
@@ -488,9 +495,14 @@ async function refreshThread(threadId: string): Promise<void> {
   }
   const panel = document.getElementById('gi-thread-panel');
   if (panel && currentThreadId === threadId) await refreshPanel(panel, threadId);
-  document.querySelectorAll<HTMLElement>('[data-gi-ui="thread-sidebar"]').forEach((el) => {
-    if (currentThreadId === threadId) void refreshPanel(el, threadId);
-  });
+  const sidebar = sidebarPanels.get(threadId);
+  if (sidebar) {
+    if (sidebar.isConnected) {
+      await refreshPanel(sidebar, threadId);
+    } else {
+      sidebarPanels.delete(threadId);
+    }
+  }
 }
 
 async function paintVisibleChips(threadIds: string[]): Promise<void> {
@@ -521,7 +533,7 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
   const isAnalyzing = Boolean(note?.pending);
   const pending = isAnalyzing
     ? (settings.aiModel ? `Analyzing with ${settings.aiModel}…` : 'Analyzing email…')
-    : (intel?.summary?.aiStatus === 'failed' ? (intel?.summary?.aiError ? `AI summary failed: ${intel.summary.aiError}` : 'AI summary failed.') : (note?.reason || (intel?.classification || hasModelSummary ? null : 'Analyzing thread…')));
+    : (note?.reason || (intel?.summary?.aiStatus === 'failed' ? (intel?.summary?.aiError ? `AI summary failed: ${intel.summary.aiError}` : 'AI summary failed.') : (intel?.classification || hasModelSummary ? null : 'Analyzing thread…')));
   root.render(
     createElement(ThreadIntelCard, {
       intel,
@@ -531,6 +543,7 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       mode: currentIslandMode(),
       variant,
       canDraft: true,
+      drafting: draftJobs.has(threadId),
       onMode: (mode) => {
         islandMode = mode;
         try {
@@ -551,11 +564,19 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
       onRetrySummary: () => {
+        showToast('Retrying summary…');
+        const opened = currentNormalizedThread?.threadId === threadId ? currentNormalizedThread : null;
+        if (opened) {
+          void summarizeOpenThread(opened, true);
+          return;
+        }
         void adapter.getCurrentThread().then((curr) => {
-          if (curr.thread) {
-            const normalized = normalizeOpenedThread(curr.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
-            void summarizeOpenThread(normalized, true);
+          if (!curr.thread) {
+            showToast('Could not read this thread. Reopen it and try again.');
+            return;
           }
+          const normalized = normalizeOpenedThread(curr.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
+          void summarizeOpenThread(normalized, true);
         });
       },
     }),
@@ -572,6 +593,15 @@ function previewLine(thread: NormalizedThread): string | null {
 }
 
 async function summarizeOpenThread(thread: NormalizedThread, force = false): Promise<void> {
+  if (!thread.messages.some((message) => message.bodyText.trim())) {
+    const dom = await adapter.dom.getCurrentThread();
+    if ('thread' in dom && dom.thread) {
+      const visible = normalizeOpenedThread(dom.thread, 'dom');
+      if (visible.messages.some((message) => message.bodyText.trim())) {
+        thread = { ...thread, subject: thread.subject || visible.subject, messages: visible.messages };
+      }
+    }
+  }
   const hasBody = thread.messages.some((message) => message.bodyText.trim().length > 0);
   const preview = previewLine(thread);
   summaryNotes.set(thread.threadId, {
@@ -622,11 +652,20 @@ async function summarizeOpenThread(thread: NormalizedThread, force = false): Pro
         preview: res.oneLine,
       });
       await refreshThread(thread.threadId);
+    } else if (res?.jobId && (res.status === 'queued' || res.status === 'running')) {
+      void waitForSummaryJob(thread.threadId, res.jobId, preview);
     } else if (res && !res.ok) {
       summaryNotes.set(thread.threadId, {
         pending: false,
         reason: res.reason || res.error || null,
         preview: preview || previewLine(thread),
+      });
+      await refreshThread(thread.threadId);
+    } else if (!res) {
+      summaryNotes.set(thread.threadId, {
+        pending: false,
+        reason: 'Could not start the summary. Retry to try again.',
+        preview,
       });
       await refreshThread(thread.threadId);
     }
@@ -635,11 +674,29 @@ async function summarizeOpenThread(thread: NormalizedThread, force = false): Pro
     console.warn('[gi] summarizeOpenThread error', error);
     summaryNotes.set(thread.threadId, {
       pending: false,
-      reason: null,
+      reason: error instanceof Error ? `AI summary failed: ${error.message}` : 'AI summary failed. Retry to try again.',
       preview: preview || previewLine(thread),
     });
     await refreshThread(thread.threadId);
   }
+}
+
+async function waitForSummaryJob(threadId: string, jobId: string, preview: string | null): Promise<void> {
+  const deadline = Date.now() + 310_000;
+  while (Date.now() < deadline) {
+    await wait(1_500);
+    const res = await send<{ job?: { status?: string; error?: string }; oneLine?: string }>({ type: 'GET_AI_JOB_STATUS', jobId });
+    if (res?.job?.status !== 'succeeded' && res?.job?.status !== 'failed') continue;
+    summaryNotes.set(threadId, {
+      pending: false,
+      reason: res.job.status === 'failed' ? res.job.error || 'AI summary failed.' : null,
+      preview: res.job.status === 'succeeded' ? res.oneLine || preview : preview,
+    });
+    await refreshThread(threadId);
+    return;
+  }
+  summaryNotes.set(threadId, { pending: false, reason: 'AI summary took too long. Retry to try again.', preview });
+  await refreshThread(threadId);
 }
 
 function getIntel(threadId: string): Promise<ThreadIntelData | undefined> {
@@ -685,7 +742,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       if (message?.type === 'THREAD_INTELLIGENCE_UPDATED' || message?.type === 'THREAD_SUMMARY_READY' || message?.type === 'THREAD_DRAFT_READY') {
         const tid = String(message.threadId || '');
         const note = summaryNotes.get(tid);
-        if (note?.pending) {
+        if (note?.pending && message.type === 'THREAD_SUMMARY_READY') {
           summaryNotes.set(tid, { ...note, pending: false });
         }
         await refreshThread(tid);
@@ -1071,10 +1128,34 @@ async function runCommand(id: string): Promise<void> {
 }
 
 async function draftReply(threadId: string): Promise<void> {
+  if (draftJobs.has(threadId)) return;
+  draftJobs.add(threadId);
+  try {
+    await refreshThread(threadId);
+    await generateDraftReply(threadId);
+  } catch (error) {
+    showToast(error instanceof Error ? `Could not draft a reply: ${error.message}` : 'Could not draft a reply.');
+  } finally {
+    draftJobs.delete(threadId);
+    void refreshThread(threadId);
+  }
+}
+
+async function generateDraftReply(threadId: string): Promise<void> {
   const modelName = settings.aiModel;
   showToast(modelName ? `Drafting reply with ${modelName}…` : 'Drafting reply…');
   const current = await adapter.getCurrentThread();
-  const thread = current.thread ? normalizeOpenedThread(current.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom') : null;
+  let thread = currentNormalizedThread?.threadId === threadId ? currentNormalizedThread : null;
+  if (!thread && current.thread?.threadId === threadId) {
+    thread = normalizeOpenedThread(current.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
+  }
+  if (!thread?.messages.some((message) => message.bodyText.trim())) {
+    const dom = await adapter.dom.getCurrentThread();
+    if ('thread' in dom && dom.thread?.threadId === threadId) {
+      const visible = normalizeOpenedThread(dom.thread, 'dom');
+      if (visible.messages.some((message) => message.bodyText.trim())) thread = visible;
+    }
+  }
   const messages = thread?.messages.map((m) => ({
     messageId: m.messageId,
     sender: m.sender.email,
@@ -1100,47 +1181,43 @@ async function draftReply(threadId: string): Promise<void> {
 
   let draftBody: string | undefined = res?.body;
 
+  if (!res) {
+    showToast('Could not start a draft. Check the extension connection and try again.');
+    return;
+  }
+
   if (res?.ok && !draftBody && (res.status === 'queued' || res.status === 'running')) {
     const jobId = res.jobId;
-    const start = Date.now();
-    const timeoutMs = 60_000;
-    while (Date.now() - start < timeoutMs) {
-      await wait(400);
+    const deadline = Date.now() + 310_000;
+    while (Date.now() < deadline) {
+      await wait(1_500);
       const checkRes = await send<{
         ok?: boolean;
         job?: { status: string; error?: string };
         body?: string;
       }>({ type: 'GET_AI_JOB_STATUS', jobId });
-      if (checkRes?.job?.status === 'succeeded' && checkRes.body) {
-        draftBody = checkRes.body;
-        break;
+      if (checkRes?.job?.status === 'succeeded') {
+        if (checkRes.body) {
+          draftBody = checkRes.body;
+          break;
+        }
+        const intelRes = await send<{ draft?: { suggestion?: { body?: string } } }>({
+          type: 'GET_THREAD_INTEL',
+          threadId,
+        });
+        if (intelRes?.draft?.suggestion?.body) {
+          draftBody = intelRes.draft.suggestion.body;
+          break;
+        }
       }
       if (checkRes?.job?.status === 'failed') {
         showToast(checkRes.job.error || 'Could not draft a reply.');
         return;
       }
-      const intelRes = await send<{ draft?: { suggestion?: { body?: string } } }>({
-        type: 'GET_THREAD_INTEL',
-        threadId,
-      });
-      if (intelRes?.draft?.suggestion?.body) {
-        draftBody = intelRes.draft.suggestion.body;
-        break;
-      }
     }
   } else if (!res?.ok) {
-    // If REQUEST_DRAFT failed to queue, fallback to synchronous DRAFT_REPLY with operation-specific timeout (60s)
-    const fallbackRes = await send<{ ok?: boolean; body?: string; reason?: string }>({
-      type: 'DRAFT_REPLY',
-      threadId,
-      subject: thread?.subject,
-      messages,
-    }, 60_000);
-    if (!fallbackRes?.ok || !fallbackRes.body) {
-      showToast(fallbackRes?.reason || res?.reason || res?.error || 'Could not draft a reply.');
-      return;
-    }
-    draftBody = fallbackRes.body;
+    showToast(res?.reason || res?.error || 'Could not start a draft. Try again.');
+    return;
   }
 
   if (!draftBody) {

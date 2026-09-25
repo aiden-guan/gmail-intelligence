@@ -177,7 +177,9 @@ export function createMessageSelfViewHandler(opts: {
         state.pendingPageReload &&
         navigationStartedAt != null &&
         Number.isFinite(navigationStartedAt) &&
-        identity === 'pixel' &&
+        // Gmail often replaces the original image URL with a Google proxy URL.
+        // An exact saved message id is also enough to identify our sent message.
+        (identity === 'pixel' || identity === 'message_id') &&
         trackingId
       ) {
         if (!pageReloadReported.has(trackingId)) {

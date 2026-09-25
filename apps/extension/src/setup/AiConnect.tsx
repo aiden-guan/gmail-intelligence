@@ -321,10 +321,10 @@ export function AiConnect({
                     <>
                       <button
                         className={primaryClass}
-                        disabled={active}
-                        onClick={() => onPatch({ aiMode: 'local', aiProvider: 'local', aiModel: model.id })}
+                        disabled={active || Boolean(downloadingId)}
+                        onClick={() => void downloadLocal(model.id)}
                       >
-                        {active ? 'Using this model' : 'Use this model'}
+                        {active ? 'Using this model' : downloading ? 'Checking model…' : 'Use this model'}
                       </button>
                       <button className={quietClass} onClick={() => void removeLocal(model.id)} disabled={Boolean(downloadingId)}>
                         Remove

@@ -63,7 +63,7 @@ describe('reactive intelligence', () => {
         <ThreadIntelCard
           intel={{
             classification: { category: 'RESPOND', needsReply: true },
-            summary: { summary: { oneLine: 'Asked about Thursday.' } },
+            summary: { source: 'model', aiStatus: 'success', summary: { oneLine: 'Asked about Thursday.' } },
             draft: { suggestion: { body: 'Thursday works.' } },
           }}
           onDraft={() => undefined}
@@ -73,6 +73,18 @@ describe('reactive intelligence', () => {
     });
     expect(host.textContent).toContain('Asked about Thursday.');
     expect(host.textContent).toContain('Draft reply');
+    await act(async () => {
+      root.render(
+        <ThreadIntelCard
+          intel={{ classification: { category: 'RESPOND', needsReply: true } }}
+          drafting
+          onDraft={() => undefined}
+          onRemind={() => undefined}
+        />,
+      );
+    });
+    expect(host.textContent).toContain('Drafting…');
+    expect([...host.querySelectorAll('button')].find((button) => button.textContent === 'Drafting…')?.disabled).toBe(true);
     await act(async () => {
       root.render(
         <ThreadIntelCard
@@ -97,7 +109,7 @@ describe('reactive intelligence', () => {
         <ThreadIntelCard
           intel={{
             classification: { category: 'FYI' },
-            summary: { summary: { oneLine: 'A short note to Dylan.' } },
+            summary: { source: 'model', aiStatus: 'success', summary: { oneLine: 'A short note to Dylan.' } },
           }}
           tracking={{
             opened: true,
@@ -122,17 +134,20 @@ describe('reactive intelligence', () => {
           preview="Our weekend sale starts Friday."
           onDraft={() => undefined}
           onRemind={() => undefined}
+          onRetrySummary={() => undefined}
         />,
       );
     });
-    expect(host.textContent).toContain('Our weekend sale starts Friday.');
-    expect(host.textContent).not.toContain('Could not summarize');
+    expect(host.textContent).toContain('Could not summarize');
+    expect(host.textContent).toContain('Retry');
+    expect(host.textContent).not.toContain('Our weekend sale starts Friday.');
     await act(async () => {
       root.render(
         <ThreadIntelCard
           intel={{
             classification: { category: 'PROMOTIONS' },
             summary: {
+              source: 'model', aiStatus: 'success',
               summary: {
                 oneLine: 'ACA invited you to the Berkeley China Summit with TikTok Recruiting.',
                 keyPoints: ['TikTok Recruiting is a partner'],
@@ -154,7 +169,7 @@ describe('reactive intelligence', () => {
     root.unmount();
   });
 
-  it('does not render bottom detail sections (reasoning, decisions, commitments, next steps, open questions)', async () => {
+  it('shows actionable next steps without exposing model reasoning or stale detail sections', async () => {
     const host = document.createElement('div');
     document.body.append(host);
     const root = createRoot(host);
@@ -164,6 +179,7 @@ describe('reactive intelligence', () => {
           intel={{
             classification: { category: 'RESPOND', needsReply: true },
             summary: {
+              source: 'model', aiStatus: 'success',
               summary: {
                 oneLine: 'Onboarding instructions sent.',
                 reasoning: 'The sender is UC Berkeley guiding participants through onboarding.',
@@ -187,7 +203,8 @@ describe('reactive intelligence', () => {
     expect(host.textContent).not.toContain('Commitments');
     expect(host.textContent).not.toContain('Representative must be provided info');
     expect(host.textContent).not.toContain('Next steps');
-    expect(host.textContent).not.toContain('Provide authorized representative with info');
+    expect(host.textContent).toContain('To do');
+    expect(host.textContent).toContain('Provide authorized representative with info');
     expect(host.textContent).not.toContain('Open questions');
     const details = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Details');
     expect(details).toBeFalsy();
@@ -203,7 +220,7 @@ describe('reactive intelligence', () => {
         <ThreadIntelCard
           intel={{
             classification: { category: 'RESPOND', needsReply: true },
-            summary: { summary: { oneLine: 'Asked about Thursday.', keyPoints: ['Thursday is open'] } },
+            summary: { source: 'model', aiStatus: 'success', summary: { oneLine: 'Asked about Thursday.', keyPoints: ['Thursday is open'] } },
             draft: { suggestion: { body: 'Thursday works.' } },
           }}
           onDraft={() => undefined}
@@ -236,6 +253,7 @@ describe('reactive intelligence', () => {
           intel={{
             classification: { category: 'PROMOTIONS' },
             summary: {
+              source: 'model', aiStatus: 'success',
               summary: {
                 oneLine: 'RecWell announced their September programs.',
                 dates: ['September', 'Wednesday', 'September 30'],
@@ -269,6 +287,7 @@ describe('reactive intelligence', () => {
           intel={{
             classification: { category: 'NOTIFICATIONS' },
             summary: {
+              source: 'model', aiStatus: 'success',
               summary: {
                 oneLine:
                   'Data C8: Tutoring Sections Update for Week 5. ---------------- Previous Announcement: There will be no tutoring sections during Week 5.',
@@ -313,7 +332,9 @@ describe('reactive intelligence', () => {
       );
     });
     expect(host.textContent).toContain('Analyzing with gpt-4o-mini…');
-    expect(host.textContent).toContain('A draft question about meeting times.');
+    expect(host.textContent).toContain('Summary');
+    expect(host.textContent).not.toContain('Message preview');
+    expect(host.textContent).not.toContain('A draft question about meeting times.');
     root.unmount();
   });
 });

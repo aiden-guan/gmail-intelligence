@@ -97,9 +97,12 @@ export function createPromptBackedProvider(
       return { result: data, usage };
     },
     async summarizeThread(input: SummarizeInput) {
+      const readable = input.messages.filter((message) => message.bodyText.trim());
+      const selected = summaryStyle === 'compact' ? readable.slice(-1) : readable.slice(-8);
       const formatted = formatThreadForSummary({
         subject: input.subject,
-        messages: input.messages.slice(-8).map((message) => ({
+        includeOlder: summaryStyle !== 'compact',
+        messages: selected.map((message) => ({
           sender: message.sender,
           timestamp: message.timestamp,
           bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),

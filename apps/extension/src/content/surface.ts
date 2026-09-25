@@ -134,8 +134,13 @@ export const SURFACE_CSS = `
   color: #f7f7fb;
 }
 .gi-you { color: #9aa3b8; font-size: 11px; }
+.gi-section { margin-top: 12px; }
+.gi-section-heading { margin-top: 12px; color: #969db0; font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .gi-sum { margin-top: 8px; color: #c9cdd8; font-size: 13px; line-height: 1.5; user-select: text; }
 .gi-sum.is-wait { color: #9aa3b8; }
+.gi-retry-row { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; color: #e8adb2; font-size: 11px; line-height: 1.4; }
+.gi-retry-row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.gi-retry-row .gi-action { padding: 5px 8px; font-size: 11px; }
 .gi-open { margin-top: 12px; }
 .gi-open-label {
   font-size: 10px;
@@ -178,6 +183,7 @@ export const SURFACE_CSS = `
   transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), background 160ms ease;
 }
 .gi-action:active { transform: scale(0.97); }
+.gi-action:disabled { opacity: 0.65; cursor: default; }
 .gi-action.is-ghost {
   background: transparent;
   color: #f4f5f8;

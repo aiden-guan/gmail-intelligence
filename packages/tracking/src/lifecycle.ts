@@ -66,6 +66,11 @@ export function detectOpenRequestSource(userAgent?: string | null): OpenRequestS
     return 'browser_like';
   }
 
+  // Native mobile mail clients may fetch the image without a browser UA.
+  if (/(?:gmail\/|outlook[-/ ](?:ios|android)|applemail\/|iphone mail\/|android mail\/|samsung email\/|yahoo.?mail\/)/i.test(ua)) {
+    return 'browser_like';
+  }
+
   return 'unknown';
 }
 

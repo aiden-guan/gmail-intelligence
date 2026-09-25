@@ -76,7 +76,7 @@ export function localThreadSummary(input: {
   const latestRaw = input.messages.map((message) => message.bodyText).filter((text) => text.trim()).at(-1) || '';
   const { current } = splitSuperseded(latestRaw);
   const body = cleanMessage(current);
-  const subject = input.subject.replace(/\s+/g, ' ').trim();
+  const subject = currentSubject(input.subject.replace(/\s+/g, ' ').trim(), current);
   const sentences = sentencesFrom(body)
     .map(keepSentence)
     .filter((sentence): sentence is string => Boolean(sentence));
@@ -118,12 +118,13 @@ export function tightenSummary(
     !hasModelLine ||
     isBrokenBrief(summary.oneLine) ||
     prefersOlderNotice(summary.oneLine, latestRaw) ||
+    contradictsCurrentWeek(summary.oneLine, current) ||
     isRestatement(summary.oneLine, body);
   const oneLine = oneLineIsPasted ? local.oneLine : clip(cleanBrief(summary.oneLine), 360);
   const said = oneLine.toLowerCase();
 
   const keyPoints = unique(
-    summary.keyPoints.map((item) => clip(item, 200)).filter((item) => keepPoint(item, body, said)),
+    summary.keyPoints.map((item) => clip(item, 200)).filter((item) => keepPoint(item, body, said) && !contradictsCurrentWeek(item, current)),
   ).slice(0, 4);
 
   const finalKeyPoints =
@@ -185,8 +186,7 @@ function extraFacts(body: string, oneLine: string): string[] {
 function composeBrief(subject: string, sentences: string[]): string {
   const fact = pickSentences(sentences).map(stripLabel).filter(Boolean).join(' ');
   const subjectBit = /^\(no subject\)$/i.test(subject) ? '' : clip(subject, 90);
-  const head = subjectBit.slice(0, 18).toLowerCase();
-  if (subjectBit && fact && head && !fact.toLowerCase().includes(head.slice(0, 12))) {
+  if (fact && subjectBit.length <= 70 && !fact.toLowerCase().includes(subjectBit.toLowerCase())) {
     return clip(`${subjectBit}. ${fact}`, 280);
   }
   return clip(fact || subjectBit || 'Empty message', 280);
@@ -206,6 +206,7 @@ function scoreSentence(sentence: string): number {
   if (isSeparator(sentence) || /(?:previous|earlier)\s+announcement/i.test(sentence)) return -5;
   let score = 0;
   if (/\b(update|reopened|available|now|you can)\b/i.test(sentence)) score += 3;
+  if (/\b(attached|quiz|assignment|please|request|confirmed|scheduled|submit|review)\b/i.test(sentence)) score += 3;
   if (/\b(deadline|due\s+(?:by|on|date|\d)|until|through|start(?:ing|s)?|begins)\b/i.test(sentence)) score += 2;
   if (/\bdue\s+to\b/i.test(sentence)) score -= 4;
   if (isFiller(sentence)) score -= 3;
@@ -240,6 +241,16 @@ function prefersOlderNotice(oneLine: string, raw: string): boolean {
   const olderScore = overlapCount(lineWords, contentWords(older));
   const currentScore = overlapCount(lineWords, contentWords(current));
   return olderScore >= 4 && olderScore > currentScore;
+}
+
+function contradictsCurrentWeek(text: string, current: string): boolean {
+  const currentWeeks = new Set([...current.matchAll(/\bweek\s+(\d+)\b/gi)].map((match) => match[1]));
+  return currentWeeks.size > 0 && [...text.matchAll(/\bweek\s+(\d+)\b/gi)].some((match) => !currentWeeks.has(match[1]));
+}
+
+function currentSubject(subject: string, current: string): string {
+  if (!contradictsCurrentWeek(subject, current)) return subject;
+  return subject.replace(/\s+(?:for|in|during|of)\s+week\s+\d+\b/gi, '').replace(/\bweek\s+\d+\b/gi, '').trim();
 }
 
 function contentWords(text: string): string[] {
@@ -497,4 +508,3 @@ function clip(text: string, max: number): string {
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max - 1).trimEnd()}…`;
 }
-

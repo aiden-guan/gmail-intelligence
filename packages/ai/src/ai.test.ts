@@ -138,6 +138,20 @@ describe('draft suggestion coercion', () => {
 });
 
 describe('summary thread formatting and coercion', () => {
+  it('keeps the compact model on the latest update when an older notice is quoted', async () => {
+    const { formatThreadForSummary } = await import('./summary-prompt.js');
+    const formatted = formatThreadForSummary({
+      subject: 'Tutoring Sections Update for Week 5',
+      includeOlder: false,
+      messages: [{
+        sender: 'instructor@example.com',
+        bodyText: 'The website reopened. Sections resume Week 6 on 9/28.\n----------------\nPrevious Announcement: No sections during Week 5.',
+      }],
+    });
+    expect(formatted).toMatch(/Sections resume Week 6/);
+    expect(formatted).not.toMatch(/Week 5|Previous Announcement/);
+  });
+
   it('formats thread cleanly with senders, timestamps, and message blocks', async () => {
     const { formatThreadForSummary } = await import('./summary-prompt.js');
     const formatted = formatThreadForSummary({
@@ -178,4 +192,3 @@ describe('summary thread formatting and coercion', () => {
     expect(coerced.actionItems).toEqual(['Review patch PR']);
   });
 });
-

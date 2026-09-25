@@ -71,6 +71,7 @@ export default defineConfig(({ mode }) => ({
     react(),
     extensionPages(),
     flattenExtensionHtml(),
+    keepSingleOnnxWasm(),
     ...(mode !== 'content'
       ? [
           viteStaticCopy({

@@ -36,9 +36,15 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **`workers/tracker`**: Added `ClaimRow` and claims methods to `TrackerStore`, implemented in `MemoryTrackerStore` and `SupabaseTrackerStore`.
 - **`packages/tracking`**: Added `SelfViewClaim` interface, `SelfViewAck`, protocol versioning constants (`TRACKER_PROTOCOL_VERSION = 3`), and feature requirements.
 - **`packages/shared`**: Updated `RuntimeMessageSchema` to include `source`, `selfViewEventId`, and `retryCount` for `TRACKING_SELF_VIEW`.
-- **`apps/extension/src/settings/SettingsApp.test.tsx`**: Added unit tests covering Email Tracking settings inputs and bundled tracker auto-loading.
+- **`apps/extension/src/local-model/qwen-model.ts`**: Added WebGPU device support, active generator caching across prompts, and validation check during model download.
+- **`apps/extension/src/content/thread-panel.tsx`**: Added structured section headings ("Summary", "Dates", "Key details", "To do"), actionable retry state on summary failure, and drafting state indicator.
+- **`packages/tracking`**, **`workers/tracker`**, **`convex`**: Added native mobile email client UA detection (`Gmail`, `Outlook-iOS/Android`, `AppleMail`, `iPhone Mail`, `Samsung Email`, `Yahoo Mail`).
 
 #### Changed / Refactored
+- **`apps/extension/src/content/index.ts`**: Added DOM message body fallback when adapter thread is empty; added polling with 5-minute timeout for background AI jobs; deduplicated in-flight draft requests per thread; and cleaned up disconnected sidebar elements.
+- **`packages/ai/src/summary-prompt.ts` & `packages/shared/src/local-summary.ts`**: Streamlined compact summary prompt for small on-device models; stripped superseded announcements and conflicting week numbers from summary input.
+- **`packages/agent/src/index.ts`**: Bumped summary fingerprint version to `sum7`; extended local model timeout to 300s in AIJobQueue; provided local fallback summary on model error.
+- **`apps/extension/src/setup/AiConnect.tsx`**: Disabled model download button during download; wired "Use this model" button directly to model downloader if not yet cached.
 - **`apps/extension/src/content/index.ts`**: Refactored `mountSdkUi()` to configure `InboxSdkHooks` on the adapter rather than registering handlers on `sdk` directly; removed `sdk.NavMenu.addNavItem()` block; guarded `chrome.` runtime calls and automatic `boot()`.
 - **`packages/gmail/src/InboxSdkAdapter.ts`**: Bound SDK handlers once per SDK instance using a Symbol state record and WeakMap; dispatched events to the active adapter and invoked raw-view hooks safely.
 - **`apps/extension/message-self-view.ts`**: Captured distinct `loadedAt` on MessageView `load` events, completely removing `expandedAt` reuse.
@@ -49,6 +55,10 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **`packages/agent`**: Added random entropy suffix to `jobId` generation to prevent same-millisecond ID collisions in tests.
 
 #### Fixed
+- **Background Content-Bridge Message Dispatch**: Fixed `REQUEST_SUMMARY`, `REQUEST_DRAFT`, and `GET_AI_JOB_STATUS` being discarded as unknown messages by checking `contentBridgeMessage` alongside Zod validation.
+- **Message Self-View on Gmail Proxy URL**: Recognized saved message ID when Gmail rewrites original pixel URL to `ci3.googleusercontent.com/proxy/*`, preserving `PAGE_RELOAD` self-view suppression.
+- **Pixel CDN Caching**: Added `CDN-Cache-Control: no-store`, `Cloudflare-CDN-Cache-Control: no-store`, dynamic UUID ETag, and `X-Content-Type-Options: nosniff` to tracker gif response.
+- **Extension Bundle Size & Unused Plugin Warning**: Re-enabled `keepSingleOnnxWasm` plugin in `apps/extension/vite.config.ts`, stripping duplicate 27MB WASM from `dist/assets/` and resolving eslint unused-var warning.
 - **InboxSDK Repeated "should not happen" Error**: Removed `sdk.NavMenu.addNavItem` splits from `mountSdkUi()`, preventing crashes on `#inbox` when Gmail's nav container is unavailable.
 - **Duplicate InboxSDK Handler Registrations**: Consolidated handler ownership exclusively into `InboxSdkAdapter`, eliminating duplicate registration of `registerThreadViewHandler`, `registerMessageViewHandler`, `registerComposeViewHandler`, and `registerThreadRowViewHandler`.
 - **Handler Stacking on Reload/Restart**: Tagged SDK instances with active registration state, ensuring handlers are registered strictly once per Gmail page lifecycle.
@@ -59,9 +69,9 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **Supabase Constraint Violations**: Runtime classifications `PROXY_LIKELY` and `MACHINE_LIKELY` are now valid enum values in Postgres.
 
 ### Verification Proof
-- `npm test`: 35 test files passed, 319 tests passed.
+- `npm test`: 35 test files passed, 348 tests passed.
 - `npm run typecheck`: Passed with 0 TypeScript errors across all workspaces and Convex.
-- `npm run lint`: Passed with 0 errors across packages, apps, and workers.
+- `npm run lint`: Passed with 0 errors and 0 warnings across packages, apps, and workers.
 - `npm run build`: Production build verified for all workspaces (`@gi/shared`, `@gi/gmail`, `@gi/mailbox`, `@gi/ai`, `@gi/search`, `@gi/agent`, `@gi/tracking`, `@gi/extension`, `@gi/tracker`).
 
 ---

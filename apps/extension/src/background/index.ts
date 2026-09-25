@@ -794,7 +794,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!agent) rebuildAgent();
 
     const parsed = RuntimeMessageSchema.safeParse(message);
-    if (!parsed.success) {
+    const contentBridgeMessage = message?.type === 'REQUEST_SUMMARY' || message?.type === 'REQUEST_DRAFT' || message?.type === 'GET_AI_JOB_STATUS';
+    if (!parsed.success || contentBridgeMessage) {
       // Allow internal content-script messages
       if (message?.type === 'INGEST_THREAD' || message?.type === 'INGEST_THREADS') {
         const threads = (message.type === 'INGEST_THREADS' ? message.threads : [message.thread]) as IngestThread[];
@@ -1188,7 +1189,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             db.draft_suggestions.where('threadId').equals(threadId).toArray(),
             db.thread_overrides.get(threadId),
           ]);
-          const currentFingerprint = summary?.fingerprint?.replace(/:sum6$/, '') || threadRow?.contentFingerprint;
+          const currentFingerprint = summary?.fingerprint?.replace(/:sum\d+$/, '') || threadRow?.contentFingerprint;
           const matchingDraft = currentFingerprint
             ? drafts.find((d) => d.fingerprint === currentFingerprint) || null
             : drafts.sort((a, b) => b.createdAt - a.createdAt)[0] || null;

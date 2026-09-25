@@ -556,6 +556,29 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     );
   });
 
+  it('emits PAGE_RELOAD when Gmail has proxied away the pixel URL but the saved message id matches', async () => {
+    const navigationStartedAt = 1_758_000_000_000;
+    const onSelfView = vi.fn();
+    const handler = createMessageSelfViewHandler({
+      getEmails: () => [trackedEmailA],
+      getTrackerBaseUrl: () => 'https://track.example',
+      pageReload: { navigationStartedAt },
+      onSelfView,
+    });
+    const mv = createMockMessageView({
+      id: 'abc123',
+      loaded: true,
+      state: 'EXPANDED',
+      threadId: 'thread_X',
+      bodyHtml: '<img src="https://ci3.googleusercontent.com/proxy/cached-image">',
+    });
+    handler.handleMessageView(mv);
+    await vi.waitFor(() =>
+      expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', navigationStartedAt, 'PAGE_RELOAD'),
+    );
+    expect(onSelfView.mock.calls.filter((call) => call[4] === 'PAGE_RELOAD')).toHaveLength(1);
+  });
+
   it('does not emit PAGE_RELOAD for a message expanded after the reload', async () => {
     const onSelfView = vi.fn();
     const handler = createMessageSelfViewHandler({
@@ -603,7 +626,7 @@ describe('InboxSDK MessageView view-state and self-view integration', () => {
     await vi.waitFor(() =>
       expect(onSelfView).toHaveBeenCalledWith('trk_A', 'thread_X', 'abc123', expect.any(Number), 'MESSAGE_EXPANDED'),
     );
-    expect(onSelfView.mock.calls.some((call) => call[4] === 'PAGE_RELOAD')).toBe(false);
+    expect(onSelfView.mock.calls.filter((call) => call[4] === 'PAGE_RELOAD')).toHaveLength(1);
     html = '<img src="https://track.example/open/trk_A">';
     mv.emit('load');
     await vi.waitFor(() =>
