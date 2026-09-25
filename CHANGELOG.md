@@ -30,22 +30,25 @@ Implemented a durable sender self-open suppression architecture based on exact m
 - **`workers/tracker`**: Added `ClaimRow` and claims methods to `TrackerStore`, implemented in `MemoryTrackerStore` and `SupabaseTrackerStore`.
 - **`packages/tracking`**: Added `SelfViewClaim` interface, `SelfViewAck`, protocol versioning constants (`TRACKER_PROTOCOL_VERSION = 3`), and feature requirements.
 - **`packages/shared`**: Updated `RuntimeMessageSchema` to include `source`, `selfViewEventId`, and `retryCount` for `TRACKING_SELF_VIEW`.
+- **`apps/extension/src/settings/SettingsApp.test.tsx`**: Added unit tests covering Email Tracking settings inputs and bundled tracker auto-loading.
 
 #### Changed / Refactored
 - **`apps/extension/message-self-view.ts`**: Captured distinct `loadedAt` on MessageView `load` events, completely removing `expandedAt` reuse.
 - **`apps/extension/self-view-dedupe.ts`**: Upgraded priority rules so `MESSAGE_LOAD` is never deduped against weaker signals.
 - **`apps/extension/background`**: Replaced silent catch with bounded retry loop using `selfViewEventId`; reported diagnostic health status to session storage.
+- **`apps/extension/src/settings/SettingsApp.tsx`**: Surfaced Tracker base URL and Personal API token directly in the Email Tracking section with live connection probing on blur, cleaning up duplicate fields in the Advanced section.
 - **`workers/tracker/index.ts` & `convex/tracking.ts`**: Bypassed legacy timestamp window correlation when claims exist (`!hasClaims(trackingId)`), eliminating false suppression of subsequent recipient opens.
 - **`packages/agent`**: Added random entropy suffix to `jobId` generation to prevent same-millisecond ID collisions in tests.
 
 #### Fixed
+- **Missing Tracker Configuration in Settings**: Restored bundled tracker auto-loading (`tracker-config.json`) in background service worker and SettingsApp when tracker settings are unconfigured, resolving `Connection: Missing configuration`.
 - **Delayed Gmail Pixel Open Regression**: Pixel arriving >8s after expansion now safely matches active or refreshed claim and is classified as `SELF_LIKELY`.
 - **False Suppression of Real Recipient Opens**: Recipient opens arriving >1000ms after claim consumption are no longer swallowed by the legacy 8-second window.
 - **Outdated Tracker Silent Failure**: Extensions now detect when deployed trackers lack self-view claims and flag the tracker as outdated.
 - **Supabase Constraint Violations**: Runtime classifications `PROXY_LIKELY` and `MACHINE_LIKELY` are now valid enum values in Postgres.
 
 ### Verification Proof
-- `npm test`: 29 test files passed, 283 tests passed.
+- `npm test`: 33 test files passed, 304 tests passed.
 - `npm run typecheck`: Passed with 0 TypeScript errors across all workspaces and Convex.
 - `npm run lint`: Passed with 0 errors across packages, apps, and workers.
 - `npm run build`: Production build verified for all workspaces (`@gi/shared`, `@gi/gmail`, `@gi/mailbox`, `@gi/ai`, `@gi/search`, `@gi/agent`, `@gi/tracking`, `@gi/extension`, `@gi/tracker`).

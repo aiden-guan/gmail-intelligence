@@ -86,8 +86,26 @@ const workerTabs = new WorkerTabController({
 async function loadSettings(): Promise<ExtensionSettings> {
   const stored = await chrome.storage.local.get('settings');
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings as Partial<ExtensionSettings> | undefined) };
+  await applyBundledTracker();
   await chrome.storage.local.set({ publicSettings: toPublicSettings(settings) });
   return settings;
+}
+
+async function applyBundledTracker(): Promise<void> {
+  if (settings.trackerBaseUrl?.trim() && settings.personalApiToken?.trim()) return;
+  try {
+    if (typeof chrome === 'undefined' || typeof chrome.runtime?.getURL !== 'function') return;
+    const response = await fetch(chrome.runtime.getURL('tracker-config.json'));
+    if (!response.ok) return;
+    const config = (await response.json()) as { trackerBaseUrl?: string; personalApiToken?: string };
+    if (!config.trackerBaseUrl?.trim() || !config.personalApiToken?.trim()) return;
+    await saveSettings({
+      trackerBaseUrl: config.trackerBaseUrl.replace(/\/$/, ''),
+      personalApiToken: config.personalApiToken,
+    });
+  } catch {
+    /* No machine-local tracker config is bundled. */
+  }
 }
 
 async function saveSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
@@ -1069,8 +1087,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ status: 'disabled', label: 'Disabled' });
           return;
         }
-        const base = typeof message.trackerBaseUrl === 'string' ? message.trackerBaseUrl : settings.trackerBaseUrl;
-        const token = typeof message.personalApiToken === 'string' ? message.personalApiToken : settings.personalApiToken;
+        let base = typeof message.trackerBaseUrl === 'string' ? message.trackerBaseUrl : settings.trackerBaseUrl;
+        let token = typeof message.personalApiToken === 'string' ? message.personalApiToken : settings.personalApiToken;
+        if (!base.trim() || !token.trim()) {
+          await applyBundledTracker();
+          if (settings.trackerBaseUrl.trim() && settings.personalApiToken.trim()) {
+            base = settings.trackerBaseUrl;
+            token = settings.personalApiToken;
+          }
+        }
         sendResponse(await probeTracker(base, token));
         return;
       }

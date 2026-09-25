@@ -31,9 +31,30 @@ export function SettingsApp() {
 
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res?: { settings?: ExtensionSettings }) => {
+    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, async (res?: { settings?: ExtensionSettings }) => {
       if (res?.settings) {
-        const next = { ...DEFAULT_SETTINGS, ...res.settings };
+        let next = { ...DEFAULT_SETTINGS, ...res.settings };
+        if (!next.trackerBaseUrl?.trim() && !next.personalApiToken?.trim() && typeof chrome.runtime?.getURL === 'function') {
+          try {
+            const resp = await fetch(chrome.runtime.getURL('tracker-config.json'));
+            if (resp.ok) {
+              const cfg = (await resp.json()) as { trackerBaseUrl?: string; personalApiToken?: string };
+              if (cfg.trackerBaseUrl?.trim() && cfg.personalApiToken?.trim()) {
+                next = {
+                  ...next,
+                  trackerBaseUrl: cfg.trackerBaseUrl.replace(/\/$/, ''),
+                  personalApiToken: cfg.personalApiToken,
+                };
+                chrome.runtime.sendMessage({
+                  type: 'SAVE_SETTINGS',
+                  settings: { trackerBaseUrl: next.trackerBaseUrl, personalApiToken: next.personalApiToken },
+                });
+              }
+            }
+          } catch {
+            /* No bundled tracker config or fetch failed */
+          }
+        }
         setSettings(next);
         checkTracker(next);
       }
@@ -116,6 +137,25 @@ export function SettingsApp() {
       <Section title="Email tracking">
         <Toggle label="Track opens" checked={settings.trackOpens} onChange={(on) => update('trackOpens', on)} />
         <Toggle label="Track links" checked={settings.trackLinks} onChange={(on) => update('trackLinks', on)} />
+        <Field label="Tracker base URL">
+          <input
+            className="gi-field"
+            value={settings.trackerBaseUrl}
+            placeholder="https://your-tracker.example"
+            onChange={(event) => update('trackerBaseUrl', event.target.value)}
+            onBlur={() => checkTracker(settings)}
+          />
+        </Field>
+        <Field label="Personal API token">
+          <input
+            className="gi-field"
+            type="password"
+            value={settings.personalApiToken}
+            placeholder="Personal API token"
+            onChange={(event) => update('personalApiToken', event.target.value)}
+            onBlur={() => checkTracker(settings)}
+          />
+        </Field>
         <p className="gi-muted text-xs">
           Connection: {trackerHealth ? trackerHealthLabel(trackerHealth) : 'Checking…'}
         </p>
@@ -162,14 +202,8 @@ export function SettingsApp() {
       {advanced ? (
         <Section title="Advanced">
           <p className="gi-muted text-xs">
-            Provider endpoints, tokens, index controls, and diagnostics. For a local tracker, run npm run tracker and paste the URL and token from .local/tracker.txt.
+            Provider endpoints, tokens, index controls, and diagnostics.
           </p>
-          <Field label="Tracker base URL">
-            <input className="gi-field" value={settings.trackerBaseUrl} placeholder="https://your-tracker.example" onChange={(event) => update('trackerBaseUrl', event.target.value)} />
-          </Field>
-          <Field label="Personal API token">
-            <input className="gi-field" type="password" value={settings.personalApiToken} onChange={(event) => update('personalApiToken', event.target.value)} />
-          </Field>
           <Field label="AI endpoint">
             <input className="gi-field" value={settings.aiEndpoint} onChange={(event) => update('aiEndpoint', event.target.value)} />
           </Field>
