@@ -752,4 +752,70 @@ describe('Convex tracking mutations and self-view suppression', () => {
       consumedByEventId: null,
     });
   });
+
+  it('does not count Gmail delivery prefetch, and repairs one that was already stored as an open', async () => {
+    const { ctx } = createMockDb();
+    const gmailPrefetch =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0';
+    const sentAt = new Date(Date.now() - 13_000).toISOString();
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId: 'trk_prefetch',
+      subject: 'Just sent',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: null,
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_prefetch',
+      trackingId: 'trk_prefetch',
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: gmailPrefetch,
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const fresh = await callQuery(tracking.getEmail, ctx, { trackingId: 'trk_prefetch' });
+    expect(fresh.openCount).toBe(0);
+    const freshEvents = await callQuery(tracking.listEvents, ctx, { trackingId: 'trk_prefetch' });
+    expect(freshEvents[0].classification).toBe('MACHINE_LIKELY');
+
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId: 'trk_prefetch_old',
+      subject: 'Already marked',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: null,
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    const stored = await callQuery(tracking.getEmail, ctx, { trackingId: 'trk_prefetch_old' });
+    await ctx.db.patch(stored._id, { openCount: 1, firstOpenedAt: new Date().toISOString(), lastOpenedAt: new Date().toISOString() });
+    await ctx.db.insert('trackingEvents', {
+      eventId: 'evt_old_prefetch',
+      trackingId: 'trk_prefetch_old',
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: gmailPrefetch,
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      classification: 'RECIPIENT_LIKELY',
+      clickId: null,
+      destination: null,
+    });
+    const repaired = await callMutation(tracking.repairDeliveryPrefetchOpens, ctx, {});
+    expect(repaired.repaired).toBeGreaterThanOrEqual(1);
+    const cleared = await callQuery(tracking.getEmail, ctx, { trackingId: 'trk_prefetch_old' });
+    expect(cleared.openCount).toBe(0);
+    expect(cleared.firstOpenedAt).toBeNull();
+  });
 });

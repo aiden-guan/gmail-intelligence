@@ -138,6 +138,37 @@ describe('open decision order', () => {
     });
   });
 
+  it('does not count Gmail delivery prefetch that impersonates an old browser', () => {
+    const gmailPrefetch =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0';
+    expect(
+      sameDecision({
+        eventTs: sent + 13_000,
+        sentAt: sent,
+        userAgent: gmailPrefetch,
+      }),
+    ).toMatchObject({ classification: 'MACHINE_LIKELY', countsAsOpen: false, consumeClaim: false });
+    const mislabeled = [
+      {
+        type: 'OPEN',
+        timestamp: new Date(sent + 13_000).toISOString(),
+        classification: 'RECIPIENT_LIKELY',
+        userAgent: gmailPrefetch,
+        user_agent: gmailPrefetch,
+      },
+    ];
+    expect(deriveTrackingStats(mislabeled).openCount).toBe(0);
+    expect(convexStats(mislabeled).openCount).toBe(0);
+    expect(workerStats(mislabeled).openCount).toBe(0);
+    expect(
+      sameDecision({
+        eventTs: sent + 13_000,
+        sentAt: sent,
+        userAgent: browserUa.replace('Chrome/120.0.0.0', 'Chrome/120.0.0.0 Edg/120.0.0.0'),
+      }).classification,
+    ).toBe('RECIPIENT_LIKELY');
+  });
+
   it('E. scanners and headless clients stay uncounted and do not consume claims', () => {
     expect(
       sameDecision({

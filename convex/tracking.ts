@@ -3,6 +3,7 @@ import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from
 import {
   decideTrackedOpen,
   deriveTrackingStats,
+  detectOpenRequestSource,
   isSelfViewCorrelated,
   normalizeGmailId,
   normalizeUserAgentFamily,
@@ -613,5 +614,45 @@ export const recordClick = internalMutation({
       firstClickedAt: stats.firstClickedAt,
       lastClickedAt: stats.lastClickedAt,
     });
+  },
+});
+
+/** Reclassify Gmail's delivery prefetch that was stored as a recipient open. */
+export const repairDeliveryPrefetchOpens = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const events = await ctx.db.query("trackingEvents").collect();
+    const touched = new Set<string>();
+    for (const evt of events) {
+      if (evt.type !== "OPEN") continue;
+      const source = detectOpenRequestSource(evt.userAgent);
+      if (source !== "scanner" && source !== "headless") continue;
+      if (evt.classification === "MACHINE_LIKELY" && evt.suspectedSelfOpen) continue;
+      await ctx.db.patch(evt._id, {
+        classification: "MACHINE_LIKELY",
+        suspectedSelfOpen: true,
+        confidence: 0.9,
+      });
+      touched.add(evt.trackingId);
+    }
+    for (const trackingId of touched) {
+      const emailRows = await ctx.db
+        .query("trackedEmails")
+        .withIndex("by_trackingId", (q) => q.eq("trackingId", trackingId))
+        .take(1);
+      const email = emailRows[0];
+      if (!email) continue;
+      const allEvents = await getAllEventsForEmail(ctx, trackingId);
+      const stats = deriveTrackingStats(allEvents);
+      await ctx.db.patch(email._id, {
+        openCount: stats.openCount,
+        firstOpenedAt: stats.firstOpenedAt,
+        lastOpenedAt: stats.lastOpenedAt,
+        clickCount: stats.clickCount,
+        firstClickedAt: stats.firstClickedAt,
+        lastClickedAt: stats.lastClickedAt,
+      });
+    }
+    return { repaired: touched.size };
   },
 });

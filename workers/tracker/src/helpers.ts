@@ -53,14 +53,17 @@ export function detectOpenRequestSource(userAgent?: string | null): OpenRequestS
     return 'headless';
   }
 
-  // 3. Security scanners, bots, crawlers, prefetch
+  // 3. Security scanners, bots, crawlers, prefetch.
+  // Gmail's delivery prefetch uses this frozen Chrome 42 + Edge 12 pair and hits the
+  // pixel within seconds of send. It is not a person opening the message.
   if (
     /(scanner|security|barracuda|proofpoint|mimecast|sophos|symantec|trend\s?micro|avast|bitdefender|virustotal|fireeye|paloalto|zscaler)/i.test(
       ua,
     ) ||
     /\b(bot|crawler|spider|slurp|prefetch|preview)\b/i.test(ua) ||
     /(facebookexternalhit|whatsapp|telegrambot|twitterbot|discordbot|googlebot)/i.test(ua) ||
-    /\b(mailproxy|imageproxy)\b/i.test(ua)
+    /\b(mailproxy|imageproxy)\b/i.test(ua) ||
+    (/chrome\/42\.0\.2311\.135/i.test(ua) && /edge\/12\.246/i.test(ua))
   ) {
     return 'scanner';
   }
@@ -514,8 +517,10 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
         detectedSource === 'headless' ||
         detectedSource === 'scanner' ||
         detectedSource === 'unknown';
+      const isDetectedMachine = detectedSource === 'headless' || detectedSource === 'scanner';
       const isCountable =
         !isSelf &&
+        !isDetectedMachine &&
         evt.classification !== 'MACHINE_LIKELY' &&
         evt.classification !== 'UNKNOWN' &&
         (evt.classification === 'RECIPIENT_LIKELY' ||
