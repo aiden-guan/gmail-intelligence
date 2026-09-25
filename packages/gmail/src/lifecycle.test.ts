@@ -341,4 +341,154 @@ describe('adapter lifecycle', () => {
     expect(inboxRes.success).toBe(true);
     expect(visited).toContain('#inbox');
   });
+
+  it('registers each InboxSDK handler exactly once across repeated starts, stops, and restarts', async () => {
+    const counts = {
+      routes: 0,
+      threads: 0,
+      messages: 0,
+      compose: 0,
+      rows: 0,
+    };
+    const mockSdk: InboxSdkLike = {
+      Router: {
+        handleAllRoutes: () => { counts.routes += 1; },
+      },
+      Conversations: {
+        registerThreadViewHandler: () => { counts.threads += 1; },
+        registerMessageViewHandler: () => { counts.messages += 1; },
+      },
+      Compose: {
+        registerComposeViewHandler: () => { counts.compose += 1; },
+      },
+      Lists: {
+        registerThreadRowViewHandler: () => { counts.rows += 1; },
+      },
+    };
+
+    const adapter = new InboxSdkAdapter('app-test');
+    adapter.bindSdk(mockSdk);
+
+    // Initial start
+    await adapter.start(() => undefined);
+    expect(counts.routes).toBe(1);
+    expect(counts.threads).toBe(1);
+    expect(counts.messages).toBe(1);
+    expect(counts.compose).toBe(1);
+    expect(counts.rows).toBe(1);
+
+    // Repeated start without stop
+    await adapter.start(() => undefined);
+    expect(counts.routes).toBe(1);
+    expect(counts.threads).toBe(1);
+    expect(counts.messages).toBe(1);
+    expect(counts.compose).toBe(1);
+    expect(counts.rows).toBe(1);
+
+    // Stop and restart
+    await adapter.stop();
+    await adapter.start(() => undefined);
+    expect(counts.routes).toBe(1);
+    expect(counts.threads).toBe(1);
+    expect(counts.messages).toBe(1);
+    expect(counts.compose).toBe(1);
+    expect(counts.rows).toBe(1);
+
+    // Another adapter binding the same SDK (e.g. extension reload in same page)
+    const secondAdapter = new CompositeGmailAdapter();
+    expect(secondAdapter.bindInboxSdk(mockSdk)).toBe(true);
+    await secondAdapter.start(() => undefined);
+    expect(counts.routes).toBe(1);
+    expect(counts.threads).toBe(1);
+    expect(counts.messages).toBe(1);
+    expect(counts.compose).toBe(1);
+    expect(counts.rows).toBe(1);
+  });
+
+  it('invokes raw-view hooks from single registrations and across restart', async () => {
+    let threadCb: ((tv: unknown) => void) | undefined;
+    let messageCb: ((mv: unknown) => void) | undefined;
+    let composeCb: ((cv: unknown) => void) | undefined;
+    let rowCb: ((rv: unknown) => void) | undefined;
+
+    const mockSdk: InboxSdkLike = {
+      Router: { handleAllRoutes: () => {} },
+      Conversations: {
+        registerThreadViewHandler: (cb) => { threadCb = cb as any; },
+        registerMessageViewHandler: (cb) => { messageCb = cb as any; },
+      },
+      Compose: {
+        registerComposeViewHandler: (cb) => { composeCb = cb as any; },
+      },
+      Lists: {
+        registerThreadRowViewHandler: (cb) => { rowCb = cb as any; },
+      },
+    };
+
+    const hookCalls: string[] = [];
+    const adapter = new InboxSdkAdapter('app-test', {
+      rowDebounceMs: 0,
+      hooks: {
+        onThreadView: () => { hookCalls.push('thread'); },
+        onMessageView: () => { hookCalls.push('message'); },
+        onComposeView: () => { hookCalls.push('compose'); },
+        onThreadRowView: () => { hookCalls.push('row'); },
+      },
+    });
+    adapter.bindSdk(mockSdk);
+
+    const events: MailboxEvent[] = [];
+    await adapter.start((e) => events.push(e));
+
+    expect(threadCb).toBeDefined();
+    expect(messageCb).toBeDefined();
+    expect(composeCb).toBeDefined();
+    expect(rowCb).toBeDefined();
+
+    const mockTv = {
+      getThreadIDAsync: async () => 't-1',
+      getSubject: () => 'Subj 1',
+      getMessageViewsAll: () => [],
+      on: () => {},
+    };
+    const mockMv = {
+      isLoaded: () => true,
+      getMessageIDAsync: async () => 'm-1',
+      getThreadView: () => mockTv,
+      on: () => {},
+    };
+    const mockCv = {
+      getElement: () => document.createElement('div'),
+      getThreadIDAsync: async () => 't-1',
+      on: () => {},
+    };
+    const mockRv = {
+      getThreadIDAsync: async () => 't-1',
+      getSubject: () => 'Row 1',
+    };
+
+    threadCb!(mockTv);
+    messageCb!(mockMv);
+    composeCb!(mockCv);
+    rowCb!(mockRv);
+
+    expect(hookCalls).toContain('thread');
+    expect(hookCalls).toContain('message');
+    expect(hookCalls).toContain('compose');
+    expect(hookCalls).toContain('row');
+
+    // Test restart: update hooks and verify they fire without registering new handlers
+    hookCalls.length = 0;
+    await adapter.stop();
+    adapter.setHooks({
+      onThreadView: () => { hookCalls.push('thread-v2'); },
+      onComposeView: () => { hookCalls.push('compose-v2'); },
+    });
+    await adapter.start(() => undefined);
+
+    threadCb!(mockTv);
+    composeCb!(mockCv);
+
+    expect(hookCalls).toEqual(['thread-v2', 'compose-v2']);
+  });
 });

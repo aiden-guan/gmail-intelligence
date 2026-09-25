@@ -8,13 +8,57 @@ import type {
   ComposeViewState,
   CurrentThreadView,
   GmailAdapter,
+  MailboxEvent,
   MailboxEventHandler,
   VisibleThreadRow,
 } from './types.js';
 
+export type InboxSdkHooks = {
+  onThreadView?: (view: ThreadViewLike) => void | Promise<void>;
+  onMessageView?: (view: MessageViewLike) => void | Promise<void>;
+  onComposeView?: (view: ComposeViewLike) => void | Promise<void>;
+  onThreadRowView?: (view: ThreadRowViewLike) => void | Promise<void>;
+};
+
+export type InboxSdkAdapterOptions = {
+  rowDebounceMs?: number;
+  hooks?: InboxSdkHooks;
+  onThreadView?: (view: ThreadViewLike) => void | Promise<void>;
+  onMessageView?: (view: MessageViewLike) => void | Promise<void>;
+  onComposeView?: (view: ComposeViewLike) => void | Promise<void>;
+  onThreadRowView?: (view: ThreadRowViewLike) => void | Promise<void>;
+};
+
+const SDK_STATE_KEY = Symbol.for('gi.inboxsdk.adapter.state');
+
+type SdkRegistrationState = {
+  registered: boolean;
+  activeAdapter: InboxSdkAdapter | null;
+};
+
+const sdkRegistrationMap = new WeakMap<object, SdkRegistrationState>();
+
+function getSdkRegistrationState(sdk: InboxSdkLike): SdkRegistrationState {
+  const sdkObj = sdk as unknown as object;
+  let state = (sdk as any)[SDK_STATE_KEY] as SdkRegistrationState | undefined;
+  if (!state) {
+    state = sdkRegistrationMap.get(sdkObj);
+  }
+  if (!state) {
+    state = { registered: false, activeAdapter: null };
+    try {
+      (sdk as any)[SDK_STATE_KEY] = state;
+    } catch {
+      /* ignore if sdk is frozen */
+    }
+    sdkRegistrationMap.set(sdkObj, state);
+  }
+  return state;
+}
+
 /**
  * InboxSDK primary adapter.
- * Handlers register once per start. stop() invalidates them so a later start cannot double-fire.
+ * Handlers register once per SDK instance. stop() invalidates them so a later start cannot double-fire.
  */
 export class InboxSdkAdapter implements GmailAdapter {
   readonly name = 'inboxsdk';
@@ -28,11 +72,28 @@ export class InboxSdkAdapter implements GmailAdapter {
   private activeComposeView: unknown = null;
   private composeHandles = new Map<string, ComposeHandle>();
   private currentThread: CurrentThreadView | null = null;
+  private hooks: InboxSdkHooks = {};
 
   constructor(
     private readonly appId: string,
-    private readonly opts: { rowDebounceMs?: number } = {},
-  ) {}
+    private readonly opts: InboxSdkAdapterOptions = {},
+  ) {
+    if (opts.hooks) {
+      this.hooks = { ...opts.hooks };
+    }
+    if (opts.onThreadView) this.hooks.onThreadView = opts.onThreadView;
+    if (opts.onMessageView) this.hooks.onMessageView = opts.onMessageView;
+    if (opts.onComposeView) this.hooks.onComposeView = opts.onComposeView;
+    if (opts.onThreadRowView) this.hooks.onThreadRowView = opts.onThreadRowView;
+  }
+
+  setHooks(hooks: Partial<InboxSdkHooks>): void {
+    this.hooks = { ...this.hooks, ...hooks };
+  }
+
+  getHooks(): InboxSdkHooks {
+    return { ...this.hooks };
+  }
 
   isBound(): boolean {
     return this.sdk != null;
@@ -49,6 +110,8 @@ export class InboxSdkAdapter implements GmailAdapter {
 
   bindSdk(sdk: InboxSdkLike): void {
     this.sdk = sdk;
+    const state = getSdkRegistrationState(sdk);
+    state.activeAdapter = this;
   }
 
   async start(handler: MailboxEventHandler): Promise<void> {
@@ -56,14 +119,13 @@ export class InboxSdkAdapter implements GmailAdapter {
     this.handler = handler;
     this.started = true;
     const generation = ++this.generation;
-    const emit: MailboxEventHandler = (event) => {
-      if (generation !== this.generation || !this.handler) return;
-      this.handler(event);
-    };
 
     if (!this.sdk) {
-      await this.fallback.start(emit);
-      emit({
+      await this.fallback.start((event) => {
+        if (generation !== this.generation || !this.handler || !this.started) return;
+        this.handler(event);
+      });
+      this.emit({
         type: 'CAPABILITY_CHANGED',
         capabilities: await this.detectCapabilities(),
         at: Date.now(),
@@ -72,164 +134,262 @@ export class InboxSdkAdapter implements GmailAdapter {
     }
 
     const sdk = this.sdk;
+    this.ensureSdkRegistered(sdk);
+
+    this.emit({
+      type: 'CAPABILITY_CHANGED',
+      capabilities: await this.detectCapabilities(),
+      at: Date.now(),
+    });
+  }
+
+  private emit(event: MailboxEvent): void {
+    if (!this.started || !this.handler) return;
+    this.handler(event);
+  }
+
+  private ensureSdkRegistered(sdk: InboxSdkLike): void {
+    const state = getSdkRegistrationState(sdk);
+    state.activeAdapter = this;
+
+    if (state.registered) {
+      return;
+    }
+    state.registered = true;
+
     try {
-      sdk.Router.handleAllRoutes((routeView) => {
-        const rawType = (routeView.getRouteType?.() || '').toLowerCase();
-        const mapped = mapRoute(rawType);
-        const isThreadRoute = rawType.includes('thread');
-        if (!isThreadRoute && (mapped !== 'unknown' || rawType.includes('list'))) {
-          this.currentThread = null;
-        }
-        emit({
-          type: 'ROUTE_CHANGED',
-          route: mapped,
-          at: Date.now(),
-        });
+      sdk.Router?.handleAllRoutes((routeView) => {
+        const currentAdapter = getSdkRegistrationState(sdk).activeAdapter;
+        currentAdapter?.handleRouteView(routeView);
       });
     } catch {
       /* degrade */
     }
 
     try {
-      sdk.Conversations.registerThreadViewHandler((threadView) => {
-        let destroyed = false;
-        const threadIdPromise = resolveThreadId(threadView);
-
-        const attachMessageListeners = () => {
-          const mvs = threadView.getMessageViewsAll?.() || threadView.getMessageViews?.() || [];
-          for (const mv of mvs) {
-            mv.on?.('load', () => {
-              if (generation !== this.generation || destroyed) return;
-              void mapThreadView(threadView)
-                .then((thread) => {
-                  if (thread && generation === this.generation && !destroyed) {
-                    this.currentThread = thread;
-                    emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
-                  }
-                })
-                .catch(() => {});
-            });
-          }
-        };
-        attachMessageListeners();
-
-        threadView.on?.('destroy', () => {
-          destroyed = true;
-          if (generation !== this.generation) return;
-          void threadIdPromise.then((tid) => {
-            if (generation === this.generation && tid && this.currentThread?.threadId === tid) {
-              this.currentThread = null;
-            }
-          });
-        });
-
-        void mapThreadView(threadView)
-          .then((thread) => {
-            if (thread && generation === this.generation && !destroyed) {
-              this.currentThread = thread;
-              emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
-            }
-          })
-          .catch((error) => {
-            console.warn('[gi] Failed to map thread view', error);
-          });
+      sdk.Conversations?.registerThreadViewHandler((threadView) => {
+        const currentAdapter = getSdkRegistrationState(sdk).activeAdapter;
+        currentAdapter?.handleThreadView(threadView);
       });
     } catch {
       /* ignore */
     }
 
     try {
-      sdk.Conversations.registerMessageViewHandler?.((messageView) => {
-        if (generation !== this.generation) return;
-        const threadView = messageView.getThreadView?.();
-        if (threadView) {
+      sdk.Conversations?.registerMessageViewHandler?.((messageView) => {
+        const currentAdapter = getSdkRegistrationState(sdk).activeAdapter;
+        currentAdapter?.handleMessageView(messageView);
+      });
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      sdk.Compose?.registerComposeViewHandler((composeView) => {
+        const currentAdapter = getSdkRegistrationState(sdk).activeAdapter;
+        currentAdapter?.handleComposeView(composeView);
+      });
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      sdk.Lists?.registerThreadRowViewHandler((rowView) => {
+        const currentAdapter = getSdkRegistrationState(sdk).activeAdapter;
+        currentAdapter?.handleThreadRowView(rowView);
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private handleRouteView(routeView: { getRouteType?: () => string }): void {
+    if (!this.started) return;
+    const rawType = (routeView.getRouteType?.() || '').toLowerCase();
+    const mapped = mapRoute(rawType);
+    const isThreadRoute = rawType.includes('thread');
+    if (!isThreadRoute && (mapped !== 'unknown' || rawType.includes('list'))) {
+      this.currentThread = null;
+    }
+    this.emit({
+      type: 'ROUTE_CHANGED',
+      route: mapped,
+      at: Date.now(),
+    });
+  }
+
+  private handleThreadView(threadView: ThreadViewLike): void {
+    if (!this.started) return;
+
+    try {
+      const res = this.hooks.onThreadView?.(threadView);
+      if (res && typeof (res as Promise<void>).catch === 'function') {
+        (res as Promise<void>).catch((error) => {
+          console.warn('[gi] onThreadView hook error', error);
+        });
+      }
+    } catch (error) {
+      console.warn('[gi] onThreadView hook error', error);
+    }
+
+    let destroyed = false;
+    const generation = this.generation;
+    const threadIdPromise = resolveThreadId(threadView);
+
+    const attachMessageListeners = () => {
+      const mvs = threadView.getMessageViewsAll?.() || threadView.getMessageViews?.() || [];
+      for (const mv of mvs) {
+        mv.on?.('load', () => {
+          if (generation !== this.generation || destroyed || !this.started) return;
           void mapThreadView(threadView)
             .then((thread) => {
-              if (thread && generation === this.generation) {
-                if (!this.currentThread || this.currentThread.threadId === thread.threadId) {
-                  this.currentThread = thread;
-                  emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
-                }
+              if (thread && generation === this.generation && !destroyed && this.started) {
+                this.currentThread = thread;
+                this.emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
               }
             })
             .catch(() => {});
+        });
+      }
+    };
+    attachMessageListeners();
+
+    threadView.on?.('destroy', () => {
+      destroyed = true;
+      if (generation !== this.generation) return;
+      void threadIdPromise.then((tid) => {
+        if (generation === this.generation && tid && this.currentThread?.threadId === tid) {
+          this.currentThread = null;
         }
       });
-    } catch {
-      /* ignore */
-    }
+    });
+
+    void mapThreadView(threadView)
+      .then((thread) => {
+        if (thread && generation === this.generation && !destroyed && this.started) {
+          this.currentThread = thread;
+          this.emit({ type: 'THREAD_OPENED', thread, at: Date.now() });
+        }
+      })
+      .catch((error) => {
+        console.warn('[gi] Failed to map thread view', error);
+      });
+  }
+
+  private handleMessageView(messageView: MessageViewLike): void {
+    if (!this.started) return;
 
     try {
-      sdk.Compose.registerComposeViewHandler((composeView) => {
-        this.activeComposeView = composeView;
-        const composeId = `compose-${Math.random().toString(36).slice(2, 8)}`;
-        const handle: ComposeHandle = {
-          id: composeId,
-          threadId: undefined,
-          isReply: false,
-          view: composeView,
-          element: composeView.getElement?.() || null,
-        };
-        this.composeHandles.set(composeId, handle);
-
-        composeView.on?.('destroy', () => {
-          this.composeHandles.delete(composeId);
-          if (this.activeComposeView === composeView) {
-            this.activeComposeView = null;
-          }
+      const res = this.hooks.onMessageView?.(messageView);
+      if (res && typeof (res as Promise<void>).catch === 'function') {
+        (res as Promise<void>).catch((error) => {
+          console.warn('[gi] onMessageView hook error', error);
         });
-
-        void resolveThreadId(composeView as ThreadIdView).then((tid) => {
-          if (tid) {
-            handle.threadId = tid;
-            handle.isReply = true;
-          }
-        });
-
-        void mapCompose(composeView)
-          .then((compose) => {
-            if (compose.threadId) {
-              handle.threadId = compose.threadId;
-              handle.isReply = compose.isReply;
-            }
-            if (generation === this.generation) {
-              emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
-            }
-            composeView.on?.('sent', () => {
-              if (generation === this.generation) {
-                emit({ type: 'COMPOSE_SENT', compose, at: Date.now() });
-              }
-            });
-          })
-          .catch((error) => {
-            console.warn('[gi] Failed to map compose view', error);
-          });
-      });
-    } catch {
-      /* ignore */
+      }
+    } catch (error) {
+      console.warn('[gi] onMessageView hook error', error);
     }
+
+    const generation = this.generation;
+    const threadView = messageView.getThreadView?.();
+    if (threadView) {
+      void mapThreadView(threadView)
+        .then((thread) => {
+          if (thread && generation === this.generation && this.started) {
+            if (!this.currentThread || this.currentThread.threadId === thread.threadId) {
+              this.currentThread = thread;
+              this.emit({ type: 'THREAD_DATA_UPDATED', thread, at: Date.now() });
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  private handleComposeView(composeView: ComposeViewLike): void {
+    if (!this.started) return;
 
     try {
-      sdk.Lists.registerThreadRowViewHandler((rowView) => {
-        void mapRow(rowView).then((row) => {
-          if (!row || generation !== this.generation) return;
-          this.pendingRows.set(row.threadId, row);
-          if (this.rowTimer) clearTimeout(this.rowTimer);
-          this.rowTimer = setTimeout(() => {
-            const rows = [...this.pendingRows.values()];
-            this.pendingRows.clear();
-            emit({ type: 'VISIBLE_ROWS_CHANGED', rows, at: Date.now() });
-          }, this.opts.rowDebounceMs ?? 200);
+      const res = this.hooks.onComposeView?.(composeView);
+      if (res && typeof (res as Promise<void>).catch === 'function') {
+        (res as Promise<void>).catch((error) => {
+          console.warn('[gi] onComposeView hook error', error);
         });
-      });
-    } catch {
-      /* ignore */
+      }
+    } catch (error) {
+      console.warn('[gi] onComposeView hook error', error);
     }
 
-    emit({
-      type: 'CAPABILITY_CHANGED',
-      capabilities: await this.detectCapabilities(),
-      at: Date.now(),
+    this.activeComposeView = composeView;
+    const composeId = `compose-${Math.random().toString(36).slice(2, 8)}`;
+    const handle: ComposeHandle = {
+      id: composeId,
+      threadId: undefined,
+      isReply: false,
+      view: composeView,
+      element: composeView.getElement?.() || null,
+    };
+    this.composeHandles.set(composeId, handle);
+
+    composeView.on?.('destroy', () => {
+      this.composeHandles.delete(composeId);
+      if (this.activeComposeView === composeView) {
+        this.activeComposeView = null;
+      }
+    });
+
+    void resolveThreadId(composeView as ThreadIdView).then((tid) => {
+      if (tid) {
+        handle.threadId = tid;
+        handle.isReply = true;
+      }
+    });
+
+    const generation = this.generation;
+    void mapCompose(composeView)
+      .then((compose) => {
+        if (compose.threadId) {
+          handle.threadId = compose.threadId;
+          handle.isReply = compose.isReply;
+        }
+        if (generation === this.generation && this.started) {
+          this.emit({ type: 'COMPOSE_OPENED', compose, at: Date.now() });
+        }
+        composeView.on?.('sent', () => {
+          if (generation === this.generation && this.started) {
+            this.emit({ type: 'COMPOSE_SENT', compose, at: Date.now() });
+          }
+        });
+      })
+      .catch((error) => {
+        console.warn('[gi] Failed to map compose view', error);
+      });
+  }
+
+  private handleThreadRowView(rowView: ThreadRowViewLike): void {
+    if (!this.started) return;
+
+    try {
+      const res = this.hooks.onThreadRowView?.(rowView);
+      if (res && typeof (res as Promise<void>).catch === 'function') {
+        (res as Promise<void>).catch((error) => {
+          console.warn('[gi] onThreadRowView hook error', error);
+        });
+      }
+    } catch (error) {
+      console.warn('[gi] onThreadRowView hook error', error);
+    }
+
+    const generation = this.generation;
+    void mapRow(rowView).then((row) => {
+      if (!row || generation !== this.generation || !this.started) return;
+      this.pendingRows.set(row.threadId, row);
+      if (this.rowTimer) clearTimeout(this.rowTimer);
+      this.rowTimer = setTimeout(() => {
+        const rows = [...this.pendingRows.values()];
+        this.pendingRows.clear();
+        this.emit({ type: 'VISIBLE_ROWS_CHANGED', rows, at: Date.now() });
+      }, this.opts.rowDebounceMs ?? 200);
     });
   }
 
@@ -239,6 +399,8 @@ export class InboxSdkAdapter implements GmailAdapter {
     this.rowTimer = null;
     this.pendingRows.clear();
     this.currentThread = null;
+    this.activeComposeView = null;
+    this.composeHandles.clear();
     this.started = false;
     await this.fallback.stop();
     this.handler = null;
@@ -557,7 +719,7 @@ export type InboxSdkLike = {
   };
 };
 
-type ThreadRowViewLike = ThreadIdView & {
+export type ThreadRowViewLike = ThreadIdView & {
   getSubject?: () => string;
   isSelected?: () => boolean;
   getElement?: () => HTMLElement;
@@ -565,7 +727,7 @@ type ThreadRowViewLike = ThreadIdView & {
   addLabel?: (d: { title: string; foregroundColor?: string; backgroundColor?: string }) => void;
 };
 
-type ThreadViewLike = ThreadIdView & {
+export type ThreadViewLike = ThreadIdView & {
   getSubject?: () => string;
   getMessageViews?: () => MessageViewLike[];
   getMessageViewsAll?: () => MessageViewLike[];
@@ -573,7 +735,7 @@ type ThreadViewLike = ThreadIdView & {
   on?: (event: string, cb: () => void) => void;
 };
 
-type MessageViewLike = MessageIdView & {
+export type MessageViewLike = MessageIdView & {
   isLoaded?: () => boolean;
   getMessageID?: () => string;
   getMessageIDAsync?: () => string | Promise<string>;
@@ -584,7 +746,7 @@ type MessageViewLike = MessageIdView & {
   on?: (event: string, cb: () => void) => void;
 };
 
-type ComposeViewLike = ThreadIdView & {
+export type ComposeViewLike = ThreadIdView & {
   getToRecipients?: () => { emailAddress: string; name?: string }[];
   getCcRecipients?: () => { emailAddress: string; name?: string }[];
   getBccRecipients?: () => { emailAddress: string; name?: string }[];

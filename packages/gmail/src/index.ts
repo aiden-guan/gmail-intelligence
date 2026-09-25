@@ -2,12 +2,25 @@ import type { GmailCapabilities } from '@gi/shared';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { MailboxEventBus } from './events.js';
 import { GmailActionAdapter } from './GmailActionAdapter.js';
-import { InboxSdkAdapter, type InboxSdkLike } from './InboxSdkAdapter.js';
+import {
+  InboxSdkAdapter,
+  type InboxSdkLike,
+  type InboxSdkHooks,
+  type ThreadViewLike,
+  type MessageViewLike,
+  type ComposeViewLike,
+  type ThreadRowViewLike,
+} from './InboxSdkAdapter.js';
 import type { GmailAdapter, MailboxEventHandler, QueuedGmailAction } from './types.js';
 
 export type CompositeGmailOptions = {
   inboxSdkAppId?: string;
   debounceMs?: number;
+  hooks?: InboxSdkHooks;
+  onThreadView?: (view: ThreadViewLike) => void | Promise<void>;
+  onMessageView?: (view: MessageViewLike) => void | Promise<void>;
+  onComposeView?: (view: ComposeViewLike) => void | Promise<void>;
+  onThreadRowView?: (view: ThreadRowViewLike) => void | Promise<void>;
 };
 
 export type ActiveIntegration = 'inboxsdk' | 'dom';
@@ -29,10 +42,24 @@ export class CompositeGmailAdapter implements GmailAdapter {
   private caps: GmailCapabilities | null = null;
 
   constructor(opts: CompositeGmailOptions = {}) {
-    this.inboxSdk = new InboxSdkAdapter(opts.inboxSdkAppId || '');
+    this.inboxSdk = new InboxSdkAdapter(opts.inboxSdkAppId || '', {
+      hooks: opts.hooks,
+      onThreadView: opts.onThreadView,
+      onMessageView: opts.onMessageView,
+      onComposeView: opts.onComposeView,
+      onThreadRowView: opts.onThreadRowView,
+    });
     this.dom = new DomFallbackAdapter({ debounceMs: opts.debounceMs });
     this.primary = this.dom;
     this.actions = new GmailActionAdapter(this);
+  }
+
+  setHooks(hooks: Partial<InboxSdkHooks>): void {
+    this.inboxSdk.setHooks(hooks);
+  }
+
+  getHooks(): InboxSdkHooks {
+    return this.inboxSdk.getHooks();
   }
 
   /**

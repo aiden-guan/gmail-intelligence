@@ -18,6 +18,7 @@ import {
   verifyDraftInserted,
   verifyNavigation,
   type InboxSdkLike,
+  type InboxSdkHooks,
   type QueuedGmailAction,
 } from '@gi/gmail';
 import {
@@ -37,7 +38,7 @@ import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread
 import { showToast } from './toasts';
 import { SelfViewDeduplicator } from './self-view-dedupe';
 
-const adapter = new CompositeGmailAdapter();
+export const adapter = new CompositeGmailAdapter();
 let settings: PublicExtensionSettings = toPublicSettings(DEFAULT_SETTINGS);
 let sdkReady = false;
 let sdkOwnsCompose = false;
@@ -188,6 +189,33 @@ async function boot(): Promise<void> {
   booted = true;
   ensureSurface();
   await refreshSettings();
+
+  const updateCachedEmails = (emails: TrackedEmailSummary[]) => {
+    cachedTrackedEmails = emails;
+    sentStatus?.setEmails(emails);
+    void messageSelfView?.reinspectActive();
+  };
+
+  sentStatus = installSentStatus({
+    trackerBaseUrl: settings.trackerBaseUrl,
+    onNotify: (trackingId, enabled) => {
+      void send<{ emails?: TrackedEmailSummary[] }>({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }).then((res) => {
+        if (Array.isArray(res?.emails)) updateCachedEmails(res.emails);
+      });
+    },
+    onStatus: () => {
+      if (!currentThreadId) return;
+      const panel = document.getElementById('gi-thread-panel');
+      if (panel) void refreshPanel(panel, currentThreadId);
+    },
+    onLink: (trackingId, gmailThreadId) => {
+      linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
+    },
+    onSelfView: (trackingId, gmailThreadId, gmailMessageId, observedAt, source) => {
+      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId, observedAt, source || 'ROW_INTERACTION');
+    },
+  });
+
   const sdk = await tryLoadInboxSdk();
   if (sdk) {
     const bound = adapter.bindInboxSdk(sdk);
@@ -228,49 +256,26 @@ async function boot(): Promise<void> {
     }
     reportRuntime();
   });
-  const updateCachedEmails = (emails: TrackedEmailSummary[]) => {
-    cachedTrackedEmails = emails;
-    sentStatus?.setEmails(emails);
-    void messageSelfView?.reinspectActive();
-  };
-
-  sentStatus = installSentStatus({
-    trackerBaseUrl: settings.trackerBaseUrl,
-    onNotify: (trackingId, enabled) => {
-      void send<{ emails?: TrackedEmailSummary[] }>({ type: 'SET_NO_REPLY_NOTIFY', trackingId, enabled }).then((res) => {
-        if (Array.isArray(res?.emails)) updateCachedEmails(res.emails);
-      });
-    },
-    onStatus: () => {
-      if (!currentThreadId) return;
-      const panel = document.getElementById('gi-thread-panel');
-      if (panel) void refreshPanel(panel, currentThreadId);
-    },
-    onLink: (trackingId, gmailThreadId) => {
-      linkTracked({ trackingId, gmailThreadId, gmailMessageId: null });
-    },
-    onSelfView: (trackingId, gmailThreadId, gmailMessageId, observedAt, source) => {
-      reportTrackingSelfView(trackingId, gmailThreadId, gmailMessageId, observedAt, source || 'ROW_INTERACTION');
-    },
-  });
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local') {
-      if (changes.publicSettings?.newValue && typeof changes.publicSettings.newValue === 'object') {
-        settings = { ...settings, ...(changes.publicSettings.newValue as PublicExtensionSettings) };
-        sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
-      } else if (changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
-        settings = { ...settings, ...toPublicSettings(changes.settings.newValue as ExtensionSettings) };
-        sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+  if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local') {
+        if (changes.publicSettings?.newValue && typeof changes.publicSettings.newValue === 'object') {
+          settings = { ...settings, ...(changes.publicSettings.newValue as PublicExtensionSettings) };
+          sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+        } else if (changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
+          settings = { ...settings, ...toPublicSettings(changes.settings.newValue as ExtensionSettings) };
+          sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+        }
       }
-    }
-    if (area === 'local' && Array.isArray(changes.trackedEmails?.newValue)) {
-      updateCachedEmails(changes.trackedEmails.newValue as TrackedEmailSummary[]);
-    }
-    if (area === 'session' && changes.intelPulse?.newValue?.threadId) {
-      const threadId = String(changes.intelPulse.newValue.threadId);
-      void refreshThread(threadId);
-    }
-  });
+      if (area === 'local' && Array.isArray(changes.trackedEmails?.newValue)) {
+        updateCachedEmails(changes.trackedEmails.newValue as TrackedEmailSummary[]);
+      }
+      if (area === 'session' && changes.intelPulse?.newValue?.threadId) {
+        const threadId = String(changes.intelPulse.newValue.threadId);
+        void refreshThread(threadId);
+      }
+    });
+  }
   void send<{ emails?: TrackedEmailSummary[] }>({ type: 'GET_TRACKED_EMAILS' }).then((res) => {
     if (Array.isArray(res?.emails)) updateCachedEmails(res.emails);
   });
@@ -330,30 +335,8 @@ function reportTracking(session: ComposeTrackingSession | null): void {
   });
 }
 
-function mountSdkUi(sdk: InboxSdkLike): void {
-  try {
-    sdk.Lists.registerThreadRowViewHandler(async (rowView) => {
-      const threadId = await resolveThreadId(rowView);
-      const rowElement = typeof rowView.getElement === 'function' ? rowView.getElement() : null;
-      const threadRow = rowElement?.closest?.('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]') || rowElement;
-      if (threadRow instanceof HTMLElement && typeof threadId === 'string') {
-        threadRow.setAttribute('data-gi-thread-id', threadId);
-        sentStatus?.paint();
-      }
-    });
-  } catch (error) {
-    console.debug('[gi] registerThreadRowViewHandler skipped/failed', error);
-  }
-  try {
-    sdk.Conversations.registerThreadViewHandler((threadView) => {
-      void mountSdkSidebar(threadView).catch((error) => {
-        console.warn('[gi] Sidebar mount error', error);
-      });
-    });
-  } catch (error) {
-    console.debug('[gi] registerThreadViewHandler skipped/failed', error);
-  }
-  try {
+function initMessageSelfView(): MessageSelfViewController {
+  if (!messageSelfView) {
     const pendingReconcile = new Set<string>();
     messageSelfView = createMessageSelfViewHandler({
       getEmails: () => cachedTrackedEmails,
@@ -375,48 +358,47 @@ function mountSdkUi(sdk: InboxSdkLike): void {
         selfViewDeduplicator.clearRecord(trackingId, msgId);
       },
     });
+  }
+  return messageSelfView;
+}
 
-    sdk.Conversations?.registerMessageViewHandler?.((messageView) => {
-      messageSelfView?.handleMessageView(messageView as any);
-    });
-  } catch (error) {
-    console.debug('[gi] registerMessageViewHandler skipped/failed', error);
-  }
-  try {
-    sdk.Compose.registerComposeViewHandler((composeView) => {
-      attachSdkComposeTracking(composeView, trackingDeps());
-    });
-    sdkOwnsCompose = true;
-  } catch (error) {
-    console.debug('[gi] registerComposeViewHandler skipped/failed', error);
-    sdkOwnsCompose = false;
-  }
-  try {
-    const splits: Array<[string, string]> = [
-      ['Priority', 'PRIORITY'],
-      ['Respond', 'RESPOND'],
-      ['Waiting', 'WAITING'],
-      ['FYI', 'FYI'],
-      ['Notifications', 'NOTIFICATIONS'],
-      ['Promotions', 'PROMOTIONS'],
-      ['News', 'NEWS'],
-      ['Follow-ups', 'FOLLOW_UPS'],
-    ];
-    for (const [name, category] of splits) {
-      try {
-        sdk.NavMenu?.addNavItem({
-          name,
-          routeID: `gi/${category.toLowerCase()}`,
-          onClick: () => {
-            void send({ type: 'OPEN_SPLIT', category });
-          },
-        });
-      } catch (error) {
-        console.debug(`[gi] addNavItem skipped for ${name}`, error);
+export function mountSdkUi(
+  _sdk?: InboxSdkLike,
+  targetAdapter: {
+    setHooks?: (hooks: InboxSdkHooks) => void;
+    inboxSdk?: { setHooks: (hooks: InboxSdkHooks) => void };
+  } = adapter,
+): void {
+  initMessageSelfView();
+  sdkOwnsCompose = true;
+
+  const hooks: InboxSdkHooks = {
+    onThreadRowView: async (rowView) => {
+      const threadId = await resolveThreadId(rowView);
+      const rowElement = typeof rowView.getElement === 'function' ? rowView.getElement() : null;
+      const threadRow = rowElement?.closest?.('tr.zA, tr[data-legacy-thread-id], div[role="listitem"]') || rowElement;
+      if (threadRow instanceof HTMLElement && typeof threadId === 'string') {
+        threadRow.setAttribute('data-gi-thread-id', threadId);
+        sentStatus?.paint();
       }
-    }
-  } catch (error) {
-    console.debug('[gi] NavMenu registration skipped/failed', error);
+    },
+    onThreadView: (threadView) => {
+      void mountSdkSidebar(threadView).catch((error) => {
+        console.warn('[gi] Sidebar mount error', error);
+      });
+    },
+    onMessageView: (messageView) => {
+      messageSelfView?.handleMessageView(messageView as any);
+    },
+    onComposeView: (composeView) => {
+      attachSdkComposeTracking(composeView as any, trackingDeps());
+    },
+  };
+
+  if (typeof targetAdapter.setHooks === 'function') {
+    targetAdapter.setHooks(hooks);
+  } else if (targetAdapter.inboxSdk && typeof targetAdapter.inboxSdk.setHooks === 'function') {
+    targetAdapter.inboxSdk.setHooks(hooks);
   }
 }
 
@@ -432,9 +414,10 @@ async function mountSdkSidebar(threadView: {
   el.style.padding = '0';
   el.style.background = 'transparent';
   try {
+    const iconUrl = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('icons/icon48.png') : '';
     threadView.addSidebarContentPanel({
       title: 'Intelligence',
-      iconUrl: chrome.runtime.getURL('icons/icon48.png'),
+      iconUrl,
       el,
     });
     currentThreadId = threadId;
@@ -684,43 +667,45 @@ function linkTracked(link: { trackingId: string; gmailThreadId: string | null; g
   });
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  void (async () => {
-    if (message?.type === 'THREAD_INTELLIGENCE_UPDATED' || message?.type === 'THREAD_SUMMARY_READY' || message?.type === 'THREAD_DRAFT_READY') {
-      const tid = String(message.threadId || '');
-      const note = summaryNotes.get(tid);
-      if (note?.pending) {
-        summaryNotes.set(tid, { ...note, pending: false });
+if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    void (async () => {
+      if (message?.type === 'THREAD_INTELLIGENCE_UPDATED' || message?.type === 'THREAD_SUMMARY_READY' || message?.type === 'THREAD_DRAFT_READY') {
+        const tid = String(message.threadId || '');
+        const note = summaryNotes.get(tid);
+        if (note?.pending) {
+          summaryNotes.set(tid, { ...note, pending: false });
+        }
+        await refreshThread(tid);
+        sendResponse({ ok: true });
+        return;
       }
-      await refreshThread(tid);
-      sendResponse({ ok: true });
-      return;
-    }
-    if (message?.type === 'PERFORM_ACTION') {
-      const action = message.action as QueuedGmailAction;
-      const result = await runAction(action, message.insertText);
-      reportRuntime({
-        success: Boolean(result.success && result.verified !== false),
-        action: action.kind,
-        reason: result.reason || ('error' in result ? result.error : undefined),
-      });
-      sendResponse(result);
-      return;
-    }
-    if (message?.type === 'INDEX_FETCH_BATCH') {
-      sendResponse(await indexBatch(String(message.query || 'in:inbox'), String(message.cursor || '0')));
-      return;
-    }
-    if (message?.type === 'HYDRATE_THREAD') {
-      sendResponse(await hydrateThread(String(message.threadId || ''), message.restore !== false));
-      return;
-    }
-    if (message?.type === 'GET_CAPABILITIES') {
-      sendResponse(await adapter.detectCapabilities());
-    }
-  })();
-  return true;
-});
+      if (message?.type === 'PERFORM_ACTION') {
+        const action = message.action as QueuedGmailAction;
+        const result = await runAction(action, message.insertText);
+        reportRuntime({
+          success: Boolean(result.success && result.verified !== false),
+          action: action.kind,
+          reason: result.reason || ('error' in result ? result.error : undefined),
+        });
+        sendResponse(result);
+        return;
+      }
+      if (message?.type === 'INDEX_FETCH_BATCH') {
+        sendResponse(await indexBatch(String(message.query || 'in:inbox'), String(message.cursor || '0')));
+        return;
+      }
+      if (message?.type === 'HYDRATE_THREAD') {
+        sendResponse(await hydrateThread(String(message.threadId || ''), message.restore !== false));
+        return;
+      }
+      if (message?.type === 'GET_CAPABILITIES') {
+        sendResponse(await adapter.detectCapabilities());
+      }
+    })();
+    return true;
+  });
+}
 
 async function runAction(action: QueuedGmailAction, insertText?: string) {
   if (action.kind === 'ARCHIVE_THREAD') return archiveThread(action.threadId);
@@ -1032,7 +1017,9 @@ async function runCommand(id: string): Promise<void> {
     return;
   }
   if (command === 'settings') {
-    chrome.runtime.openOptionsPage();
+    if (typeof chrome !== 'undefined' && chrome.runtime?.openOptionsPage) {
+      chrome.runtime.openOptionsPage();
+    }
     return;
   }
   const threadId = currentThreadId || (await adapter.getCurrentThread()).thread?.threadId;
@@ -1168,5 +1155,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void boot().catch(() => undefined), { once: true });
-else void boot().catch(() => undefined);
+if (runtimeAlive()) {
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void boot().catch(() => undefined), { once: true });
+  else void boot().catch(() => undefined);
+}
