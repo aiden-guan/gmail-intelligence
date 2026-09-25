@@ -11,7 +11,8 @@ import {
 } from '@gi/shared';
 import { z } from 'zod';
 import { EMAIL_SUMMARY_SYSTEM_PROMPT, formatThreadForSummary, summaryUserContent } from './summary-prompt.js';
-import { coerceThreadSummary } from './prompt-provider.js';
+import { coerceDraftSuggestion, coerceThreadSummary } from './prompt-provider.js';
+import { draftQualityIssue, draftSystemPrompt, formatDraftContext } from './draft-prompt.js';
 
 export type ClassifyInput = {
   subject: string;
@@ -181,10 +182,12 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
 
   async draftReply(input: DraftInput): Promise<{ result: DraftSuggestion; usage?: UsageStats }> {
     const { data, usage } = await this.chatJson(
-      `Draft a reply email in the user's voice. Never send. Use placeholders [DATE][TIME][LINK][NAME][ATTACHMENT][AMOUNT] when facts are missing. Mode=${input.mode || 'direct'}. Return JSON.`,
-      JSON.stringify({ ...input, kind: 'reply' }),
-      DraftSuggestionSchema,
+      draftSystemPrompt(input, 'reply'),
+      formatDraftContext(input, 'reply', 'full', 24_000),
+      z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
     );
+    const qualityIssue = draftQualityIssue(input.messages, data.body);
+    if (qualityIssue) throw new Error(qualityIssue);
     return {
       result: {
         mode: data.mode ?? 'direct',
@@ -199,10 +202,12 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
 
   async draftFollowUp(input: DraftInput): Promise<{ result: DraftSuggestion; usage?: UsageStats }> {
     const { data, usage } = await this.chatJson(
-      'Draft a polite follow-up. Never send. Use placeholders for missing facts. Return JSON.',
-      JSON.stringify({ ...input, kind: 'follow_up' }),
-      DraftSuggestionSchema,
+      draftSystemPrompt(input, 'follow_up'),
+      formatDraftContext(input, 'follow_up', 'full', 24_000),
+      z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
     );
+    const qualityIssue = draftQualityIssue(input.messages, data.body);
+    if (qualityIssue) throw new Error(qualityIssue);
     return {
       result: {
         mode: data.mode ?? 'direct',
@@ -574,3 +579,4 @@ export {
 export type { LocalModel } from './local-models.js';
 export { createPromptBackedProvider, extractJsonObject } from './prompt-provider.js';
 export type { PromptComplete } from './prompt-provider.js';
+export { draftQualityIssue } from './draft-prompt.js';

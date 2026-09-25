@@ -22,6 +22,7 @@ import {
   formatThreadForSummary,
   summaryUserContent,
 } from './summary-prompt.js';
+import { draftQualityIssue, draftSystemPrompt, formatDraftContext } from './draft-prompt.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -118,10 +119,10 @@ export function createPromptBackedProvider(
       return { result: data, usage };
     },
     async draftReply(input: DraftInput) {
-      return draft(chatJson, input, 'reply', summaryStyle);
+      return draft(chatJson, input, 'reply', summaryStyle, maxUserChars);
     },
     async draftFollowUp(input: DraftInput) {
-      return draft(chatJson, input, 'follow_up', summaryStyle);
+      return draft(chatJson, input, 'follow_up', summaryStyle, maxUserChars);
     },
     async rewriteText(input: RewriteInput) {
       const schema = z.object({ text: z.string() });
@@ -160,27 +161,15 @@ async function draft(
   input: DraftInput,
   kind: 'reply' | 'follow_up',
   contextStyle: 'compact' | 'full',
+  maxUserChars: number,
 ): Promise<{ result: DraftSuggestion; usage?: UsageStats }> {
-  const instruction =
-    kind === 'reply'
-      ? `Draft a reply email in the user's voice. Never send. Use placeholders [DATE][TIME][LINK][NAME][ATTACHMENT][AMOUNT] when facts are missing. Mode=${input.mode || 'direct'}.`
-      : 'Draft a polite follow-up. Never send. Use placeholders for missing facts.';
-  const messages = input.messages.slice(contextStyle === 'compact' ? -2 : -6);
   const { data, usage } = await chatJson(
-    `${instruction} JSON keys: mode, subject, body, placeholders, confidence.`,
-    JSON.stringify({
-      ...input,
-      kind,
-      messages: messages.map((message, index) => ({
-        ...message,
-        bodyText: clip(
-          message.bodyText,
-          contextStyle === 'compact' ? (index === messages.length - 1 ? 2400 : 800) : 4000,
-        ),
-      })),
-    }),
+    draftSystemPrompt(input, kind, contextStyle === 'compact'),
+    formatDraftContext(input, kind, contextStyle, maxUserChars),
     z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
   );
+  const qualityIssue = draftQualityIssue(input.messages, data.body);
+  if (qualityIssue) throw new Error(qualityIssue);
   return {
     result: {
       mode: data.mode ?? 'direct',
@@ -195,7 +184,9 @@ async function draft(
 
 export function coerceDraftSuggestion(value: unknown): unknown {
   if (typeof value === 'string') {
-    const cleaned = stripMarkdownPreamble(value.trim());
+    const nested = parseDraftEnvelope(value);
+    if (nested) return coerceDraftSuggestion(nested);
+    const cleaned = cleanDraftBody(value);
     return {
       mode: 'direct',
       body: cleaned,
@@ -216,13 +207,49 @@ export function coerceDraftSuggestion(value: unknown): unknown {
     'suggestion',
   ]);
   if (!body) return value;
+  const nested = parseDraftEnvelope(body);
   return {
     mode: firstString(record, ['mode']) || 'direct',
     subject: firstString(record, ['subject']) || undefined,
-    body: stripMarkdownPreamble(body.trim()),
+    body: nested
+      ? cleanDraftBody(firstString(nested, ['body', 'reply', 'text', 'draft', 'message', 'content', 'response', 'email']) || '')
+      : cleanDraftBody(body),
     placeholders: Array.isArray(record.placeholders) ? record.placeholders : [],
     confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
   };
+}
+
+function parseDraftEnvelope(text: string): Record<string, unknown> | null {
+  const trimmed = stripMarkdownPreamble(text.trim());
+  const candidates = [trimmed, trimmed.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"')];
+  for (const candidate of candidates) {
+    try {
+      const parsed = extractJsonObject(candidate);
+      const record = asRecord(parsed);
+      if (
+        record &&
+        typeof record.body === 'string' &&
+        (typeof record.mode === 'string' || typeof record.subject === 'string' || Array.isArray(record.placeholders))
+      ) {
+        return record;
+      }
+    } catch {
+      /* This is ordinary draft text, not a nested payload. */
+    }
+  }
+  return null;
+}
+
+function cleanDraftBody(text: string): string {
+  let body = stripMarkdownPreamble(text.trim());
+  for (let depth = 0; depth < 3; depth += 1) {
+    const nested = parseDraftEnvelope(body);
+    if (!nested) break;
+    const nestedBody = firstString(nested, ['body', 'reply', 'text', 'draft', 'message', 'content', 'response', 'email']);
+    if (!nestedBody || nestedBody === body) break;
+    body = stripMarkdownPreamble(nestedBody.trim());
+  }
+  return body;
 }
 
 function stripMarkdownPreamble(text: string): string {

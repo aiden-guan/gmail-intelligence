@@ -1,4 +1,5 @@
 import type { AIProvider, AIJobQueue } from '@gi/ai';
+import { draftQualityIssue } from '@gi/ai';
 import type { MailboxDatabase } from '@gi/mailbox';
 import {
   AgentSafetyTier,
@@ -432,9 +433,13 @@ export class AgentLoop {
 
     const drafts = await this.deps.db.draft_suggestions.where('threadId').equals(input.threadId).toArray();
     const existing = drafts.find((d) => d.fingerprint === input.fingerprint);
-    if (!input.force && existing?.suggestion?.body) {
+    const existingQualityIssue = existing?.suggestion?.body
+      ? draftQualityIssue(input.messages, existing.suggestion.body)
+      : null;
+    if (!input.force && existing?.suggestion?.body && !existingQualityIssue) {
       return { ok: true, jobId: 'completed', status: 'succeeded', body: existing.suggestion.body };
     }
+    if (existingQualityIssue && existing) await this.deps.db.draft_suggestions.delete(existing.id);
 
     const key = `draft:${input.threadId}:${input.fingerprint}`;
     const inFlight = this.inFlightJobs.get(key);
@@ -471,8 +476,10 @@ export class AgentLoop {
               mode: 'direct',
               kind: 'reply',
             }),
-          { bypassCache: Boolean(input.force), timeoutMs: this.deps.settings().aiProvider === 'local' ? 300_000 : 25_000 },
+          { bypassCache: Boolean(input.force || existingQualityIssue), timeoutMs: this.deps.settings().aiProvider === 'local' ? 300_000 : 25_000 },
         );
+        const qualityIssue = draftQualityIssue(input.messages, result.body);
+        if (qualityIssue) throw new Error(qualityIssue);
         const placeholders = detectPlaceholders(result.body);
         const suggestion = { ...result, placeholders };
         const id = `draft_${input.threadId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
