@@ -11,6 +11,7 @@ import {
   classifyOpenEvent,
   describeTrackingStatus,
   inspectTrackedMime,
+  isNotifiableTrackingEvent,
   isLoopbackTracker,
   matchTrackedEmail,
   normalizeGmailId,
@@ -359,10 +360,19 @@ describe('outgoing html', () => {
     expect(classifyOpenEvent({ eventTs: sv + 8000, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('SELF_LIKELY');
     expect(classifyOpenEvent({ eventTs: sv + 8001, sentAt: sent, userAgent: browserUa, selfViewTs: sv }).classification).toBe('RECIPIENT_LIKELY');
 
-    // Google image proxy fetch, including one that overlaps a sender claim or self-view
+    // Google image proxy counts unless sender proxy suppression is active.
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).classification).toBe('PROXY_LIKELY');
-    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).countsAsOpen).toBe(false);
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa }).countsAsOpen).toBe(true);
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa, selfViewTs: sent + 1000, hasActiveSenderClaim: true }).classification).toBe('PROXY_LIKELY');
+    expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: proxyUa, selfViewTs: sent + 1000, hasActiveSenderClaim: true }).countsAsOpen).toBe(true);
+    expect(
+      classifyOpenEvent({
+        eventTs: sent + 1000,
+        sentAt: sent,
+        userAgent: proxyUa,
+        hasActiveSenderProxySuppression: true,
+      }).classification,
+    ).toBe('SELF_LIKELY');
 
     // Security scanner fetch
     expect(classifyOpenEvent({ eventTs: sent + 1000, sentAt: sent, userAgent: scannerUa }).classification).toBe('MACHINE_LIKELY');
@@ -450,33 +460,22 @@ describe('outgoing html', () => {
     expect(inspectTrackedMime('Hello there').pixelFound).toBe(false);
   });
 
-  it('filters out SELF_VIEW and SELF_LIKELY events from triggering desktop notifications', () => {
+  it('notifies for recipient browser opens and Gmail proxy opens, and skips self, machine, and unknown', () => {
+    const browser = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
     const events = [
-      { id: 'ev_1', type: 'OPEN', classification: 'NORMAL', suspected_self_open: false, tracking_id: 'trk_1' },
-      { id: 'ev_2', type: 'SELF_VIEW', classification: 'SELF_CONFIRMED', suspected_self_open: true, tracking_id: 'trk_1' },
-      { id: 'ev_3', type: 'OPEN', classification: 'SELF_LIKELY', suspected_self_open: true, tracking_id: 'trk_1' },
-      { id: 'ev_4', type: 'CLICK', classification: 'NORMAL', suspected_self_open: false, tracking_id: 'trk_1' },
+      { id: 'ev_browser', type: 'OPEN', classification: 'RECIPIENT_LIKELY', user_agent: browser },
+      { id: 'ev_proxy', type: 'OPEN', classification: 'PROXY_LIKELY', user_agent: 'GoogleImageProxy' },
+      { id: 'ev_proxy_browser_ua', type: 'OPEN', classification: 'PROXY_LIKELY', user_agent: browser },
+      { id: 'ev_self', type: 'OPEN', classification: 'SELF_LIKELY', suspected_self_open: true, user_agent: browser },
+      { id: 'ev_machine', type: 'OPEN', classification: 'MACHINE_LIKELY', user_agent: 'Barracuda Sentinel Scanner' },
+      { id: 'ev_unknown', type: 'OPEN', classification: 'UNKNOWN', user_agent: 'curl/8.0' },
+      { id: 'ev_view', type: 'SELF_VIEW', classification: 'SELF_LIKELY', user_agent: browser },
+      { id: 'ev_click', type: 'CLICK', classification: 'RECIPIENT_LIKELY', user_agent: browser },
     ];
-
-    const notified: Array<{ id: string; type: string; title: string }> = [];
-    const notifiedEventIds = new Set<string>();
-
-    for (const ev of events) {
-      if (ev.type === 'SELF_VIEW' || ev.classification === 'SELF_LIKELY') continue;
-      if (notifiedEventIds.has(ev.id)) continue;
-      notifiedEventIds.add(ev.id);
-      notified.push({
-        id: ev.id,
-        type: ev.type,
-        title: ev.type === 'OPEN' ? 'Open detected' : 'Link click detected',
-      });
-    }
-
-    expect(notified).toEqual([
-      { id: 'ev_1', type: 'OPEN', title: 'Open detected' },
-      { id: 'ev_4', type: 'CLICK', title: 'Link click detected' },
+    expect(events.filter((event) => isNotifiableTrackingEvent(event)).map((event) => event.id)).toEqual([
+      'ev_browser',
+      'ev_proxy',
+      'ev_click',
     ]);
-    expect(notified.find((n) => n.id === 'ev_2')).toBeUndefined();
-    expect(notified.find((n) => n.id === 'ev_3')).toBeUndefined();
   });
 });

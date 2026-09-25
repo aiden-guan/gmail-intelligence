@@ -69,6 +69,8 @@ export type ClaimRow = {
   consumed_at?: string | null;
   consumed_ua?: string | null;
   consumed_ip_hash?: string | null;
+  proxy_consumed_by_event_id?: string | null;
+  proxy_consumed_at?: string | null;
   created_at: string;
 };
 
@@ -95,6 +97,8 @@ export interface TrackerStore {
     ua?: string | null,
     ipHash?: string | null,
   ): Promise<boolean>;
+  consumeProxySuppression(claimId: string, eventId: string, consumedAt?: string): Promise<boolean>;
+  listClaims(trackingId: string): Promise<ClaimRow[]>;
   getRecentConsumedClaim(
     trackingId: string,
     nowMs?: number,
@@ -116,6 +120,12 @@ let memory: MemoryState | null = null;
 
 export function resetMemoryStore(): void {
   memory = null;
+}
+
+export function readMemoryClaims(trackingId?: string): ClaimRow[] {
+  const claims = [...(memory?.claims.values() ?? [])];
+  const rows = trackingId ? claims.filter((claim) => claim.tracking_id === trackingId) : claims;
+  return rows.map((claim) => ({ ...claim }));
 }
 
 function memoryState(): MemoryState {
@@ -234,6 +244,21 @@ function memoryStore(): TrackerStore {
         consumed_ip_hash: ipHash ?? null,
       });
       return true;
+    },
+    async consumeProxySuppression(claimId, eventId, consumedAt) {
+      const cur = state.claims.get(claimId);
+      if (!cur || cur.proxy_consumed_by_event_id) return false;
+      state.claims.set(claimId, {
+        ...cur,
+        proxy_consumed_by_event_id: eventId,
+        proxy_consumed_at: consumedAt || new Date().toISOString(),
+      });
+      return true;
+    },
+    async listClaims(trackingId) {
+      return [...state.claims.values()]
+        .filter((claim) => claim.tracking_id === trackingId)
+        .map((claim) => ({ ...claim }));
     },
     async getRecentConsumedClaim(trackingId, nowMs = Date.now(), graceMs = 1000, ua, ipHash) {
       const consumed = [...state.claims.values()].filter((c) => {
@@ -378,6 +403,27 @@ function supabaseStore(url: string, serviceRoleKey: string): TrackerStore {
         .select();
       if (error) throw new StoreError(error.message);
       return Boolean(data && data.length > 0);
+    },
+    async consumeProxySuppression(claimId, eventId, consumedAt) {
+      const { data, error } = await supabase
+        .from('tracking_self_view_claims')
+        .update({
+          proxy_consumed_by_event_id: eventId,
+          proxy_consumed_at: consumedAt || new Date().toISOString(),
+        })
+        .eq('id', claimId)
+        .is('proxy_consumed_by_event_id', null)
+        .select();
+      if (error) throw new StoreError(error.message);
+      return Boolean(data && data.length > 0);
+    },
+    async listClaims(trackingId) {
+      const { data, error } = await supabase
+        .from('tracking_self_view_claims')
+        .select('*')
+        .eq('tracking_id', trackingId);
+      if (error) throw new StoreError(error.message);
+      return (data as ClaimRow[] | null) ?? [];
     },
     async getRecentConsumedClaim(trackingId, nowMs = Date.now(), graceMs = 1000, ua, ipHash) {
       const minConsumed = new Date(nowMs - graceMs).toISOString();

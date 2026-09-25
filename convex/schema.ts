@@ -69,6 +69,8 @@ export default defineSchema({
     consumedAt: v.optional(v.union(v.string(), v.null())),
     consumedUa: v.optional(v.union(v.string(), v.null())),
     consumedIpHash: v.optional(v.union(v.string(), v.null())),
+    proxyConsumedByEventId: v.optional(v.union(v.string(), v.null())),
+    proxyConsumedAt: v.optional(v.union(v.string(), v.null())),
     createdAt: v.string(),
   })
     .index("by_trackingId", ["trackingId"])

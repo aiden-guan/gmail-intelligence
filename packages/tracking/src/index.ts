@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { detectOpenRequestSource, normalizeGmailId } from './lifecycle.js';
+import { isCountableOpenEvent, normalizeGmailId } from './lifecycle.js';
 
 /**
  * Tracking client — talks ONLY to the tracker worker.
@@ -441,19 +441,7 @@ export function applyRecentOpens(
 
   for (const event of sorted) {
     if (event.type !== 'OPEN' || !event.tracking_id || !event.timestamp) continue;
-    if (
-      event.classification === 'SELF_LIKELY' ||
-      event.classification === 'PROXY_LIKELY' ||
-      event.classification === 'MACHINE_LIKELY' ||
-      event.classification === 'UNKNOWN' ||
-      event.suspected_self_open
-    ) {
-      continue;
-    }
-    if (event.user_agent) {
-      const src = detectOpenRequestSource(event.user_agent);
-      if (src !== 'browser_like') continue;
-    }
+    if (!isCountableOpenEvent(event)) continue;
 
     const evtMs = Date.parse(event.timestamp);
     const slot = opens.get(event.tracking_id) || { count: 0, first: event.timestamp, last: event.timestamp, lastValidMs: 0 };
@@ -478,6 +466,26 @@ export function applyRecentOpens(
     });
   }
   return [...byId.values()];
+}
+
+/** Desktop alerts follow the same countable-open rules as applyRecentOpens. */
+export function isNotifiableTrackingEvent(event: {
+  type: string;
+  classification?: string | null;
+  suspected_self_open?: boolean;
+  user_agent?: string | null;
+}): boolean {
+  if (event.type === 'SELF_VIEW' || event.suspected_self_open) return false;
+  if (
+    event.classification === 'SELF_LIKELY' ||
+    event.classification === 'MACHINE_LIKELY' ||
+    event.classification === 'UNKNOWN'
+  ) {
+    return false;
+  }
+  if (event.type === 'OPEN') return isCountableOpenEvent(event);
+  if (event.type === 'CLICK') return event.classification !== 'PROXY_LIKELY';
+  return false;
 }
 
 function threadIdsMatch(stored: string | null, ids: Set<string>): boolean {
@@ -794,10 +802,13 @@ function clickCountLabel(count: number): string {
 
 export {
   CLAIM_TTL_MS,
+  SENDER_PROXY_BURST_MS,
   classifyClickEvent,
   classifyOpenEvent,
+  decideTrackedOpen,
   deriveTrackingStats,
   detectOpenRequestSource,
+  isCountableOpenEvent,
   formatTrackingReport,
   inspectTrackedMime,
   isSelfViewCorrelated,
@@ -805,6 +816,8 @@ export {
   normalizeUserAgentFamily,
   openEventMatchesSenderClaim,
   probeTracker,
+  selectSenderProxyClaim,
+  senderProxySuppressionMode,
   SELF_VIEW_POST_WINDOW_MS,
   SELF_VIEW_PRE_WINDOW_MS,
   senderFingerprintMatches,
@@ -822,6 +835,8 @@ export type {
   OpenClassification,
   OpenRequestSource,
   OpenVerdict,
+  ProxyClaimCandidate,
+  ProxySuppressionMode,
   SelfViewClaim,
   SelfViewSource,
   SenderFingerprint,

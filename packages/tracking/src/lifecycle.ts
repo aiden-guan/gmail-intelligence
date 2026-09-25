@@ -119,16 +119,61 @@ export function openEventMatchesSenderClaim(opts: {
   );
 }
 
-function nonBrowserOpenVerdict(source: OpenRequestSource): OpenVerdict | null {
-  if (source === 'google_image_proxy') {
-    return {
-      classification: 'PROXY_LIKELY',
-      suspected: true,
-      confidence: 0.8,
-      countsAsOpen: false,
-      source,
-    };
-  }
+/** Duplicate Google proxy renders of one sender view, not the 25s claim TTL. */
+export const SENDER_PROXY_BURST_MS = 2_000;
+
+export type ProxySuppressionMode = 'consume' | 'burst' | 'none';
+
+export type ProxyClaimCandidate = {
+  id: string;
+  gmailMessageId?: string | null;
+  lastObservedAt: string;
+  expiresAt: string;
+  proxyConsumedByEventId?: string | null;
+  proxyConsumedAt?: string | null;
+};
+
+export function senderProxySuppressionMode(
+  claim: Pick<ProxyClaimCandidate, 'expiresAt' | 'proxyConsumedByEventId' | 'proxyConsumedAt'> | null | undefined,
+  nowMs: number,
+): ProxySuppressionMode {
+  if (!claim) return 'none';
+  const expiresMs = Date.parse(claim.expiresAt);
+  const unexpired = Number.isFinite(expiresMs) && expiresMs > nowMs;
+  if (!claim.proxyConsumedByEventId) return unexpired ? 'consume' : 'none';
+  const consumedMs = claim.proxyConsumedAt ? Date.parse(claim.proxyConsumedAt) : Number.NaN;
+  if (Number.isFinite(consumedMs) && Math.abs(nowMs - consumedMs) <= SENDER_PROXY_BURST_MS) return 'burst';
+  return 'none';
+}
+
+/** One active claim can suppress a single sender proxy render, plus a short duplicate burst. */
+export function selectSenderProxyClaim<T extends ProxyClaimCandidate>(
+  claims: T[],
+  nowMs: number,
+  gmailMessageId?: string | null,
+): { claim: T; mode: Exclude<ProxySuppressionMode, 'none'> } | null {
+  const normQuery = normalizeGmailId(gmailMessageId);
+  const relevant = claims.filter((claim) => {
+    const expiresMs = Date.parse(claim.expiresAt);
+    const unexpired = Number.isFinite(expiresMs) && expiresMs > nowMs;
+    return unexpired || senderProxySuppressionMode(claim, nowMs) === 'burst';
+  });
+  if (relevant.length === 0) return null;
+  relevant.sort((a, b) => {
+    if (normQuery) {
+      const aExact = normalizeGmailId(a.gmailMessageId) === normQuery ? 1 : 0;
+      const bExact = normalizeGmailId(b.gmailMessageId) === normQuery ? 1 : 0;
+      if (aExact !== bExact) return bExact - aExact;
+    }
+    return (Date.parse(b.lastObservedAt) || 0) - (Date.parse(a.lastObservedAt) || 0);
+  });
+  const claim = relevant[0]!;
+  const mode = senderProxySuppressionMode(claim, nowMs);
+  if (mode === 'none') return null;
+  return { claim, mode };
+}
+
+function machineOpenVerdict(source: OpenRequestSource): OpenVerdict | null {
   if (source === 'headless' || source === 'scanner') {
     return {
       classification: 'MACHINE_LIKELY',
@@ -138,22 +183,14 @@ function nonBrowserOpenVerdict(source: OpenRequestSource): OpenVerdict | null {
       source,
     };
   }
-  if (source === 'unknown') {
-    return {
-      classification: 'UNKNOWN',
-      suspected: true,
-      confidence: 0.5,
-      countsAsOpen: false,
-      source,
-    };
-  }
   return null;
 }
 
 /**
- * Classify a pixel fetch against the real send time and request source.
- * Proxy, scanner, headless, and unknown requests are classified before any
- * sender claim is considered, so those requests cannot consume the claim.
+ * Classify a pixel fetch.
+ * Order: pre-send, scanner/headless, GoogleImageProxy, unknown, then browser-like.
+ * A Google proxy counts unless the caller has an active sender proxy suppression.
+ * `hasActiveSenderClaim` applies only to browser-like requests.
  */
 export function classifyOpenEvent(opts: {
   eventTs: number;
@@ -161,11 +198,11 @@ export function classifyOpenEvent(opts: {
   userAgent?: string | null;
   selfViewTs?: number | null;
   hasActiveSenderClaim?: boolean;
+  hasActiveSenderProxySuppression?: boolean;
 }): OpenVerdict {
   const sentAt = opts.sentAt;
   const source = detectOpenRequestSource(opts.userAgent);
 
-  // Pre-send fetches (composer / draft previews)
   if (sentAt == null || !Number.isFinite(sentAt) || opts.eventTs < sentAt) {
     return {
       classification: 'SELF_LIKELY',
@@ -176,10 +213,38 @@ export function classifyOpenEvent(opts: {
     };
   }
 
-  const machine = nonBrowserOpenVerdict(source);
+  const machine = machineOpenVerdict(source);
   if (machine) return machine;
 
-  // Browser-like only. Caller sets this after the sender fingerprint matches.
+  if (source === 'google_image_proxy') {
+    if (opts.hasActiveSenderProxySuppression) {
+      return {
+        classification: 'SELF_LIKELY',
+        suspected: true,
+        confidence: 1,
+        countsAsOpen: false,
+        source,
+      };
+    }
+    return {
+      classification: 'PROXY_LIKELY',
+      suspected: false,
+      confidence: 0.8,
+      countsAsOpen: true,
+      source,
+    };
+  }
+
+  if (source === 'unknown') {
+    return {
+      classification: 'UNKNOWN',
+      suspected: true,
+      confidence: 0.5,
+      countsAsOpen: false,
+      source,
+    };
+  }
+
   if (opts.hasActiveSenderClaim) {
     return {
       classification: 'SELF_LIKELY',
@@ -190,7 +255,6 @@ export function classifyOpenEvent(opts: {
     };
   }
 
-  // Legacy timestamp correlation for browser-like requests when no claim exists.
   if (opts.selfViewTs != null && isSelfViewCorrelated(opts.eventTs, opts.selfViewTs)) {
     return {
       classification: 'SELF_LIKELY',
@@ -207,6 +271,119 @@ export function classifyOpenEvent(opts: {
     confidence: 0,
     countsAsOpen: true,
     source,
+  };
+}
+
+export function decideTrackedOpen(opts: {
+  eventTs: number;
+  sentAt: number | null;
+  userAgent?: string | null;
+  ipHash?: string | null;
+  selfViewTs?: number | null;
+  activeClaim?: SenderFingerprint | null;
+  recentConsumedMatches?: boolean;
+  proxySuppression?: ProxySuppressionMode;
+}): OpenVerdict & { consumeClaim: boolean; consumeProxySuppression: boolean } {
+  const source = detectOpenRequestSource(opts.userAgent);
+  const sentAt = opts.sentAt;
+  const idle = { consumeClaim: false, consumeProxySuppression: false };
+
+  if (sentAt == null || !Number.isFinite(sentAt) || opts.eventTs < sentAt) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source,
+      ...idle,
+    };
+  }
+
+  if (source === 'headless' || source === 'scanner') {
+    return {
+      classification: 'MACHINE_LIKELY',
+      suspected: true,
+      confidence: 0.9,
+      countsAsOpen: false,
+      source,
+      ...idle,
+    };
+  }
+
+  if (source === 'google_image_proxy') {
+    const mode = opts.proxySuppression ?? 'none';
+    if (mode === 'consume' || mode === 'burst') {
+      return {
+        classification: 'SELF_LIKELY',
+        suspected: true,
+        confidence: 1,
+        countsAsOpen: false,
+        source,
+        consumeClaim: false,
+        consumeProxySuppression: mode === 'consume',
+      };
+    }
+    return {
+      classification: 'PROXY_LIKELY',
+      suspected: false,
+      confidence: 0.8,
+      countsAsOpen: true,
+      source,
+      ...idle,
+    };
+  }
+
+  if (source === 'unknown') {
+    return {
+      classification: 'UNKNOWN',
+      suspected: true,
+      confidence: 0.5,
+      countsAsOpen: false,
+      source,
+      ...idle,
+    };
+  }
+
+  if (senderFingerprintMatches(opts.activeClaim, { ipHash: opts.ipHash, userAgent: opts.userAgent })) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source: 'browser_like',
+      consumeClaim: true,
+      consumeProxySuppression: false,
+    };
+  }
+  if (opts.recentConsumedMatches) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source: 'browser_like',
+      consumeClaim: false,
+      consumeProxySuppression: false,
+    };
+  }
+  if (opts.selfViewTs != null && isSelfViewCorrelated(opts.eventTs, opts.selfViewTs)) {
+    return {
+      classification: 'SELF_LIKELY',
+      suspected: true,
+      confidence: 1,
+      countsAsOpen: false,
+      source: 'browser_like',
+      consumeClaim: false,
+      consumeProxySuppression: false,
+    };
+  }
+  return {
+    classification: 'RECIPIENT_LIKELY',
+    suspected: false,
+    confidence: 0,
+    countsAsOpen: true,
+    source: 'browser_like',
+    ...idle,
   };
 }
 
@@ -326,28 +503,24 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
     if (evt.type === 'OPEN') {
       pixelLoadCount += 1;
       const isSelf = Boolean(evt.suspected_self_open || evt.suspectedSelfOpen || evt.classification === 'SELF_LIKELY');
-      const isExplicitNonRecipient =
-        evt.classification === 'PROXY_LIKELY' ||
-        evt.classification === 'MACHINE_LIKELY' ||
-        evt.classification === 'UNKNOWN';
-
       const ua = evt.userAgent || evt.user_agent;
       const detectedSource = ua ? detectOpenRequestSource(ua) : null;
-      const isDetectedMachine =
+      const isDetectedNonCount =
         detectedSource === 'google_image_proxy' ||
         detectedSource === 'headless' ||
         detectedSource === 'scanner' ||
         detectedSource === 'unknown';
-
-      const isRecipient =
-        (evt.classification === 'RECIPIENT_LIKELY' || !evt.classification) &&
+      const isCountable =
         !isSelf &&
-        !isExplicitNonRecipient &&
-        !isDetectedMachine;
+        evt.classification !== 'MACHINE_LIKELY' &&
+        evt.classification !== 'UNKNOWN' &&
+        (evt.classification === 'RECIPIENT_LIKELY' ||
+          evt.classification === 'PROXY_LIKELY' ||
+          (!evt.classification && !isDetectedNonCount));
 
       const evtMs = Date.parse(evt.timestamp);
 
-      if (isRecipient) {
+      if (isCountable) {
         if (!lastValidOpenMs || !Number.isFinite(evtMs) || evtMs < lastValidOpenMs || evtMs - lastValidOpenMs >= 800) {
           openCount += 1;
           lastValidOpenMs = evtMs;
@@ -356,9 +529,8 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
         }
       }
 
-      // Possible opens: verified opens or proxy opens (GoogleImageProxy), but self-view takes precedence (SELF_LIKELY excluded)
       const isProxy = evt.classification === 'PROXY_LIKELY' || detectedSource === 'google_image_proxy';
-      if (!isSelf && (isRecipient || (isProxy && detectedSource !== 'headless' && detectedSource !== 'scanner'))) {
+      if (!isSelf && (isCountable || (isProxy && detectedSource !== 'headless' && detectedSource !== 'scanner'))) {
         if (!lastPossibleOpenMs || !Number.isFinite(evtMs) || evtMs < lastPossibleOpenMs || evtMs - lastPossibleOpenMs >= 800) {
           possibleOpenCount += 1;
           lastPossibleOpenMs = evtMs;
@@ -393,6 +565,30 @@ export function deriveTrackingStats(events: TrackingEventLike[]): DerivedTrackin
     pixelLoadCount,
     possibleOpenCount,
   };
+}
+
+/** Client-side filter for opens the backend already counted. */
+export function isCountableOpenEvent(event: {
+  classification?: string | null;
+  suspected_self_open?: boolean;
+  suspectedSelfOpen?: boolean;
+  user_agent?: string | null;
+  userAgent?: string | null;
+}): boolean {
+  if (event.suspected_self_open || event.suspectedSelfOpen) return false;
+  const classification = event.classification || '';
+  if (classification === 'SELF_LIKELY' || classification === 'MACHINE_LIKELY' || classification === 'UNKNOWN') {
+    return false;
+  }
+  const ua = event.user_agent ?? event.userAgent ?? null;
+  const source = ua ? detectOpenRequestSource(ua) : null;
+  if (classification === 'PROXY_LIKELY') {
+    return source === 'google_image_proxy' || (!ua && source == null);
+  }
+  if (classification === 'RECIPIENT_LIKELY' || !classification) {
+    return !source || source === 'browser_like';
+  }
+  return false;
 }
 
 /** InboxSDK and Gmail use several id spellings for the same thread or message. */
@@ -431,6 +627,8 @@ export type SelfViewClaim = {
   expiresAt: string;
   source: SelfViewSource;
   consumedByEventId: string | null;
+  proxyConsumedByEventId?: string | null;
+  proxyConsumedAt?: string | null;
   createdAt: string;
 };
 

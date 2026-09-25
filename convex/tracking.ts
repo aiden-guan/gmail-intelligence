@@ -7,6 +7,7 @@ import {
   normalizeGmailId,
   normalizeUserAgentFamily,
   openEventMatchesSenderClaim,
+  selectSenderProxyClaim,
   senderFingerprintMatches,
 } from "./openRequest";
 
@@ -356,6 +357,8 @@ export const recordSelfView = internalMutation({
           expiresAt: claimExpiresAt,
           source,
           consumedByEventId: null,
+          proxyConsumedByEventId: null,
+          proxyConsumedAt: null,
           createdAt: new Date().toISOString(),
         });
       }
@@ -476,6 +479,19 @@ export const recordOpenEvent = internalMutation({
     });
 
     const activeClaim = validClaims[0] ?? null;
+    const proxySelection = selectSenderProxyClaim(
+      claims.map((claim) => ({
+        ...claim,
+        id: claim.claimId,
+        gmailMessageId: claim.gmailMessageId,
+        lastObservedAt: claim.lastObservedAt,
+        expiresAt: claim.expiresAt,
+        proxyConsumedByEventId: claim.proxyConsumedByEventId ?? null,
+        proxyConsumedAt: claim.proxyConsumedAt ?? null,
+      })),
+      now,
+      normEmailMsg,
+    );
 
     const recentConsumed = claims.find((c) => {
       if (!c.consumedByEventId || !c.consumedAt) return false;
@@ -512,6 +528,7 @@ export const recordOpenEvent = internalMutation({
         ? { senderIpHash: activeClaim.senderIpHash, senderUaFamily: activeClaim.senderUaFamily }
         : null,
       recentConsumedMatches: Boolean(recentConsumed),
+      proxySuppression: proxySelection?.mode ?? "none",
     });
 
     if (decision.consumeClaim && activeClaim) {
@@ -520,6 +537,12 @@ export const recordOpenEvent = internalMutation({
         consumedAt: args.timestamp,
         consumedUa: args.userAgent,
         consumedIpHash: args.ipHash,
+      });
+    }
+    if (decision.consumeProxySuppression && proxySelection) {
+      await ctx.db.patch(proxySelection.claim._id, {
+        proxyConsumedByEventId: args.eventId,
+        proxyConsumedAt: args.timestamp,
       });
     }
 

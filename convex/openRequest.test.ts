@@ -44,7 +44,7 @@ describe('open pixel urls', () => {
     );
   });
 
-  it('classifies google image proxy as PROXY_LIKELY and does not count as open', () => {
+  it('classifies google image proxy as PROXY_LIKELY and counts it as an open', () => {
     const sentAt = Date.parse('2026-09-23T12:00:00.000Z');
     const eventTs = sentAt + 10_000;
     const res = classifyOpenEvent({
@@ -54,7 +54,7 @@ describe('open pixel urls', () => {
     });
     expect(res).toMatchObject({
       classification: 'PROXY_LIKELY',
-      countsAsOpen: false,
+      countsAsOpen: true,
       source: 'google_image_proxy',
     });
   });
@@ -188,8 +188,8 @@ describe('open pixel urls', () => {
       },
     ]);
 
-    expect(stats.openCount).toBe(2);
-    expect(stats.firstOpenedAt).toBe('2026-09-23T12:05:00.000Z');
+    expect(stats.openCount).toBe(3);
+    expect(stats.firstOpenedAt).toBe('2026-09-23T12:01:00.000Z');
     expect(stats.lastOpenedAt).toBe('2026-09-23T12:10:00.000Z');
   });
 
@@ -273,7 +273,7 @@ describe('open pixel urls', () => {
     expect(verdict.suspected).toBe(true);
   });
 
-  it('active claim does not reclassify GoogleImageProxy; proxy requests stay PROXY_LIKELY', () => {
+  it('a browser sender claim does not suppress GoogleImageProxy; proxy suppression does', () => {
     const sentAt = Date.parse('2026-09-23T12:00:00.000Z');
     const openTs = sentAt + 15_000;
     const verdict = classifyOpenEvent({
@@ -283,8 +283,18 @@ describe('open pixel urls', () => {
       hasActiveSenderClaim: true,
     });
     expect(verdict.classification).toBe('PROXY_LIKELY');
-    expect(verdict.countsAsOpen).toBe(false);
+    expect(verdict.countsAsOpen).toBe(true);
     expect(verdict.source).toBe('google_image_proxy');
+
+    const suppressed = classifyOpenEvent({
+      eventTs: openTs,
+      sentAt,
+      userAgent: 'GoogleImageProxy',
+      hasActiveSenderClaim: true,
+      hasActiveSenderProxySuppression: true,
+    });
+    expect(suppressed.classification).toBe('SELF_LIKELY');
+    expect(suppressed.countsAsOpen).toBe(false);
   });
 
   it('suppresses delayed pixel (>8s after send/view) with active sender claim', () => {

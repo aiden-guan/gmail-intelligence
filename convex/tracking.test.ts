@@ -392,8 +392,8 @@ describe('Convex tracking mutations and self-view suppression', () => {
     expect(email2.openCount).toBe(0);
   });
 
-  it('proxy then sender browser then recipient browser ends at openCount 1 and does not burn the claim on the proxy', async () => {
-    const { ctx } = createMockDb();
+  it('proxy then sender browser then recipient browser ends at openCount 1 and does not burn the browser claim on the proxy', async () => {
+    const { ctx, db } = createMockDb();
     const trackingId = 'trk_proxy_first';
     const sentAt = new Date(Date.now() - 60_000).toISOString();
     await callMutation(tracking.createEmail, ctx, {
@@ -455,11 +455,14 @@ describe('Convex tracking mutations and self-view suppression', () => {
     });
 
     const events = await callQuery(tracking.listEvents, ctx, { trackingId });
-    expect(events.find((e: any) => e.eventId === 'evt_proxy').classification).toBe('PROXY_LIKELY');
+    expect(events.find((e: any) => e.eventId === 'evt_proxy').classification).toBe('SELF_LIKELY');
     expect(events.find((e: any) => e.eventId === 'evt_sender_browser').classification).toBe('SELF_LIKELY');
     expect(events.find((e: any) => e.eventId === 'evt_recipient_browser').classification).toBe('RECIPIENT_LIKELY');
     const email = await callQuery(tracking.getEmail, ctx, { trackingId });
     expect(email.openCount).toBe(1);
+    const claims = await db.query('selfViewClaims').collect();
+    expect(claims[0].proxyConsumedByEventId).toBe('evt_proxy');
+    expect(claims[0].consumedByEventId).toBe('evt_sender_browser');
   });
 
   it('does not let a different fingerprint consume the sender claim', async () => {
@@ -642,5 +645,111 @@ describe('Convex tracking mutations and self-view suppression', () => {
     expect(events.find((e: any) => e.eventId === 'evt_sender_after_scan').classification).toBe('SELF_LIKELY');
     const email = await callQuery(tracking.getEmail, ctx, { trackingId });
     expect(email.openCount).toBe(0);
+  });
+
+  it('counts a Gmail recipient proxy, suppresses one sender proxy, then counts the next recipient proxy', async () => {
+    const { ctx, db } = createMockDb();
+    const sentAt = new Date(Date.now() - 60_000).toISOString();
+    const proxyUa = 'Mozilla/5.0 GoogleImageProxy';
+
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId: 'trk_proxy_recipient',
+      subject: 'Recipient proxy',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: 'msg_proxy_recipient',
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_recipient_proxy',
+      trackingId: 'trk_proxy_recipient',
+      type: 'OPEN',
+      timestamp: new Date().toISOString(),
+      userAgent: proxyUa,
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const recipientOnly = await callQuery(tracking.getEmail, ctx, { trackingId: 'trk_proxy_recipient' });
+    expect(recipientOnly.openCount).toBe(1);
+    const recipientEvents = await callQuery(tracking.listEvents, ctx, { trackingId: 'trk_proxy_recipient' });
+    expect(recipientEvents.find((event: any) => event.eventId === 'evt_recipient_proxy').classification).toBe('PROXY_LIKELY');
+
+    const base = Date.now();
+    await callMutation(tracking.createEmail, ctx, {
+      trackingId: 'trk_sender_then_recipient',
+      subject: 'Sender then recipient',
+      sender: 'me@example.com',
+      recipients: ['r@example.com'],
+      gmailThreadId: null,
+      gmailMessageId: 'msg_sender_then',
+      sentAt,
+      createdAt: sentAt,
+      links: [],
+    });
+    await callMutation(tracking.recordSelfView, ctx, {
+      eventId: 'evt_sv_then',
+      trackingId: 'trk_sender_then_recipient',
+      timestamp: new Date(base).toISOString(),
+      userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      ipHash: 'ip_sender',
+      gmailMessageId: 'msg_sender_then',
+      source: 'MESSAGE_EXPANDED',
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_sender_proxy',
+      trackingId: 'trk_sender_then_recipient',
+      type: 'OPEN',
+      timestamp: new Date(base + 200).toISOString(),
+      userAgent: proxyUa,
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_sender_proxy_burst',
+      trackingId: 'trk_sender_then_recipient',
+      type: 'OPEN',
+      timestamp: new Date(base + 1_200).toISOString(),
+      userAgent: proxyUa,
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const afterSender = await callQuery(tracking.getEmail, ctx, { trackingId: 'trk_sender_then_recipient' });
+    expect(afterSender.openCount).toBe(0);
+    await callMutation(tracking.recordOpenEvent, ctx, {
+      eventId: 'evt_later_recipient_proxy',
+      trackingId: 'trk_sender_then_recipient',
+      type: 'OPEN',
+      timestamp: new Date(base + 4_000).toISOString(),
+      userAgent: proxyUa,
+      ipHash: 'ip_google',
+      suspectedSelfOpen: false,
+      confidence: 0,
+      clickId: null,
+      destination: null,
+    });
+    const afterRecipient = await callQuery(tracking.getEmail, ctx, { trackingId: 'trk_sender_then_recipient' });
+    expect(afterRecipient.openCount).toBe(1);
+    const events = await callQuery(tracking.listEvents, ctx, { trackingId: 'trk_sender_then_recipient' });
+    expect(events.find((event: any) => event.eventId === 'evt_sender_proxy').classification).toBe('SELF_LIKELY');
+    expect(events.find((event: any) => event.eventId === 'evt_sender_proxy_burst').classification).toBe('SELF_LIKELY');
+    expect(events.find((event: any) => event.eventId === 'evt_later_recipient_proxy').classification).toBe('PROXY_LIKELY');
+    const claims = await db.query('selfViewClaims').collect();
+    const claim = claims.find((row) => row.trackingId === 'trk_sender_then_recipient');
+    expect(claim).toMatchObject({
+      proxyConsumedByEventId: 'evt_sender_proxy',
+      consumedByEventId: null,
+    });
   });
 });

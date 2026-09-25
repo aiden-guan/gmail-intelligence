@@ -108,8 +108,8 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(status.countLabel).toBe('Opened once');
   });
 
-  // Case C: GoogleImageProxy fetch alone -> raw event logged -> openCount remains 0.
-  it('Case C: GoogleImageProxy fetch alone -> raw event logged -> openCount remains 0', () => {
+  // Case C: GoogleImageProxy fetch alone counts as one Gmail recipient render.
+  it('Case C: GoogleImageProxy fetch alone counts as one open', () => {
     const proxyUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 GoogleImageProxy';
     expect(detectOpenRequestSource(proxyUA)).toBe('google_image_proxy');
 
@@ -121,8 +121,8 @@ describe('Regression Matrix (Cases A through N)', () => {
         classification: 'PROXY_LIKELY',
       },
     ]);
-    expect(stats.openCount).toBe(0);
-    expect(stats.firstOpenedAt).toBeNull();
+    expect(stats.openCount).toBe(1);
+    expect(stats.firstOpenedAt).toBe('2026-09-24T10:01:00.000Z');
   });
 
   // Case D: Bot / scanner / headless fetch -> raw event logged -> openCount remains 0.
@@ -283,8 +283,7 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(stats.firstOpenedAt).toBeNull();
   });
 
-  // Case J: Stale row reuse in UI does not report wrong email on click.
-  it('Case J: Client applyRecentOpens ignores machine, proxy, and self opens', () => {
+  it('Case J: Client applyRecentOpens counts Gmail proxy opens and ignores machine and self opens', () => {
     const email: TrackedEmailSummary = {
       trackingId: 'trk_test',
       subject: 'Test',
@@ -329,8 +328,11 @@ describe('Regression Matrix (Cases A through N)', () => {
     ];
 
     const updated = applyRecentOpens([email], machineEvents);
-    expect(updated[0].openCount).toBe(0);
-    expect(updated[0].firstOpenedAt).toBeNull();
+    expect(updated[0].openCount).toBe(1);
+    expect(updated[0].firstOpenedAt).toBe('2026-09-24T10:01:00.000Z');
+
+    const ignored = applyRecentOpens([email], machineEvents.filter((event) => event.classification !== 'PROXY_LIKELY'));
+    expect(ignored[0].openCount).toBe(0);
   });
 
   // Case K: Exact messageId match prioritizes correct email even if threadId has multiple sends.
@@ -606,7 +608,7 @@ describe('Regression Matrix (Cases A through N)', () => {
       },
     ]);
 
-    expect(stats.openCount).toBe(1); // Only the 1 recipient open is verified
+    expect(stats.openCount).toBe(2); // Gmail proxy render + recipient open
     expect(stats.pixelLoadCount).toBe(3); // All 3 OPEN events
     expect(stats.possibleOpenCount).toBe(2); // Proxy open + recipient open (self-view excluded)
     expect(stats.clickCount).toBe(2); // 1 RECIPIENT_LIKELY + 1 legacy unclassified (self and scanner clicks excluded)
@@ -691,7 +693,7 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(probe.label).toBe('Tracker healthy');
   });
 
-  // Case T: a sender claim suppresses browser-like opens. Proxy requests stay proxy.
+  // Case T: a sender claim suppresses browser-like opens. Proxy counts unless proxy suppression is active.
   it('Case T: classifyOpenEvent with hasActiveSenderClaim classifies browser opens as SELF_LIKELY', () => {
     const baseTime = Date.parse('2026-09-24T10:00:00.000Z');
     const openTime = baseTime + 10_000; // T+10s (outside legacy correlation window)
@@ -707,7 +709,7 @@ describe('Regression Matrix (Cases A through N)', () => {
     expect(browserVerdict.countsAsOpen).toBe(false);
     expect(browserVerdict.suspected).toBe(true);
 
-    // Proxy requests stay PROXY_LIKELY even while a sender claim is active.
+    // A browser sender claim does not suppress GoogleImageProxy. Proxy suppression does.
     const proxyVerdict = classifyOpenEvent({
       eventTs: openTime,
       sentAt: baseTime,
@@ -715,8 +717,16 @@ describe('Regression Matrix (Cases A through N)', () => {
       hasActiveSenderClaim: true,
     });
     expect(proxyVerdict.classification).toBe('PROXY_LIKELY');
-    expect(proxyVerdict.countsAsOpen).toBe(false);
+    expect(proxyVerdict.countsAsOpen).toBe(true);
     expect(proxyVerdict.source).toBe('google_image_proxy');
+    const suppressedProxy = classifyOpenEvent({
+      eventTs: openTime,
+      sentAt: baseTime,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 GoogleImageProxy',
+      hasActiveSenderProxySuppression: true,
+    });
+    expect(suppressedProxy.classification).toBe('SELF_LIKELY');
+    expect(suppressedProxy.countsAsOpen).toBe(false);
 
     // Without active claim or self-view at T+10s, browser UA is RECIPIENT_LIKELY
     const recipientVerdict = classifyOpenEvent({

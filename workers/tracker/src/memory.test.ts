@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from './index';
-import { resetMemoryStore } from './store';
+import { readMemoryClaims, resetMemoryStore } from './store';
 
 const env: Env = {
   PERSONAL_API_TOKEN: 'test-token',
@@ -453,7 +453,7 @@ describe('local memory tracker', () => {
     }
   });
 
-  it('automatic Google-image-proxy fetch stores PROXY_LIKELY and does not turn open_count to 1', async () => {
+  it('automatic Google-image-proxy fetch stores PROXY_LIKELY and counts as one open', async () => {
     const created = await worker.fetch(
       new Request('http://127.0.0.1:8787/api/emails', {
         method: 'POST',
@@ -480,7 +480,7 @@ describe('local memory tracker', () => {
     const email = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
     ).json()) as { open_count: number };
-    expect(email.open_count).toBe(0);
+    expect(email.open_count).toBe(1);
 
     const events = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
@@ -1507,10 +1507,77 @@ describe('local memory tracker', () => {
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
     ).json()) as Array<{ type: string; classification: string; user_agent?: string }>;
     const opens = events.filter((event) => event.type === 'OPEN');
-    expect(opens.map((event) => event.classification).sort()).toEqual(['PROXY_LIKELY', 'RECIPIENT_LIKELY', 'SELF_LIKELY']);
+    expect(opens.map((event) => event.classification).sort()).toEqual(['RECIPIENT_LIKELY', 'SELF_LIKELY', 'SELF_LIKELY']);
     const email = (await (
       await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
     ).json()) as { open_count: number };
     expect(email.open_count).toBe(1);
+    const claims = readMemoryClaims(tracking_id);
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.proxy_consumed_by_event_id).toBeTruthy();
+    expect(claims[0]?.consumed_by_event_id).toBeTruthy();
+    expect(claims[0]?.proxy_consumed_by_event_id).not.toBe(claims[0]?.consumed_by_event_id);
+  });
+
+  it('suppresses one sender GoogleImageProxy render, then counts a later recipient proxy', async () => {
+    const base = Date.parse('2026-09-24T15:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+    try {
+      const created = await worker.fetch(
+        new Request('http://127.0.0.1:8787/api/emails', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ subject: 'Sender proxy then recipient', sender: 'me@example.com', recipients: ['r@example.com'] }),
+        }),
+        env,
+      );
+      const { tracking_id, pixel_url } = (await created.json()) as { tracking_id: string; pixel_url: string };
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: 'SENT', sent_at: new Date(base - 60_000).toISOString(), gmail_message_id: 'msg_seq' }),
+        }),
+        env,
+      );
+      await worker.fetch(
+        new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/self-view`, {
+          method: 'POST',
+          headers: senderViewHeaders(),
+          body: JSON.stringify({
+            timestamp: new Date(base).toISOString(),
+            source: 'MESSAGE_EXPANDED',
+            gmailMessageId: 'msg_seq',
+          }),
+        }),
+        env,
+      );
+      vi.advanceTimersByTime(200);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      vi.advanceTimersByTime(1_000);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      const mid = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(mid.open_count).toBe(0);
+
+      vi.advanceTimersByTime(3_000);
+      await worker.fetch(new Request(pixel_url, { headers: proxyHeaders() }), env);
+      const email = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}`, { headers: authHeaders() }), env)
+      ).json()) as { open_count: number };
+      expect(email.open_count).toBe(1);
+      const events = (await (
+        await worker.fetch(new Request(`http://127.0.0.1:8787/api/emails/${tracking_id}/events`, { headers: authHeaders() }), env)
+      ).json()) as Array<{ type: string; classification: string }>;
+      const opens = events.filter((event) => event.type === 'OPEN').map((event) => event.classification).sort();
+      expect(opens).toEqual(['PROXY_LIKELY', 'SELF_LIKELY', 'SELF_LIKELY']);
+      const claims = readMemoryClaims(tracking_id);
+      expect(claims[0]?.proxy_consumed_by_event_id).toBeTruthy();
+      expect(claims[0]?.consumed_by_event_id).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

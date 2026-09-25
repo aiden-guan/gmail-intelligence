@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { safeRedirectUrl, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches, openEventMatchesSenderClaim } from './helpers.js';
+import { safeRedirectUrl, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches, openEventMatchesSenderClaim, selectSenderProxyClaim } from './helpers.js';
 import { getStore, StoreError, type ClaimRow, type EmailRow, type TrackerStore } from './store.js';
 
 export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, detectOpenRequestSource, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches } from './helpers.js';
@@ -406,6 +406,8 @@ async function handleSelfView(
         expires_at: claimExpiresAt,
         source,
         consumed_by_event_id: null,
+        proxy_consumed_by_event_id: null,
+        proxy_consumed_at: null,
         created_at: new Date().toISOString(),
       };
       await store.insertClaim(newClaim);
@@ -497,6 +499,19 @@ async function handleOpen(
       const eventId = newId('evt');
 
       const activeClaim = await store.getActiveClaim(trackingId, email.gmail_message_id, now);
+      const claimRows = await store.listClaims(trackingId);
+      const proxySelection = selectSenderProxyClaim(
+        claimRows.map((claim) => ({
+          id: claim.id,
+          gmailMessageId: claim.gmail_message_id,
+          lastObservedAt: claim.last_observed_at,
+          expiresAt: claim.expires_at,
+          proxyConsumedByEventId: claim.proxy_consumed_by_event_id ?? null,
+          proxyConsumedAt: claim.proxy_consumed_at ?? null,
+        })),
+        now,
+        email.gmail_message_id,
+      );
       const recentConsumed = activeClaim
         ? null
         : await store.getRecentConsumedClaim(trackingId, now, 1000, ua, ip_hash);
@@ -530,9 +545,13 @@ async function handleOpen(
           ? { senderIpHash: activeClaim.sender_ip_hash, senderUaFamily: activeClaim.sender_ua_family }
           : null,
         recentConsumedMatches: recentMatches,
+        proxySuppression: proxySelection?.mode ?? 'none',
       });
       if (verdict.consumeClaim && activeClaim) {
         await store.consumeClaim(activeClaim.id, eventId, ts, ua, ip_hash);
+      }
+      if (verdict.consumeProxySuppression && proxySelection) {
+        await store.consumeProxySuppression(proxySelection.claim.id, eventId, ts);
       }
 
       await store.insertEvent({

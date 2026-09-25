@@ -43,6 +43,8 @@ import {
   detectOpenRequestSource,
   formatSentTrackingBadge,
   formatTrackingReport,
+  isCountableOpenEvent,
+  isNotifiableTrackingEvent,
   normalizeGmailId,
   probeTracker,
   summaryFromRemote,
@@ -668,10 +670,7 @@ async function pollTracking(): Promise<void> {
     const latestOpen = events.find((ev) => ev.type === 'OPEN');
     if (latestOpen) {
       const source = detectOpenRequestSource(latestOpen.user_agent);
-      const isCounted =
-        (latestOpen.classification === 'RECIPIENT_LIKELY' || !latestOpen.classification) &&
-        !latestOpen.suspected_self_open &&
-        source === 'browser_like';
+      const isCounted = isCountableOpenEvent(latestOpen);
 
       const email = byId.get(latestOpen.tracking_id);
       const diagnostic: TrackingPixelEventDiagnostic = {
@@ -694,19 +693,7 @@ async function pollTracking(): Promise<void> {
   try {
     const fresh = [...byId.values()];
     for (const ev of events) {
-      if (
-        ev.type === 'SELF_VIEW' ||
-        ev.classification === 'SELF_LIKELY' ||
-        ev.classification === 'PROXY_LIKELY' ||
-        ev.classification === 'MACHINE_LIKELY' ||
-        ev.classification === 'UNKNOWN' ||
-        ev.suspected_self_open
-      ) {
-        continue;
-      }
-      if (ev.type === 'OPEN' && ev.classification && ev.classification !== 'RECIPIENT_LIKELY') {
-        continue;
-      }
+      if (!isNotifiableTrackingEvent(ev)) continue;
       if (notifiedEventIds.has(ev.id)) continue;
       if (settings.hideSuspectedSelfOpens && ev.suspected_self_open) continue;
       if (!(await markEventNotified(ev.id))) continue;
