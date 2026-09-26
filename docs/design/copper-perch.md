@@ -24,7 +24,7 @@ Reviewed the live official sites on September 25, 2026:
 
 ## Implemented surfaces
 
-Popup, inbox/ask side panel, Gmail thread companion, onboarding, settings, command palette, tracking popovers, row indicators, compose tracking toggle and contextual menus. Functional provider/tracking flows are retained. Extension display name is PigeonBox — Gmail Intelligence.
+Popup, inbox/ask side panel, Gmail thread companion, onboarding, settings, command palette, tracking popovers, row indicators, compose tracking toggle and contextual menus. Functional provider/tracking flows are retained. Extension display name is PigeonBox.
 
 The standalone development fixture is `/src/preview/index.html` on the extension Vite server. It renders the actual components with fictional messages and a local Chrome API shim; it is not a production build entry. Start with `npx vite --host 127.0.0.1 --port 5173` from `apps/extension`.
 

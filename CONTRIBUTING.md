@@ -1,36 +1,43 @@
-# Contributing
+# Contributing to PigeonBox
 
-Thanks for helping improve Gmail Intelligence.
+Thanks for helping. PigeonBox is a Chrome extension that works inside Gmail; this repository contains everything needed to build it, run it locally, and self-host its optional tracker.
 
-## Principles
+## Setup
 
-- No Gmail REST API, no private Gmail write RPCs, no cookie scraping.
-- Writes go through Gmail’s web UI via `packages/gmail` only.
-- Mailbox contents never go to the tracking backend.
-- Prefer capability detection and degradation over pretending features work.
-- Never auto-send; Tier 3 actions need explicit confirmation.
-
-## Dev setup
-
-Node.js 20 or newer.
+Node.js 20+ (see `.nvmrc`).
 
 ```bash
 npm run setup
-npm test
+npm run dev          # rebuild on change, then Reload on chrome://extensions
+npm run verify       # what CI runs
 ```
 
-`npm run dev` rebuilds the extension while you edit. Click **Reload** on `chrome://extensions` after each rebuild. `npm run tracker` starts a local open/click tracker with no cloud account.
+No Cloud backend, Supabase, Stripe, Convex, or AI key is needed to develop.
+
+## Principles
+
+- **No Gmail REST API**, no private Gmail endpoints, no cookie scraping. Writes go through Gmail's UI via `packages/gmail`.
+- **Selectors live in `packages/gmail/src/selectors.ts`.** Application code does not know DOM details.
+- **Never send email automatically.** PigeonBox drafts, inserts and suggests; sending, deleting, spam and unsubscribe always need the user (safety tier 3).
+- **Local stays a real product.** Do not gate local features to promote Cloud.
+- **Branch on capabilities, not modes or plans.** Use `has('…')` from `ui/product-state.ts`; add capabilities to `@pigeonbox/api-contract` only when something implements them.
+- **Cloud never falls back** to another AI provider, and PigeonBox never changes the user's run mode on its own.
+- **Secrets stay in the service worker.** Content scripts get public settings only. Nothing secret goes in `VITE_*` variables.
+- **Preserve stored names.** IndexedDB names, `chrome.storage` keys and tracking protocol identifiers are persistent. Changing one needs a migration and a test.
+- **Tracking is high risk.** Changes to open/click classification must keep the regression matrices in `packages/tracking`, `workers/tracker` and `convex` passing and consistent.
+- **The public repository never imports PigeonBox Cloud code.** Cloud is reached over HTTP through `@pigeonbox/api-contract`; `npm run check:repo` enforces this.
 
 ## Packages
 
-Keep Gmail selectors inside `packages/gmail/src/selectors.ts`. Application code must not know DOM details.
+All packages use the `@pigeonbox/*` namespace. See [docs/architecture.md](docs/architecture.md).
 
 ## Pull requests
 
-- Small, focused PRs
-- Include/extend Vitest coverage for logic you change
-- Do not commit secrets, `.env`, or personal mailbox data
+- Small and focused, with tests for logic you change.
+- `npm run verify` passes.
+- No secrets, `.env` files, or real mailbox data in code, tests, or screenshots.
+- Changing the Cloud contract: additive changes only unless you bump `PROTOCOL_VERSION`; see [docs/cloud-protocol.md](docs/cloud-protocol.md).
 
 ## InboxSDK
 
-Register an App ID at InboxSDK if you use their production features; for local experiment the extension can fall back to DOM adapters.
+The extension ships with a registered InboxSDK app ID. Forks distributing their own build should register their own at InboxSDK and set it in Settings → Advanced.

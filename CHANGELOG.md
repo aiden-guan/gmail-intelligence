@@ -1,8 +1,43 @@
 # Changelog
 
-All notable changes to Gmail Intelligence are documented in this file.
+All notable changes to PigeonBox (formerly Gmail Intelligence) are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [0.2.0] — 2026-09-25
+
+PigeonBox becomes one extension with two execution environments: **Local** (on this computer, no account) and **PigeonBox Cloud** (hosted, subscription). Local remains a complete product.
+
+### Added
+- `@pigeonbox/api-contract`: the typed PigeonBox Cloud protocol (Zod schemas, route table, error codes, protocol versioning, capabilities), with a compile-time guard against drift from the local `AIProvider` types.
+- `@pigeonbox/cloud-client`: Cloud HTTP client, PKCE helpers, and a Cloud-backed `AIProvider`.
+- `@pigeonbox/core`: run mode (`local` | `cloud`) and a capability layer; UI checks capabilities instead of modes or plans.
+- Settings and onboarding: **How should PigeonBox run?** (On this computer / PigeonBox Cloud / Advanced), explicit Cloud consent, Cloud account status, billing links, "Run on this computer instead".
+- Cloud sign-in with Authorization Code + PKCE via `chrome.identity`; tokens bound to the issuing API origin; single-flight refresh.
+- Cloud tracking: the worker routes tracker calls to the hosted tracker with the Cloud token in Cloud mode.
+- `npm run verify`, `npm run package` (deterministic ZIP + SHA-256), repository checks (old namespace, private imports, secrets, env files), version checks.
+- CI and tag-driven release workflows; Dependabot; issue and PR templates.
+- Docs: architecture, local setup, self-hosting, Convex self-hosting, Cloud protocol, privacy model, threat model, tracking, Chrome Web Store readiness, release process.
+
+### Changed
+- Packages renamed from the `gi` scope to `@pigeonbox/*`; root package is `pigeonbox`. All versions unified at 0.2.0.
+- Extension name is **PigeonBox**; InboxSDK app name is PigeonBox (app ID unchanged).
+- Settings are versioned (`settingsVersion: 2`) and migrated on load. Every stored field is kept; existing installs become Local.
+- Required host permissions reduced to `https://mail.google.com/*`. `tabs` and `activeTab` removed. Tracker hosts (`localhost:8787`, `*.convex.site`), `chatgpt.com` and `identity` are optional and requested when used.
+- ChatGPT web sign-in moved to Advanced → Experimental and excluded from release builds.
+- The tracker Worker's request handling is exported as `handleTrackerRequest(request, deps)` for reuse with other stores. Protocol v3 behavior is unchanged.
+
+### Security
+- Content scripts no longer receive full settings (the BYOK key and tracker token were visible through `storage.onChanged`). `chrome.storage.local`/`.session` are restricted to trusted contexts; public settings and tracked emails are pushed to Gmail tabs by message.
+- Privileged runtime messages (settings, sign-in, run mode, index clearing, Gmail actions, downloads) are refused from content scripts.
+- Fixed: reopening Settings and saving could overwrite the stored API key and tracker token with blanks, because the options page received the public settings view.
+- Tracker and Convex compare the personal token in constant time.
+- Release builds exclude source maps and machine-local `tracker-config.json`; packaging refuses archives containing credentials.
+
+### Unchanged on purpose
+- IndexedDB `gi_mailbox_v1`, `chrome.storage` keys, tracking protocol identifiers, Supabase migrations, and the `gi-tracker` Worker name.
 
 ---
 

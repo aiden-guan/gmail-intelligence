@@ -15,9 +15,9 @@ Composing must not request `/open/trk_`. The pixel is added only to the outbound
    - `npm run tracker` (memory store), or
    - your Convex deployment, or
    - the Cloudflare worker.
-3. Open the extension **Settings → Tracking**.
-4. Paste the tracker URL and personal API token. They come from `.local/tracker.txt` after `npm run setup` or `npm run tracker`. There is no bundled `tracker-config.json`. A token inside an extension is readable by the browser, so this token only protects your own tracker.
-5. Save. The connection line should say **Tracker healthy**, not merely that the fields are filled in.
+3. Open the extension **Settings → Email tracking**.
+4. Paste the tracker URL and personal API token. They come from `.local/tracker.txt` after `npm run setup`. For development you may place a gitignored `apps/extension/public/tracker-config.json` (`{ "trackerBaseUrl", "personalApiToken" }`) to prefill them; release packaging always strips that file. A token inside an extension is readable by anyone with the browser profile, so it only protects your own tracker.
+5. Save and allow Chrome's permission prompt for the tracker host. The connection line should say **Tracker healthy**, not merely that the fields are filled in.
 6. Leave **Track email opens** and **Track link clicks** on.
 
 ## Send and inspect MIME
