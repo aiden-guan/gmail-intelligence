@@ -1,9 +1,12 @@
+import type { PromptOptions } from '@gi/ai';
+
 const OFFSCREEN_URL = 'offscreen.html';
 
 export async function completeOnDevice(
   modelId: string,
   system: string,
   user: string,
+  options?: PromptOptions,
 ): Promise<{ text: string }> {
   await ensureOnDeviceDocument();
   return readText(
@@ -12,6 +15,8 @@ export async function completeOnDevice(
       modelId,
       system,
       user,
+      examples: options?.examples,
+      repetitionPenalty: options?.repetitionPenalty,
     }),
   );
 }

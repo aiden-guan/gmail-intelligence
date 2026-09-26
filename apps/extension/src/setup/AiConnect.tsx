@@ -6,8 +6,10 @@ import {
   formatDownloadSize,
   getLocalModel,
   isChatGptModel,
+  type LocalModel,
+  type LocalModelVendor,
 } from '@gi/ai';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { getProviderRequiredOrigin, type ExtensionSettings } from '@gi/shared';
 import { deleteCachedModel, listDownloadedModelIds } from '../local-model/cache';
 import {
@@ -305,90 +307,74 @@ export function AiConnect({
             const active = localActiveId === model.id;
             const downloading = downloadingId === model.id;
             return (
-              <div key={model.id} className="gi-inset">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-medium">
-                      {model.label}
-                      <span className="ml-2 font-normal gi-muted">{formatDownloadSize(model.bytes)}</span>
-                    </div>
-                    <p className="mt-1 text-xs gi-muted">{model.blurb}</p>
-                  </div>
-                  {active ? <Badge>In use</Badge> : null}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {ready ? (
-                    <>
-                      <button
-                        className={primaryClass}
-                        disabled={active || Boolean(downloadingId)}
-                        onClick={() => void downloadLocal(model.id)}
-                      >
-                        {active ? 'Using this model' : downloading ? 'Checking model…' : 'Use this model'}
-                      </button>
-                      <button className={quietClass} onClick={() => void removeLocal(model.id)} disabled={Boolean(downloadingId)}>
-                        Remove
-                      </button>
-                    </>
-                  ) : (
+              <ModelRow key={model.id} model={model} active={active}>
+                {ready ? (
+                  <>
                     <button
                       className={primaryClass}
+                      disabled={active || Boolean(downloadingId)}
                       onClick={() => void downloadLocal(model.id)}
-                      disabled={Boolean(downloadingId)}
                     >
-                      {downloading ? 'Downloading…' : 'Download'}
+                      {active ? 'Using this model' : downloading ? 'Checking model…' : 'Use this model'}
                     </button>
-                  )}
-                </div>
+                    <button className={quietClass} onClick={() => void removeLocal(model.id)} disabled={Boolean(downloadingId)}>
+                      Remove
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className={primaryClass}
+                    onClick={() => void downloadLocal(model.id)}
+                    disabled={Boolean(downloadingId)}
+                  >
+                    {downloading ? 'Downloading…' : 'Download'}
+                  </button>
+                )}
                 {downloading ? <ProgressBar progress={progress} /> : null}
-              </div>
+              </ModelRow>
             );
           })}
-          <div className="gi-inset">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium">Chrome Gemini Nano</div>
-                <p className="mt-1 text-xs gi-muted">
-                  {availability === 'available'
-                    ? 'Already downloaded by Chrome. Summaries and drafts stay on this device.'
-                    : 'Chrome’s built-in model. Larger download, for desktop Chrome with enough memory and disk.'}
-                </p>
-              </div>
-              {onDeviceActive ? <Badge>In use</Badge> : null}
-            </div>
-            <div className="mt-2">
-              {availability === 'available' ? (
-                <button
-                  className={primaryClass}
-                  onClick={() => onPatch({ aiMode: 'local', aiProvider: 'chrome', aiModel: 'gemini-nano' })}
-                  disabled={onDeviceActive}
-                >
-                  {onDeviceActive ? 'Using this model' : 'Use this model'}
-                </button>
-              ) : (
-                <button
-                  className={primaryClass}
-                  onClick={downloadGemini}
-                  disabled={
-                    Boolean(downloadingId) ||
-                    availability === 'checking' ||
-                    availability === 'unavailable' ||
-                    availability === 'unsupported'
-                  }
-                >
-                  {downloadingId === 'gemini-nano'
-                    ? 'Downloading…'
-                    : availability === 'checking'
-                      ? 'Checking…'
-                      : 'Download'}
-                </button>
-              )}
-            </div>
+          <ModelRow
+            model={{
+              ...GEMINI_NANO_INFO,
+              blurb: availability === 'available'
+                ? 'Already downloaded by Chrome. Summaries and drafts stay on this device.'
+                : GEMINI_NANO_INFO.blurb,
+            }}
+            sizeLabel={availability === 'available' ? 'Installed' : 'Managed by Chrome'}
+            active={onDeviceActive}
+          >
+            {availability === 'available' ? (
+              <button
+                className={primaryClass}
+                onClick={() => onPatch({ aiMode: 'local', aiProvider: 'chrome', aiModel: 'gemini-nano' })}
+                disabled={onDeviceActive}
+              >
+                {onDeviceActive ? 'Using this model' : 'Use this model'}
+              </button>
+            ) : (
+              <button
+                className={primaryClass}
+                onClick={downloadGemini}
+                disabled={
+                  Boolean(downloadingId) ||
+                  availability === 'checking' ||
+                  availability === 'unavailable' ||
+                  availability === 'unsupported'
+                }
+              >
+                {downloadingId === 'gemini-nano'
+                  ? 'Downloading…'
+                  : availability === 'checking'
+                    ? 'Checking…'
+                    : 'Download'}
+              </button>
+            )}
             {downloadingId === 'gemini-nano' ? <ProgressBar progress={progress} /> : null}
             {hardwareHint && availability !== 'available' ? (
-              <p className="mt-2 text-xs gi-muted">{hardwareHint}</p>
+              <p className="w-full text-xs gi-muted">{hardwareHint}</p>
             ) : null}
-          </div>
+          </ModelRow>
         </div>
         {downloadError ? <p className="mt-2 text-xs gi-danger">{downloadError}</p> : null}
       </div>
@@ -550,6 +536,97 @@ function ProgressBar({ progress }: { progress: number }) {
         {progress > 0 ? `${Math.round(progress * 100)}%` : 'Starting download…'} Keep this page open.
       </p>
     </div>
+  );
+}
+
+type ModelInfo = Pick<LocalModel, 'label' | 'vendor' | 'blurb' | 'badge' | 'quality' | 'speed' | 'languages' | 'pros' | 'cons'> & {
+  bytes?: number;
+};
+
+const GEMINI_NANO_INFO: ModelInfo = {
+  label: 'Chrome Gemini Nano',
+  vendor: 'google',
+  blurb: 'Chrome’s built-in model. Larger download, for desktop Chrome with enough memory and disk.',
+  quality: 4,
+  speed: 3.5,
+  languages: 'English',
+  pros: ['Nothing extra to download if Chrome has it', 'Strong summaries'],
+  cons: ['Needs about 16 GB of memory and 22 GB of disk', 'Desktop Chrome only'],
+};
+
+const VENDOR_MARK: Record<LocalModelVendor, { letter: string; label: string }> = {
+  liquid: { letter: 'L', label: 'Liquid AI' },
+  google: { letter: 'G', label: 'Google' },
+  qwen: { letter: 'Q', label: 'Alibaba Qwen' },
+  huggingface: { letter: 'S', label: 'Hugging Face' },
+};
+
+function ModelRow({
+  model,
+  active,
+  sizeLabel,
+  children,
+}: {
+  model: ModelInfo;
+  active: boolean;
+  sizeLabel?: string;
+  children: ReactNode;
+}) {
+  const mark = VENDOR_MARK[model.vendor];
+  return (
+    <div className={active ? 'gi-inset gi-model is-active' : 'gi-inset gi-model'}>
+      <div className="flex items-start gap-3">
+        <span className={`gi-model-mark is-${model.vendor}`} title={mark.label} aria-hidden="true">
+          {mark.letter}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="text-sm font-medium">{model.label}</span>
+            {model.badge ? <span className="gi-badge is-tag">{model.badge}</span> : null}
+            {active ? <Badge>In use</Badge> : null}
+          </div>
+          <p className="mt-1 text-xs gi-muted">{model.blurb}</p>
+          <div className="gi-model-stats mt-2">
+            <Meter label="Quality" value={model.quality} />
+            <Meter label="Speed" value={model.speed} />
+            <span className="gi-model-fact">{sizeLabel ?? (model.bytes ? formatDownloadSize(model.bytes) : '')}</span>
+            <span className="gi-model-fact">{model.languages}</span>
+          </div>
+          <ul className="gi-model-notes mt-2" aria-label="Benefits and drawbacks">
+            {model.pros.map((text) => (
+              <li key={text} className="gi-chip is-pro">
+                <span aria-hidden="true">+</span>
+                <span className="sr-only">Benefit: </span>
+                {text}
+              </li>
+            ))}
+            {model.cons.map((text) => (
+              <li key={text} className="gi-chip is-con">
+                <span aria-hidden="true">−</span>
+                <span className="sr-only">Drawback: </span>
+                {text}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex flex-wrap items-center gap-2">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Five signal bars; a .5 rating half-fills the next bar. */
+function Meter({ label, value }: { label: string; value: number }) {
+  return (
+    <span className="gi-meter" aria-label={`${label} ${value.toFixed(1)} out of 5`}>
+      <span className="gi-meter-label">{label}</span>
+      <span className="gi-meter-bars" aria-hidden="true">
+        {[1, 2, 3, 4, 5].map((bar) => (
+          <i key={bar} className={value >= bar ? 'is-on' : value >= bar - 0.5 ? 'is-half' : ''} />
+        ))}
+      </span>
+      <span className="gi-meter-value">{value.toFixed(1)}</span>
+    </span>
   );
 }
 

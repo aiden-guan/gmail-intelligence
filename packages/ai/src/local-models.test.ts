@@ -8,12 +8,31 @@ import {
 } from './local-models.js';
 
 describe('local model catalog', () => {
-  it('lists lightweight Qwen models without treating them as downloaded', () => {
-    expect(LOCAL_MODELS.map((model) => model.id)).toEqual(['qwen2.5-0.5b', 'qwen3-0.6b']);
+  it('lists lightweight models with ratings and tradeoffs, none downloaded yet', () => {
+    expect(LOCAL_MODELS.map((model) => model.id)).toEqual([
+      'lfm2-700m',
+      'lfm2-1.2b',
+      'gemma-3-1b',
+      'qwen3-0.6b',
+      'qwen2.5-0.5b',
+      'smollm2-360m',
+    ]);
+    expect(new Set(LOCAL_MODELS.map((model) => model.repo)).size).toBe(LOCAL_MODELS.length);
     for (const model of LOCAL_MODELS) {
       expect(localModelIsDownloaded([], model)).toBe(false);
       expect(model.bytes).toBeLessThan(1024 * 1024 * 1024);
+      expect(model.quality).toBeGreaterThanOrEqual(1);
+      expect(model.speed).toBeLessThanOrEqual(5);
+      expect(model.pros.length).toBeGreaterThan(0);
+      expect(model.cons.length).toBeGreaterThan(0);
     }
+  });
+
+  it('needs the data file before a split-weight model counts as downloaded', () => {
+    const model = getLocalModel('lfm2-700m')!;
+    const header = `https://huggingface.co/${localModelWeightMarker(model)}`;
+    expect(localModelIsDownloaded([header], model)).toBe(false);
+    expect(localModelIsDownloaded([header, `${header}_data`], model)).toBe(true);
   });
 
   it('counts a model as downloaded only when its weight file is cached', () => {

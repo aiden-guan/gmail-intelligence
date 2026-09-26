@@ -133,14 +133,14 @@ function getAI() {
   if (settings.aiProvider === 'local') {
     return createPromptBackedProvider(
       'local',
-      (system, user) => completeOnDevice(settings.aiModel, system, user),
+      (system, user, options) => completeOnDevice(settings.aiModel, system, user, options),
       { maxUserChars: 4_000, summaryStyle: 'compact', repairInvalidJson: false },
     );
   }
   if (settings.aiProvider === 'chrome') {
     return createPromptBackedProvider(
       'chrome',
-      (system, user) => completeOnDevice('gemini-nano', system, user),
+      (system, user, options) => completeOnDevice('gemini-nano', system, user, options),
       { maxUserChars: 7_000, summaryStyle: 'compact' },
     );
   }

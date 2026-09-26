@@ -137,6 +137,60 @@ describe('draft suggestion coercion', () => {
   });
 });
 
+describe('compact on-device drafting', () => {
+  const email = {
+    subject: 'Lab access',
+    messages: [{
+      sender: 'Priya Shah <priya@example.com>',
+      bodyText: 'Hi, can you confirm whether you still need badge access to the lab next week? I need to submit the list by Thursday.',
+      timestamp: 'now',
+    }],
+  };
+
+  it('sends plain-text prompts with worked examples and ends the user turn with the task', async () => {
+    const { createPromptBackedProvider } = await import('./prompt-provider.js');
+    const calls: Array<{ system: string; user: string; options?: { examples?: unknown[] } }> = [];
+    const provider = createPromptBackedProvider('local', async (system, user, options) => {
+      calls.push({ system, user, options });
+      return { text: 'Reply: Hi Priya,\n\nYes, I still need lab access next week. Thanks for checking.' };
+    }, { summaryStyle: 'compact', repairInvalidJson: false });
+
+    const result = await provider.draftReply({ ...email, voice: undefined as never, kind: 'reply' });
+
+    expect(result.result.body).toBe('Hi Priya,\n\nYes, I still need lab access next week. Thanks for checking.');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.system).not.toMatch(/JSON/);
+    expect(calls[0]!.user).toMatch(/^From: Priya Shah\nSubject: Lab access/);
+    expect(calls[0]!.user.trim().endsWith('Write my reply to Priya Shah.')).toBe(true);
+    expect(calls[0]!.options?.examples?.length).toBe(2);
+  });
+
+  it('retries once when the model summarizes the email, then fails clearly', async () => {
+    const { createPromptBackedProvider } = await import('./prompt-provider.js');
+    const outputs = [
+      'The email is asking whether the recipient still needs badge access to the lab.',
+      'Hi Priya, yes please keep me on the list. Thanks!',
+    ];
+    const provider = createPromptBackedProvider('local', async () => ({ text: outputs.shift()! }), {
+      summaryStyle: 'compact',
+    });
+    const result = await provider.draftReply({ ...email, voice: undefined as never, kind: 'reply' });
+    expect(result.result.body).toBe('Hi Priya, yes please keep me on the list. Thanks!');
+
+    const stubborn = createPromptBackedProvider('local', async () => ({
+      text: 'Priya is informing the recipient that the sender needs to submit the list by Thursday.',
+    }), { summaryStyle: 'compact' });
+    await expect(stubborn.draftReply({ ...email, voice: undefined as never, kind: 'reply' })).rejects.toThrow(/summarized/);
+  });
+
+  it('flags third-person narration but accepts ordinary replies', async () => {
+    const { draftQualityIssue } = await import('./draft-prompt.js');
+    expect(draftQualityIssue(email.messages, 'This message informs the reader about new lab access rules.')).toMatch(/summarized/);
+    expect(draftQualityIssue(email.messages, 'The sender wants to know if badge access is still needed.')).toMatch(/summarized/);
+    expect(draftQualityIssue(email.messages, 'Thanks for your email! Yes, I still need access next week.')).toBeNull();
+  });
+});
+
 describe('summary thread formatting and coercion', () => {
   it('keeps the compact model on the latest update when an older notice is quoted', async () => {
     const { formatThreadForSummary } = await import('./summary-prompt.js');

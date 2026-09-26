@@ -1,4 +1,4 @@
-import { getLocalModel, type LocalModel } from '@gi/ai';
+import { getLocalModel, type ChatExample, type LocalModel, type PromptOptions } from '@gi/ai';
 import { listDownloadedModelIds } from './cache';
 
 type ProgressInfo = {
@@ -16,6 +16,7 @@ type Generator = {
     options: {
       max_new_tokens: number;
       do_sample: boolean;
+      repetition_penalty?: number;
       tokenizer_encode_kwargs?: { enable_thinking: boolean };
     },
   ): Promise<Array<{ generated_text?: string | ChatTurn[] }>>;
@@ -31,8 +32,8 @@ export function downloadQwenModel(modelId: string, onProgress: (fraction: number
   return runExclusive(() => downloadModel(modelId, onProgress));
 }
 
-export function promptWithQwen(modelId: string, system: string, user: string): Promise<string> {
-  return runExclusive(() => generate(modelId, system, user));
+export function promptWithQwen(modelId: string, system: string, user: string, options?: PromptOptions): Promise<string> {
+  return runExclusive(() => generate(modelId, system, user, options));
 }
 
 export function releaseQwen(): Promise<void> {
@@ -45,13 +46,17 @@ export function releaseQwen(): Promise<void> {
 
 async function downloadModel(modelId: string, onProgress: (fraction: number) => void): Promise<void> {
   const model = requireModel(modelId);
+  // Some models split weights into model_q4.onnx and model_q4.onnx_data; track both against the catalog size.
+  const loadedByFile = new Map<string, number>();
   const generator = await loadedGenerator(model, (info: ProgressInfo) => {
       if (!info.file?.includes(`model_${model.dtype}.onnx`)) return;
       if (info.status === 'progress' && info.total) {
-        onProgress(clamp((info.loaded ?? 0) / info.total) * 0.95);
+        loadedByFile.set(info.file, info.loaded ?? 0);
+        const loaded = [...loadedByFile.values()].reduce((sum, value) => sum + value, 0);
+        onProgress(clamp(loaded / model.bytes) * 0.95);
       }
-      if (info.status === 'done') onProgress(0.95);
     });
+  onProgress(0.95);
   // A cached weight file alone does not establish that ONNX can load and run it.
   try {
     const check = await generator(chatMessages(model, 'Answer briefly.', 'Say ready.'), {
@@ -71,14 +76,15 @@ async function downloadModel(modelId: string, onProgress: (fraction: number) => 
   onProgress(1);
 }
 
-async function generate(modelId: string, system: string, user: string): Promise<string> {
+async function generate(modelId: string, system: string, user: string, options?: PromptOptions): Promise<string> {
   const model = requireModel(modelId);
   const downloaded = await listDownloadedModelIds();
   if (!downloaded.includes(model.id)) throw new Error('Download this model in Settings.');
   const generator = await loadedGenerator(model);
-  const output = await generator(chatMessages(model, system, user), {
+  const output = await generator(chatMessages(model, system, user, options?.examples), {
     max_new_tokens: system.startsWith('You summarize') ? 128 : system.startsWith('You classify') ? 96 : 192,
     do_sample: false,
+    ...(options?.repetitionPenalty ? { repetition_penalty: options.repetitionPenalty } : {}),
     tokenizer_encode_kwargs: model.id === 'qwen3-0.6b' ? { enable_thinking: false } : undefined,
   });
   const text = stripThinking(textFromGeneration(output));
@@ -112,11 +118,15 @@ async function loadedGenerator(model: LocalModel, onProgress?: (info: ProgressIn
   return generator;
 }
 
-function chatMessages(model: LocalModel, system: string, user: string): ChatTurn[] {
-  const prompt = model.id === 'qwen3-0.6b' ? `${user}\n/no_think` : user;
+function chatMessages(model: LocalModel, system: string, user: string, examples: ChatExample[] = []): ChatTurn[] {
+  const noThink = (text: string) => (model.id === 'qwen3-0.6b' ? `${text}\n/no_think` : text);
   return [
     { role: 'system', content: system },
-    { role: 'user', content: prompt },
+    ...examples.flatMap((example) => [
+      { role: 'user', content: noThink(example.user) },
+      { role: 'assistant', content: example.assistant },
+    ]),
+    { role: 'user', content: noThink(user) },
   ];
 }
 

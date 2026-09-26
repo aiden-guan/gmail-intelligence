@@ -24,10 +24,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type !== 'ON_DEVICE_PROMPT') return false;
   const modelId = String(message.modelId || 'gemini-nano');
+  const options = {
+    examples: Array.isArray(message.examples) ? message.examples : undefined,
+    repetitionPenalty: typeof message.repetitionPenalty === 'number' ? message.repetitionPenalty : undefined,
+  };
   const pending =
     modelId === 'gemini-nano'
-      ? promptWithChromeModel(String(message.system || ''), String(message.user || ''))
-      : promptWithQwen(modelId, String(message.system || ''), String(message.user || ''));
+      ? promptWithChromeModel(String(message.system || ''), String(message.user || ''), options)
+      : promptWithQwen(modelId, String(message.system || ''), String(message.user || ''), options);
   void pending
     .then((text) => sendResponse({ text }))
     .catch((error: unknown) => {

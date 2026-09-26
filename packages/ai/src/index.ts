@@ -576,7 +576,8 @@ export {
   localModelIsDownloaded,
   localModelWeightMarker,
 } from './local-models.js';
-export type { LocalModel } from './local-models.js';
+export type { LocalModel, LocalModelVendor } from './local-models.js';
 export { createPromptBackedProvider, extractJsonObject } from './prompt-provider.js';
-export type { PromptComplete } from './prompt-provider.js';
+export type { PromptComplete, PromptOptions } from './prompt-provider.js';
+export type { ChatExample } from './draft-prompt.js';
 export { draftQualityIssue } from './draft-prompt.js';

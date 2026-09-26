@@ -22,7 +22,14 @@ import {
   formatThreadForSummary,
   summaryUserContent,
 } from './summary-prompt.js';
-import { draftQualityIssue, draftSystemPrompt, formatDraftContext } from './draft-prompt.js';
+import {
+  cleanCompactDraft,
+  compactDraftPrompt,
+  draftQualityIssue,
+  draftSystemPrompt,
+  formatDraftContext,
+  type ChatExample,
+} from './draft-prompt.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -35,7 +42,13 @@ export type PromptCompletion = {
   usage?: UsageStats;
 };
 
-export type PromptComplete = (system: string, user: string) => Promise<PromptCompletion>;
+export type PromptOptions = {
+  /** Worked examples sent as prior user/assistant turns. */
+  examples?: ChatExample[];
+  repetitionPenalty?: number;
+};
+
+export type PromptComplete = (system: string, user: string, options?: PromptOptions) => Promise<PromptCompletion>;
 
 const JSON_RULE = 'Return one JSON object only. No markdown fences and no explanation.';
 
@@ -119,10 +132,14 @@ export function createPromptBackedProvider(
       return { result: data, usage };
     },
     async draftReply(input: DraftInput) {
-      return draft(chatJson, input, 'reply', summaryStyle, maxUserChars);
+      return summaryStyle === 'compact'
+        ? compactDraft(complete, input, 'reply', maxUserChars)
+        : draft(chatJson, input, 'reply', summaryStyle, maxUserChars);
     },
     async draftFollowUp(input: DraftInput) {
-      return draft(chatJson, input, 'follow_up', summaryStyle, maxUserChars);
+      return summaryStyle === 'compact'
+        ? compactDraft(complete, input, 'follow_up', maxUserChars)
+        : draft(chatJson, input, 'follow_up', summaryStyle, maxUserChars);
     },
     async rewriteText(input: RewriteInput) {
       const schema = z.object({ text: z.string() });
@@ -180,6 +197,34 @@ async function draft(
     },
     usage,
   };
+}
+
+/** Plain-text drafting for small on-device models, with one stricter retry. */
+async function compactDraft(
+  complete: PromptComplete,
+  input: DraftInput,
+  kind: 'reply' | 'follow_up',
+  maxUserChars: number,
+): Promise<{ result: DraftSuggestion; usage?: UsageStats }> {
+  let lastIssue = '';
+  for (const retry of [false, true]) {
+    const prompt = compactDraftPrompt(input, kind, maxUserChars, retry);
+    const completion = await complete(prompt.system, prompt.user, {
+      examples: prompt.examples,
+      repetitionPenalty: retry ? 1.2 : 1.1,
+    });
+    const coerced = coerceDraftSuggestion(completion.text) as { body?: string };
+    const body = cleanCompactDraft(coerced.body || completion.text);
+    const issue = body ? draftQualityIssue(input.messages, body) : 'On-device model returned an empty response.';
+    if (!issue) {
+      return {
+        result: { mode: input.mode ?? 'direct', body, placeholders: [] },
+        usage: completion.usage,
+      };
+    }
+    lastIssue = issue;
+  }
+  throw new Error(lastIssue);
 }
 
 export function coerceDraftSuggestion(value: unknown): unknown {

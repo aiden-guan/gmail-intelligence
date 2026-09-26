@@ -27,7 +27,7 @@ export function PopupApp() {
     trackingReady ? 'Tracker connected' : diag?.tracking === 'not_configured' ? 'Tracking not set up' : 'Tracker unavailable';
 
   return (
-    <div className="gi-app w-[320px] p-3">
+    <div className="gi-app gi-popup-app w-[320px]">
       <div className="gi-shell">
         <div className="gi-core">
           <Brand />

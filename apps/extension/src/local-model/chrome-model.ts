@@ -1,3 +1,5 @@
+import type { ChatExample, PromptOptions } from '@gi/ai';
+
 export type OnDeviceAvailability =
   | 'unsupported'
   | 'unavailable'
@@ -93,8 +95,8 @@ export function startOnDeviceDownload(onProgress: (fraction: number) => void): P
   );
 }
 
-export function promptWithChromeModel(system: string, user: string): Promise<string> {
-  const run = promptChain.then(() => runPrompt(system, user));
+export function promptWithChromeModel(system: string, user: string, options?: PromptOptions): Promise<string> {
+  const run = promptChain.then(() => runPrompt(system, user, options?.examples));
   promptChain = run.then(
     () => undefined,
     () => undefined,
@@ -107,16 +109,23 @@ export function onDeviceUnavailableMessage(status: OnDeviceAvailability): string
   return '';
 }
 
-async function runPrompt(system: string, user: string): Promise<string> {
+async function runPrompt(system: string, user: string, examples: ChatExample[] = []): Promise<string> {
   const model = getLanguageModel();
   if (!model) throw new Error(HARDWARE_HINT);
   const availability = await model.availability(chromeModelOptions);
   if (availability !== 'available') {
     throw new Error('Download the on-device model in Settings.');
   }
+  const initialPrompts: NonNullable<ChromeModelOptions['initialPrompts']> = [
+    ...(system ? [{ role: 'system' as const, content: system }] : []),
+    ...examples.flatMap((example) => [
+      { role: 'user' as const, content: example.user },
+      { role: 'assistant' as const, content: example.assistant },
+    ]),
+  ];
   const session = await model.create({
     ...chromeModelOptions,
-    initialPrompts: system ? [{ role: 'system', content: system }] : undefined,
+    initialPrompts: initialPrompts.length ? initialPrompts : undefined,
   });
   try {
     const text = await session.prompt(user.slice(0, 8000));
