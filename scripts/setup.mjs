@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 /**
- * First-run setup after cloning the repo.
- *   npm run setup
- * Opens the built extension folder and Chrome when passed --open.
+ * First-run setup after cloning PigeonBox.
+ *   npm run setup            install, create local dev config, build, verify the manifest
+ *   npm run setup -- --open  also open the built folder and chrome://extensions
+ *
+ * Needs no PigeonBox account, Cloud backend, Supabase, Stripe, Convex,
+ * Cloudflare account or AI key.
  */
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateManifest } from './lib/extension-package.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const openAfter = process.argv.includes('--open');
@@ -146,39 +150,32 @@ const dist = join(root, 'apps', 'extension', 'dist');
 if (!existsSync(join(dist, 'manifest.json'))) {
   fail('Build finished, but apps/extension/dist/manifest.json is missing.');
 }
+const manifest = JSON.parse(readFileSync(join(dist, 'manifest.json'), 'utf8'));
+const builtFiles = new Set();
+const listBuilt = (dir, prefix = '') => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) listBuilt(join(dir, entry.name), name);
+    else builtFiles.add(name);
+  }
+};
+listBuilt(dist);
+const manifestProblems = validateManifest(manifest, builtFiles);
+if (manifestProblems.length) fail(`The built manifest has problems:\n  ${manifestProblems.join('\n  ')}`);
 
 console.log(`
-Ready.
+PigeonBox ${manifest.version} is built.
 
-Extension folder:
   ${dist}
 
-Load it in Chrome
-  1. Open chrome://extensions
-  2. Turn on Developer mode (top right)
-  3. Click Load unpacked
-  4. Select the folder above (the one that contains manifest.json)
+Load it: chrome://extensions → Developer mode → Load unpacked → pick the folder above.
+Then open Gmail. Settings → "How should PigeonBox run?" picks on-device AI, Ollama or your own key.
+Categories work with AI off.
 
-Try the inbox
-  1. Pin "Gmail Intelligence" from the puzzle-piece menu
-  2. Open https://mail.google.com while you are signed in
-  3. Click the extension icon
-  4. Sign in with ChatGPT, or download a model
-     Categories still work if you skip that
-  5. Open a thread. A summary sidebar and category labels should show up
-  6. If Gmail looks unchanged, open extension Settings and click Run diagnostics
-
-While developing
-  npm run dev
-  Then click Reload on chrome://extensions after it rebuilds
-
-Tracking (optional)
-  npm run tracker
-  Paste the URL and token from .local/tracker.txt into Settings → Tracking
-  Click Save settings
-  ${usingSupabase ? 'This machine is set up to store events in Supabase.' : 'Events stay in memory until you stop the tracker. No cloud account needed.'}
-
-The same steps are in the README under "Install".
+Develop:   npm run dev   (then Reload on chrome://extensions)
+Check:     npm run verify
+Tracking:  npm run tracker, then paste .local/tracker.txt into Settings → Email tracking
+           ${usingSupabase ? 'This machine stores tracking events in Supabase.' : 'Events stay in memory until you stop it. No account needed.'}
 `);
 
 if (openAfter) {

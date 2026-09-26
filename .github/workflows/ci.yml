@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Repository checks (namespace, private imports, secrets, env files)
+        run: node scripts/check-repo.mjs
+
+      - name: Versions
+        run: node scripts/check-versions.mjs
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package and validate release ZIP
+        run: node scripts/package-extension.mjs --out "$RUNNER_TEMP/package"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pigeonbox-extension-${{ github.sha }}
+          path: ${{ runner.temp }}/package/
+          retention-days: 7
