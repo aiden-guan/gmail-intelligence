@@ -56,6 +56,7 @@ Excluded from release builds (`VITE_PIGEONBOX_EXPERIMENTAL=false`): the UI is hi
 
 ## Listing checklist (manual)
 
+- [x] 128×128 icon (generated from the mascot; earlier builds shipped 16×16 placeholders)
 - [ ] Developer account and verified publisher email
 - [ ] Single purpose: "Inbox intelligence and open tracking for Gmail"
 - [ ] Permission justifications (table above)

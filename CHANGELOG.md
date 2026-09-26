@@ -36,6 +36,10 @@ PigeonBox becomes one extension with two execution environments: **Local** (on t
 - Tracker and Convex compare the personal token in constant time.
 - Release builds exclude source maps and machine-local `tracker-config.json`; packaging refuses archives containing credentials.
 
+### Fixed
+- Extension icons were 16×16 placeholders at every size. `icon16/48/128.png` are now generated from the idle pigeon in the sprite sheet (`apps/extension/scripts/make-icons.py`), as the Chrome Web Store requires a real 128×128 icon.
+- The "AI Inbox" toggle in Settings now reflects Cloud mode.
+
 ### Unchanged on purpose
 - IndexedDB `gi_mailbox_v1`, `chrome.storage` keys, tracking protocol identifiers, Supabase migrations, and the `gi-tracker` Worker name.
 
