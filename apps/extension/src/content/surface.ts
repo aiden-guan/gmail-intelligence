@@ -83,6 +83,44 @@ ${orbCss}
   scrollbar-width: none;
 }
 .gi-shell { overflow: hidden; scrollbar-width: none; }
+.gi-shell[data-variant="float"] {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: var(--gi-w, 308px);
+  height: var(--gi-h, auto);
+  max-height: calc(100vh - 16px);
+}
+.gi-shell[data-variant="float"] > .gi-core { flex: 1 1 auto; min-height: 0; max-height: none; }
+[data-gi-drag] { cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; }
+[data-gi-drag] button { cursor: pointer; }
+:host([data-gi-dragging]) .gi-shell,
+:host([data-gi-dragging]) .gi-pill { transition: none; }
+:host([data-gi-dragging]) [data-gi-drag] { cursor: grabbing; }
+:host([data-gi-dragging]) .gi-pill:active { transform: none; }
+.gi-resize {
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+.gi-resize::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border-left: 2px solid rgba(244, 240, 232, 0.5);
+  border-bottom: 2px solid rgba(244, 240, 232, 0.5);
+  border-bottom-left-radius: 6px;
+}
+.gi-shell:hover .gi-resize, :host([data-gi-dragging]) .gi-resize { opacity: 1; }
 .gi-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .gi-brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .gi-mark {

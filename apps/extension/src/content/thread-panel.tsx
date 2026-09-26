@@ -72,6 +72,8 @@ export function ThreadIntelCard(props: {
   const pigeonState: PigeonState = props.drafting ? 'drafting' : modelFailed ? 'error' : waiting ? 'indexing' : props.tracking?.opened ? 'opened' : 'idle';
   const pigeonLabel = props.drafting ? 'Finding the right words' : modelFailed ? 'Let’s try that again' : waiting ? 'Reading between the lines' : props.tracking?.opened ? 'An open was detected' : summaryReady ? 'The thread, untangled' : 'Ready when you are';
 
+  const floating = (props.variant || 'float') === 'float';
+
   function setMode(next: IslandMode) {
     if (props.mode == null) setUncontrolled(next);
     props.onMode?.(next);
@@ -86,6 +88,7 @@ export function ThreadIntelCard(props: {
       <button
         type="button"
         className="gi-pill"
+        data-gi-drag
         aria-expanded="false"
         aria-label="Show intelligence"
         onMouseDown={keep}
@@ -111,7 +114,7 @@ export function ThreadIntelCard(props: {
       onClick={keep}
     >
       <div className="gi-core">
-        <div className="gi-bar">
+        <div className="gi-bar" data-gi-drag={floating || undefined} title={floating ? 'Drag to move · double-click to reset' : undefined}>
           <div className="gi-brand">
             <Pigeon state={pigeonState} size={30} />
             <span className="gi-kicker">PigeonBox</span>
@@ -120,7 +123,7 @@ export function ThreadIntelCard(props: {
             Hide
           </button>
         </div>
-        <div className="gi-thread-mascot"><Pigeon state={pigeonState} size={80} /><div><strong>{pigeonLabel}</strong><small>Your thread companion</small></div></div>
+        <div className="gi-thread-mascot" data-gi-drag={floating || undefined}><Pigeon state={pigeonState} size={80} /><div><strong>{pigeonLabel}</strong><small>Your thread companion</small></div></div>
         <div className="gi-catrow">
           <div className="gi-cat">{category || 'Inbox'}</div>
           {props.intel?.manual ? <span className="gi-you">Set by you</span> : null}
@@ -192,6 +195,7 @@ export function ThreadIntelCard(props: {
           </button>
         </div>
       </div>
+      {floating ? <div className="gi-resize" data-gi-resize aria-hidden="true" /> : null}
     </div>
   );
 }

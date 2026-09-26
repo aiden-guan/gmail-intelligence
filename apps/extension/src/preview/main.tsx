@@ -8,7 +8,8 @@ import { SidePanelApp } from "../sidepanel/SidePanelApp";
 import { SettingsApp } from "../settings/SettingsApp";
 import { OnboardingApp } from "../onboarding/OnboardingApp";
 import { ThreadIntelCard } from "../content/thread-panel";
-import { SURFACE_CSS } from "../content/surface";
+import { SURFACE_CSS, shadowMount } from "../content/surface";
+import { installFloatDrag, placeFloat } from "../content/float-drag";
 import { Pigeon, type PigeonState } from "../ui/Pigeon";
 import "../styles.css";
 import "./preview.css";
@@ -48,6 +49,21 @@ function Preview(){
  return <div className="preview"><header className="preview-nav"><span className="preview-wordmark">PigeonBox<span> / Copper Perch</span></span><nav aria-label="Preview screens">{["overview","settings","onboarding"].map(v=><button key={v} aria-pressed={view===v} onClick={()=>setView(v)}>{v}</button>)}</nav><span className="preview-fixture">Design preview · fictional mail</span></header>
  {view==="overview" ? <><section className="preview-intro"><div><div className="gi-kicker">A quieter kind of clever</div><h1>Good mail.<br/><em>Better company.</em></h1></div><p>Warm copper. Smoked glass.<br/>A familiar little face, with a life of its own.</p></section><section className="preview-grid"><article><div className="preview-caption">01 / Your perch <span>Toolbar popup</span></div><PopupApp/></article><article><div className="preview-caption">02 / Room to focus <button onClick={()=>{empty=!isEmpty;setEmpty(!isEmpty);setPanelKey(k=>k+1);}}>{isEmpty?"Show mail":"Empty state"}</button></div><div className="preview-panel"><SidePanelApp key={panelKey}/></div></article><article><div className="preview-caption">03 / The important bits <span>Thread companion</span></div><ThreadPreview state={state}/></article></section><section className="preview-states" aria-label="Pigeon animation states">{(["idle","indexing","drafting","opened","error"] as PigeonState[]).map(s=><button key={s} aria-pressed={state===s} onClick={()=>setState(s)}><Pigeon state={s} size={94}/><strong>{s==="opened"?"Open detected":s}</strong><span>4 animation frames</span></button>)}</section></> : view==="settings" ? <SettingsApp/> : <OnboardingApp/>}
  </div>;
+}
+// `#float` mounts the draggable, resizable card the way the content script does in Gmail.
+if (location.hash === "#float") {
+ const host = document.createElement("aside"); host.id = "gi-thread-panel";
+ Object.assign(host.style, { position:"fixed", zIndex:"10", display:"block", width:"max-content" });
+ document.documentElement.append(host);
+ const fallback = () => ({ right: 28, top: 72 });
+ installFloatDrag(host, fallback);
+ function FloatCard() {
+  const [mode,setMode]=useState<"docked"|"open"|"expanded">("open");
+  return <ThreadIntelCard mode={mode} onMode={setMode} canDraft intel={{classification:{category:"PROMOTIONS"},summary:{source:"model",aiStatus:"success",summary:{oneLine:"A Math 52 exam review is scheduled for Monday from 4:00pm to 6:00pm.",keyPoints:["Math 52 midterm review, Monday, 4:00-6:00pm"],actionItems:["Attend the review"]}}}} onDraft={()=>{}} onRemind={()=>{}}/>;
+ }
+ createRoot(shadowMount(host)).render(<FloatCard/>);
+ placeFloat(host, fallback());
+ window.addEventListener("resize", () => placeFloat(host, fallback()));
 }
 const previewRoot = createRoot(document.getElementById("root")!);
 previewRoot.render(<Preview/>);

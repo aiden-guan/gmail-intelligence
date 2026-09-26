@@ -43,6 +43,7 @@ import {
 import { installSentStatus, type SentStatusController } from './sent-status';
 import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
 import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
+import { installFloatDrag, placeFloat, type FloatPos } from './float-drag';
 import { showBusyToast, showToast } from './toasts';
 import { SelfViewDeduplicator } from './self-view-dedupe';
 
@@ -433,12 +434,16 @@ export function mountSdkUi(
   }
 }
 
-function placeFloatPanel(panel: HTMLElement): void {
+function defaultFloatPos(): FloatPos {
   const main = document.querySelector<HTMLElement>('[role="main"]');
   const rect = main?.getBoundingClientRect();
   const scrollbar = main ? Math.max(0, main.offsetWidth - main.clientWidth) : 0;
   const right = rect ? floatPanelRightPx(window.innerWidth, rect.right, scrollbar) : 28;
-  panel.style.setProperty('right', `${right}px`, 'important');
+  return { right, top: 72 };
+}
+
+function placeFloatPanel(panel: HTMLElement): void {
+  placeFloat(panel, defaultFloatPos());
 }
 
 function showDomThreadPanel(threadId: string): void {
@@ -451,6 +456,7 @@ function showDomThreadPanel(threadId: string): void {
     panel.addEventListener('mousedown', (event) => event.stopPropagation());
     panel.addEventListener('click', (event) => event.stopPropagation());
     document.documentElement.append(panel);
+    installFloatDrag(panel, defaultFloatPos);
     window.addEventListener('resize', () => {
       const current = document.getElementById('gi-thread-panel');
       if (current) placeFloatPanel(current);
