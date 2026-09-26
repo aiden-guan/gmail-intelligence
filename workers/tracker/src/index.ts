@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { safeRedirectUrl, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches, openEventMatchesSenderClaim, planPageReloadProxy, selectSenderProxyClaim } from './helpers.js';
 import { getStore, StoreError, type ClaimRow, type EmailRow, type TrackerStore } from './store.js';
+export { createMemoryState, createMemoryStore, StoreError } from './store.js';
+export type { ClaimRow, EmailRow, EventRow, LinkRow, MemoryState, TrackerStore } from './store.js';
 
 export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, detectOpenRequestSource, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches } from './helpers.js';
 
