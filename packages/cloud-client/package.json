@@ -1,0 +1,30 @@
+{
+  "name": "@pigeonbox/cloud-client",
+  "version": "0.2.0",
+  "private": true,
+  "description": "HTTP client for the PigeonBox Cloud API, plus a Cloud-backed AIProvider.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pigeonbox/ai": "*",
+    "@pigeonbox/api-contract": "*",
+    "@pigeonbox/shared": "*",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}

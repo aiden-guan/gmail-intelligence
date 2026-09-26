@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AgentLoop } from './index.js';
-import { AIJobQueue, type AIProvider } from '@gi/ai';
-import { getMailboxDb, resetMailboxDbForTests } from '@gi/mailbox';
-import { DEFAULT_SETTINGS } from '@gi/shared';
+import { AIJobQueue, type AIProvider } from '@pigeonbox/ai';
+import { getMailboxDb, resetMailboxDbForTests } from '@pigeonbox/mailbox';
+import { DEFAULT_SETTINGS } from '@pigeonbox/shared';
 
 describe('AI job asynchronous lifecycle and deduplication', () => {
   beforeEach(() => {

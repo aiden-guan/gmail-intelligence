@@ -1,6 +1,6 @@
-import type { AIProvider, AIJobQueue, MailboxOwner } from '@gi/ai';
-import { draftNeedsRefresh, draftQualityIssue } from '@gi/ai';
-import type { MailboxDatabase } from '@gi/mailbox';
+import type { AIProvider, AIJobQueue, MailboxOwner } from '@pigeonbox/ai';
+import { draftNeedsRefresh, draftQualityIssue } from '@pigeonbox/ai';
+import type { MailboxDatabase } from '@pigeonbox/mailbox';
 import {
   AgentSafetyTier,
   addBusinessDays,
@@ -11,7 +11,7 @@ import {
   type AIJobStatus,
   type ClassificationResult,
   type ExtensionSettings,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
 import {
   applyRules,
   archiveDecision,
@@ -682,7 +682,7 @@ export class AgentLoop {
   private async maybeArchive(
     input: { threadId: string; latestSenderEmail: string },
     classification: ClassificationResult,
-    rules: import('@gi/mailbox').StructuredRule[],
+    rules: import('@pigeonbox/mailbox').StructuredRule[],
   ): Promise<void> {
     const settings = this.deps.settings();
     const decision = archiveDecision({

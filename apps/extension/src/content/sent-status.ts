@@ -5,8 +5,8 @@ import {
   type TrackedEmailSummary,
   type TrackingRowQuery,
   type TrackingStatusCopy,
-} from '@gi/tracking';
-import { findThreadRows, threadIdFromLocation } from '@gi/gmail';
+} from '@pigeonbox/tracking';
+import { findThreadRows, threadIdFromLocation } from '@pigeonbox/gmail';
 import { ensureSurface } from './surface';
 import type { SelfViewSource } from './message-self-view';
 

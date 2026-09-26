@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { AIJobQueue } from '@gi/ai';
-import { detectPlaceholders } from '@gi/shared';
+import { AIJobQueue } from '@pigeonbox/ai';
+import { detectPlaceholders } from '@pigeonbox/shared';
 
 describe('AI cache invalidation', () => {
   it('returns cached result for same fingerprint', async () => {

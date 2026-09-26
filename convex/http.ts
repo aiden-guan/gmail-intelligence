@@ -33,11 +33,21 @@ function gif(): Response {
   });
 }
 
+/** Compare secrets without leaking their length or matching prefix through timing. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  let diff = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
+  return diff === 0;
+}
+
 function authorized(request: Request): boolean {
   const token = process.env.PERSONAL_API_TOKEN || "";
   const header = request.headers.get("Authorization") || "";
   const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
-  return Boolean(token) && presented === token;
+  return Boolean(token) && timingSafeEqual(presented, token);
 }
 
 function safeRedirectUrl(url: string): string | null {

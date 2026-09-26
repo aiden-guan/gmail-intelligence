@@ -1,4 +1,4 @@
-import { splitSuperseded } from '@gi/shared';
+import { splitSuperseded } from '@pigeonbox/shared';
 import type { DraftInput, MailboxOwner } from './index.js';
 
 export type DraftKind = 'reply' | 'follow_up';
@@ -107,7 +107,7 @@ export function compactDraftPrompt(
           fromAddress: 'dana.lee@example.com',
           me: exampleMe,
           subject: 'Slides from Tuesday',
-          body: `Hi ${exampleFirst},\n\nCould you send me the slides from Tuesday\'s planning meeting? I want to review them before Friday.\n\nThanks,\nDana`,
+          body: `Hi ${exampleFirst},\n\nCould you send me the slides from Tuesday's planning meeting? I want to review them before Friday.\n\nThanks,\nDana`,
           kind: 'reply',
         }),
         assistant: 'Hi Dana,\n\nSure, I\'ll send the slides over today so you have them before Friday.',

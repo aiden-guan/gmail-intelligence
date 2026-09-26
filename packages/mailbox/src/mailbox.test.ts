@@ -7,8 +7,8 @@ import {
   resetMailboxDbForTests,
   buildIndexQuery,
   filterSplitThreads,
-} from '@gi/mailbox';
-import { contentFingerprint, hashBody } from '@gi/shared';
+} from '@pigeonbox/mailbox';
+import { contentFingerprint, hashBody } from '@pigeonbox/shared';
 
 describe('IndexedDB mailbox', () => {
   beforeEach(() => {

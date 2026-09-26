@@ -5,7 +5,7 @@ import {
   localModelWeightMarker,
   type LocalDtype,
   type LocalModel,
-} from '@gi/ai';
+} from '@pigeonbox/ai';
 import { deleteStoredModelUrls, storedModelUrls } from './model-store';
 
 export async function listDownloadedModelIds(): Promise<string[]> {

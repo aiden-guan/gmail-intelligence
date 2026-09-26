@@ -1,4 +1,4 @@
-import type { Contact, GmailActionResult, GmailCapabilities } from '@gi/shared';
+import type { Contact, GmailActionResult, GmailCapabilities } from '@pigeonbox/shared';
 import { EMPTY_CAPABILITIES } from './capabilities.js';
 import {
   findArchiveButton,

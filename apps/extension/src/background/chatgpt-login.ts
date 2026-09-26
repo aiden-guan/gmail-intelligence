@@ -9,7 +9,7 @@ import {
   sessionFromChatGptAuth,
   type ChatGptSession,
   type UsageStats,
-} from '@gi/ai';
+} from '@pigeonbox/ai';
 
 const SESSION_KEY = 'chatgptSession';
 const PENDING_KEY = 'chatgptPendingLogin';

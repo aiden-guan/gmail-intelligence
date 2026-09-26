@@ -19,13 +19,16 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@gi/shared': path.resolve(__dirname, 'packages/shared/src'),
-      '@gi/gmail': path.resolve(__dirname, 'packages/gmail/src'),
-      '@gi/mailbox': path.resolve(__dirname, 'packages/mailbox/src'),
-      '@gi/ai': path.resolve(__dirname, 'packages/ai/src'),
-      '@gi/search': path.resolve(__dirname, 'packages/search/src'),
-      '@gi/agent': path.resolve(__dirname, 'packages/agent/src'),
-      '@gi/tracking': path.resolve(__dirname, 'packages/tracking/src'),
+      '@pigeonbox/shared': path.resolve(__dirname, 'packages/shared/src'),
+      '@pigeonbox/gmail': path.resolve(__dirname, 'packages/gmail/src'),
+      '@pigeonbox/mailbox': path.resolve(__dirname, 'packages/mailbox/src'),
+      '@pigeonbox/ai': path.resolve(__dirname, 'packages/ai/src'),
+      '@pigeonbox/search': path.resolve(__dirname, 'packages/search/src'),
+      '@pigeonbox/agent': path.resolve(__dirname, 'packages/agent/src'),
+      '@pigeonbox/tracking': path.resolve(__dirname, 'packages/tracking/src'),
+      '@pigeonbox/api-contract': path.resolve(__dirname, 'packages/api-contract/src'),
+      '@pigeonbox/cloud-client': path.resolve(__dirname, 'packages/cloud-client/src'),
+      '@pigeonbox/core': path.resolve(__dirname, 'packages/core/src'),
     },
   },
 });

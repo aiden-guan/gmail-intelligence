@@ -1,16 +1,21 @@
 import { Brand, Pigeon } from '../ui/Pigeon';
 import { useState } from 'react';
-import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
+import { DEFAULT_SETTINGS, type ExtensionSettings } from '@pigeonbox/shared';
 import { ProfileFields } from '../setup/ProfileFields';
+import { useProductState } from '../ui/product-state';
 
 export function OnboardingApp() {
   const [step, setStep] = useState(0);
   const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_SETTINGS);
+  const [openCloudSetup, setOpenCloudSetup] = useState(false);
+  const product = useProductState();
 
   function finish() {
     chrome.storage.local.set({ onboardingComplete: true });
     chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings });
-    chrome.tabs.create({ url: 'https://mail.google.com/' });
+    // Cloud needs sign-in and explicit consent, which happen in Settings; nothing switches to Cloud here.
+    if (openCloudSetup) chrome.runtime.openOptionsPage();
+    else chrome.tabs.create({ url: 'https://mail.google.com/' });
     window.close();
   }
 
@@ -54,20 +59,30 @@ export function OnboardingApp() {
           ) : null}
           {step === 2 ? (
             <>
-              <h1 className="gi-display">Choose AI</h1>
-              <p className="gi-muted mt-3 text-[14px] leading-relaxed">Pick where summaries and drafts run. You can change this later.</p>
+              <h1 className="gi-display">How should PigeonBox run?</h1>
+              <p className="gi-muted mt-3 text-[14px] leading-relaxed">You can change this any time in Settings.</p>
               <div className="mt-6 flex flex-col gap-2">
                 <Choice
                   title="On this computer"
-                  detail="Chrome’s built-in model, or a download you choose in Settings."
+                  detail="Private, free, no account. Pick a model to download in Settings, or use Chrome’s built-in model."
                   onClick={() => {
                     setSettings({ ...settings, aiMode: 'local', aiProvider: 'chrome', aiModel: 'gemini-nano' });
                     setStep(3);
                   }}
                 />
+                {product.state.cloudAvailable ? (
+                  <Choice
+                    title="PigeonBox Cloud"
+                    detail="No model downloads or personal API keys. Sign in and agree to Cloud processing in Settings."
+                    onClick={() => {
+                      setOpenCloudSetup(true);
+                      setStep(3);
+                    }}
+                  />
+                ) : null}
                 <Choice
-                  title="API provider"
-                  detail="Use a key from OpenAI or a compatible endpoint."
+                  title="Advanced"
+                  detail="Ollama or your own API key. Set it up in Settings → Change AI."
                   onClick={() => {
                     setSettings({ ...settings, aiMode: 'remote', aiProvider: 'openai' });
                     setStep(3);
@@ -75,7 +90,7 @@ export function OnboardingApp() {
                 />
                 <Choice
                   title="Skip for now"
-                  detail="Categories still work with local rules."
+                  detail="Categories still work with on-device rules."
                   onClick={() => {
                     setSettings({ ...settings, aiMode: 'disabled' });
                     setStep(3);
@@ -99,7 +114,7 @@ export function OnboardingApp() {
               <h1 className="gi-display">Ready</h1>
               <p className="gi-muted mt-3 text-[14px] leading-relaxed">Open Gmail. Categories and summaries show up as you read. Hide the card any time from its corner.</p>
               <button type="button" className="gi-btn mt-8" onClick={finish}>
-                Open Gmail
+                {openCloudSetup ? 'Set up PigeonBox Cloud' : 'Open Gmail'}
               </button>
             </>
           ) : null}

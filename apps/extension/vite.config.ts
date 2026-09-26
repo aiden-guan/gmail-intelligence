@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 
@@ -65,6 +65,30 @@ function flattenExtensionHtml(): Plugin {
   };
 }
 
+/**
+ * `PIGEONBOX_RELEASE=1` builds what ships to the Chrome Web Store and GitHub
+ * Releases: no source maps, no experimental features, and no machine-local
+ * `tracker-config.json` (a developer's personal tracker token).
+ */
+const release = process.env.PIGEONBOX_RELEASE === '1';
+/** Release builds go to their own folder so the unpacked dev build in dist/ is left alone. */
+const outDir = process.env.PIGEONBOX_OUT_DIR || (release ? 'dist-release' : 'dist');
+if (release) process.env.VITE_PIGEONBOX_EXPERIMENTAL = 'false';
+
+/** Files that must never ship even if they sit in public/ on a developer machine. */
+const RELEASE_EXCLUDED = ['tracker-config.json'];
+
+function releaseHygiene(): Plugin {
+  return {
+    name: 'pigeonbox-release-hygiene',
+    apply: 'build',
+    async writeBundle(output) {
+      if (!release || !output.dir) return;
+      await Promise.all(RELEASE_EXCLUDED.map((file) => rm(resolve(output.dir!, file), { force: true })));
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [
@@ -72,6 +96,7 @@ export default defineConfig(({ mode }) => ({
     extensionPages(),
     flattenExtensionHtml(),
     keepSingleOnnxWasm(),
+    releaseHygiene(),
     ...(mode !== 'content'
       ? [
           viteStaticCopy({
@@ -100,9 +125,9 @@ export default defineConfig(({ mode }) => ({
       : []),
   ],
   build: {
-    outDir: 'dist',
+    outDir,
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: !release,
     modulePreload: false,
     rollupOptions: {
       input: {
@@ -129,21 +154,24 @@ export default defineConfig(({ mode }) => ({
   },
   resolve: {
     alias: {
-      '@gi/shared': resolve(__dirname, '../../packages/shared/src'),
-      '@gi/gmail': resolve(__dirname, '../../packages/gmail/src'),
-      '@gi/mailbox': resolve(__dirname, '../../packages/mailbox/src'),
-      '@gi/ai': resolve(__dirname, '../../packages/ai/src'),
-      '@gi/search': resolve(__dirname, '../../packages/search/src'),
-      '@gi/agent': resolve(__dirname, '../../packages/agent/src'),
-      '@gi/tracking': resolve(__dirname, '../../packages/tracking/src'),
+      '@pigeonbox/shared': resolve(__dirname, '../../packages/shared/src'),
+      '@pigeonbox/gmail': resolve(__dirname, '../../packages/gmail/src'),
+      '@pigeonbox/mailbox': resolve(__dirname, '../../packages/mailbox/src'),
+      '@pigeonbox/ai': resolve(__dirname, '../../packages/ai/src'),
+      '@pigeonbox/search': resolve(__dirname, '../../packages/search/src'),
+      '@pigeonbox/agent': resolve(__dirname, '../../packages/agent/src'),
+      '@pigeonbox/tracking': resolve(__dirname, '../../packages/tracking/src'),
+      '@pigeonbox/api-contract': resolve(__dirname, '../../packages/api-contract/src'),
+      '@pigeonbox/cloud-client': resolve(__dirname, '../../packages/cloud-client/src'),
+      '@pigeonbox/core': resolve(__dirname, '../../packages/core/src'),
     },
   },
   ...(mode === 'content'
     ? {
         build: {
-          outDir: 'dist',
+          outDir,
           emptyOutDir: false,
-          sourcemap: true,
+          sourcemap: !release,
           rollupOptions: {
             input: resolve(__dirname, 'src/content/index.ts'),
             output: {

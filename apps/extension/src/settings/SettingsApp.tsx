@@ -1,10 +1,12 @@
 import { Brand, Pigeon } from '../ui/Pigeon';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { DEFAULT_SETTINGS, getProviderRequiredOrigin, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
-import { trackerHealthLabel, trackerPermissionOrigin, type TrackerHealthStatus } from '@gi/tracking';
+import { DEFAULT_SETTINGS, getProviderRequiredOrigin, type ExtensionSettings, type ThreadCategory } from '@pigeonbox/shared';
+import { trackerHealthLabel, trackerPermissionOrigin, type TrackerHealthStatus } from '@pigeonbox/tracking';
 import { AiConnect } from '../setup/AiConnect';
 import { ProfileFields } from '../setup/ProfileFields';
+import { RunModePanel } from '../setup/RunModePanel';
 import { Orb } from '../ui/Orb';
+import { useProductState } from '../ui/product-state';
 
 const CATEGORIES: ThreadCategory[] = ['RESPOND', 'WAITING', 'FYI', 'NOTIFICATIONS', 'PROMOTIONS', 'NEWS'];
 
@@ -16,6 +18,8 @@ export function SettingsApp() {
   const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
   const [rules, setRules] = useState('');
   const [trackerHealth, setTrackerHealth] = useState<TrackerHealthStatus | null>(null);
+  const product = useProductState();
+  const cloudMode = product.state.runMode === 'cloud';
 
   const checkTracker = useCallback((current: ExtensionSettings) => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
@@ -112,8 +116,19 @@ export function SettingsApp() {
         <div className="gi-settings-title"><div><div className="gi-kicker">Make yourself at home</div><h1 className="gi-display">Your perch.</h1><p className="gi-muted mt-3 text-sm">A few thoughtful defaults. The rest is up to you.</p></div><Pigeon size={116} /></div>
       </header>
 
+      <Section title="How should PigeonBox run?">
+        <RunModePanel
+          product={product}
+          onAdvanced={() => {
+            setAdvanced(true);
+            setChangeAi(true);
+            requestAnimationFrame(() => document.getElementById('advanced')?.scrollIntoView({ behavior: 'smooth' }));
+          }}
+        />
+      </Section>
+
       <Section title="General">
-        <Toggle label="AI Inbox" checked={settings.aiMode !== 'disabled' && settings.autoClassify} onChange={(on) => update('autoClassify', on)} />
+        <Toggle label="AI Inbox" checked={(cloudMode || settings.aiMode !== 'disabled') && settings.autoClassify} onChange={(on) => update('autoClassify', on)} />
         <Toggle label="Email tracking" checked={settings.trackingEnabled} onChange={(on) => update('trackingEnabled', on)} />
         <Toggle label="Desktop alerts" checked={settings.desktopNotifications} onChange={(on) => update('desktopNotifications', on)} />
       </Section>
@@ -126,17 +141,30 @@ export function SettingsApp() {
         <p className="gi-muted text-xs">Drafts stay local until you click Draft reply. Nothing is sent automatically.</p>
       </Section>
 
-      <Section title="AI">
-        <p className="text-sm">{provider}{settings.aiModel ? ` · ${settings.aiModel}` : ''}</p>
-        <button type="button" className="gi-text-btn mt-2" onClick={() => setChangeAi((open) => !open)}>
-          {changeAi ? 'Hide AI setup' : 'Change AI'}
-        </button>
-        {changeAi ? <div className="mt-3"><AiConnect settings={settings} onPatch={patchSettings} onSignedIn={patchSettings} /></div> : null}
-      </Section>
+      {cloudMode ? null : (
+        <Section title="AI on this computer">
+          <p className="text-sm">{provider}{settings.aiModel && settings.aiMode !== 'disabled' ? ` · ${settings.aiModel}` : ''}</p>
+          <button type="button" className="gi-text-btn mt-2" onClick={() => setChangeAi((open) => !open)}>
+            {changeAi ? 'Hide AI setup' : 'Change AI'}
+          </button>
+          {changeAi ? <div className="mt-3"><AiConnect settings={settings} onPatch={patchSettings} onSignedIn={patchSettings} experimental={product.state.experimental} /></div> : null}
+        </Section>
+      )}
 
       <Section title="Email tracking">
         <Toggle label="Track opens" checked={settings.trackOpens} onChange={(on) => update('trackOpens', on)} />
         <Toggle label="Track links" checked={settings.trackLinks} onChange={(on) => update('trackLinks', on)} />
+        {cloudMode ? (
+          <p className="gi-muted text-xs">
+            {product.has('cloud_tracking')
+              ? 'PigeonBox Cloud hosts your tracker. Your self-hosted tracker settings below are kept for when you run on this computer.'
+              : 'Hosted tracking is not active for this PigeonBox Cloud account. Your self-hosted tracker is used only in Local mode.'}
+          </p>
+        ) : (
+          <p className="gi-muted text-xs">
+            Tracking is optional and self-hosted: run <code>npm run tracker</code>, deploy the Cloudflare Worker, or use your own Convex deployment.
+          </p>
+        )}
         <Field label="Tracker base URL">
           <input
             className="gi-field"
@@ -184,9 +212,20 @@ export function SettingsApp() {
       </div>
 
       {advanced ? (
-        <Section title="Advanced">
+        <Section title="Advanced" id="advanced">
           <p className="gi-muted text-xs">
             Provider endpoints, tokens, index controls, and diagnostics.
+          </p>
+          <Field label="PigeonBox Cloud API URL (development)">
+            <input
+              className="gi-field"
+              value={settings.cloudApiUrl}
+              placeholder="Blank uses this build's default"
+              onChange={(event) => update('cloudApiUrl', event.target.value)}
+            />
+          </Field>
+          <p className="gi-muted text-xs">
+            Self-hosting guides for the tracker and the optional Convex backend are in the PigeonBox repository under docs/.
           </p>
           <Field label="AI endpoint">
             <input className="gi-field" value={settings.aiEndpoint} onChange={(event) => update('aiEndpoint', event.target.value)} />
@@ -240,7 +279,9 @@ export function SettingsApp() {
           </div>
           {diag?.trackingReport ? <pre className="gi-pre">{String(diag.trackingReport)}</pre> : null}
           {diag ? <pre className="gi-pre">{JSON.stringify(diag, null, 2)}</pre> : null}
-          <p className="gi-muted text-xs">ChatGPT web sign-in is experimental and may stop working when ChatGPT’s website changes.</p>
+          {product.state.experimental ? (
+            <p className="gi-muted text-xs">ChatGPT web sign-in is experimental and may stop working when ChatGPT’s website changes.</p>
+          ) : null}
         </Section>
       ) : null}
       </div>
@@ -248,9 +289,9 @@ export function SettingsApp() {
   );
 }
 
-function Section(props: { title: string; children: ReactNode }) {
+function Section(props: { title: string; children: ReactNode; id?: string }) {
   return (
-    <section className="gi-card">
+    <section className="gi-card" id={props.id}>
       <h2>{props.title}</h2>
       <div className="space-y-3">{props.children}</div>
     </section>

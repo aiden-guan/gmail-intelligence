@@ -109,7 +109,7 @@ export interface TrackerStore {
   hasClaims(trackingId: string): Promise<boolean>;
 }
 
-type MemoryState = {
+export type MemoryState = {
   emails: Map<string, EmailRow>;
   links: Map<string, LinkRow>;
   events: EventRow[];
@@ -128,8 +128,12 @@ export function readMemoryClaims(trackingId?: string): ClaimRow[] {
   return rows.map((claim) => ({ ...claim }));
 }
 
+export function createMemoryState(): MemoryState {
+  return { emails: new Map(), links: new Map(), events: [], claims: new Map() };
+}
+
 function memoryState(): MemoryState {
-  memory ??= { emails: new Map(), links: new Map(), events: [], claims: new Map() };
+  memory ??= createMemoryState();
   return memory;
 }
 
@@ -149,7 +153,14 @@ export function getStore(env: {
 }
 
 function memoryStore(): TrackerStore {
-  const state = memoryState();
+  return createMemoryStore(memoryState());
+}
+
+/**
+ * An in-memory store over its own state. `wrangler dev` uses one shared
+ * instance; PigeonBox Cloud's development mode keeps one per account.
+ */
+export function createMemoryStore(state: MemoryState): TrackerStore {
   return {
     kind: 'memory',
     async insertEmail(row) {

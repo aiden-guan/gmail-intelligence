@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { safeRedirectUrl, classifyClick, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches, openEventMatchesSenderClaim, planPageReloadProxy, selectSenderProxyClaim } from './helpers.js';
 import { getStore, StoreError, type ClaimRow, type EmailRow, type TrackerStore } from './store.js';
+export { createMemoryState, createMemoryStore, StoreError } from './store.js';
+export type { ClaimRow, EmailRow, EventRow, LinkRow, MemoryState, TrackerStore } from './store.js';
 
 export { safeRedirectUrl, classifyOpen, classifyClick, suspectSelfOpen, deriveTrackingStats, isSelfViewCorrelated, normalizeGmailId, detectOpenRequestSource, decideTrackedOpen, normalizeUserAgentFamily, senderFingerprintMatches } from './helpers.js';
 
@@ -40,10 +42,20 @@ const CreateEmailSchema = z.object({
   links: z.array(z.object({ url: z.string().url() })).max(50).optional(),
 });
 
+/** Compare secrets without leaking their length or matching prefix through timing. */
+export function timingSafeEqual(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  let diff = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
+  return diff === 0;
+}
+
 function requireAuth(req: Request, env: Env): Response | null {
   const auth = req.headers.get('Authorization') || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (!env.PERSONAL_API_TOKEN || token !== env.PERSONAL_API_TOKEN) {
+  if (!env.PERSONAL_API_TOKEN || !timingSafeEqual(token, env.PERSONAL_API_TOKEN)) {
     return json({ error: 'unauthorized' }, 401);
   }
   return null;
@@ -87,80 +99,106 @@ function storeFailure(err: unknown): Response | null {
   return null;
 }
 
+/**
+ * What the tracker needs from its host. The self-hosted worker below uses one
+ * store and a personal token. PigeonBox Cloud reuses the same handlers with a
+ * tenant-scoped store per authenticated user, so protocol v3 behavior (self-view
+ * claims, proxy suppression, click classification) is identical in both.
+ */
+export type TrackerDeps = {
+  /** Store for the public pixel and click routes. Lookups are by unguessable ID. */
+  publicStore: TrackerStore;
+  /** Authenticate a management request and return the store it may use, or an error response. */
+  authorize(request: Request): Promise<{ store: TrackerStore } | Response>;
+  /** Salt for hashing client IPs. Changing it breaks matching of in-flight self-view claims. */
+  ipSalt: string;
+};
+
+export async function handleTrackerRequest(request: Request, deps: TrackerDeps): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  let store = deps.publicStore;
+  const salt = deps.ipSalt;
+
+  try {
+    // Public pixel
+    if (request.method === 'GET' && path.startsWith('/open/')) {
+      return handleOpen(path.slice('/open/'.length), request, salt, store);
+    }
+    // Public click
+    if (request.method === 'GET' && path.startsWith('/c/')) {
+      return handleClick(path.slice('/c/'.length), request, salt, store);
+    }
+
+    // Private management
+    if (path.startsWith('/api/')) {
+      const authorized = await deps.authorize(request);
+      if (authorized instanceof Response) return authorized;
+      store = authorized.store;
+
+      if (request.method === 'POST' && path === '/api/emails') {
+        return handleCreateEmail(request, url.origin, store);
+      }
+      if (request.method === 'GET' && path === '/api/emails') {
+        return handleListEmails(url, store);
+      }
+      if (request.method === 'PATCH' && path.startsWith('/api/emails/')) {
+        return handlePatchEmail(path.slice('/api/emails/'.length), request, store);
+      }
+      if (request.method === 'POST' && path.startsWith('/api/emails/') && path.endsWith('/self-view')) {
+        const id = path.slice('/api/emails/'.length, -'/self-view'.length);
+        return handleSelfView(id, request, salt, store);
+      }
+      if (request.method === 'GET' && path.startsWith('/api/emails/') && path.endsWith('/events')) {
+        const id = path.slice('/api/emails/'.length, -'/events'.length);
+        return handleGetEvents(id, store);
+      }
+      if (request.method === 'GET' && path.startsWith('/api/emails/')) {
+        const id = path.slice('/api/emails/'.length);
+        return handleGetEmail(id, store);
+      }
+      if (request.method === 'GET' && path === '/api/events/recent') {
+        return handleRecentEvents(store);
+      }
+    }
+
+    if (path === '/health') {
+      return json({
+        ok: true,
+        protocolVersion: 3,
+        features: [
+          'self_view_claims',
+          'event_reclassification',
+          'classified_clicks',
+          'sender_fingerprint_claims',
+        ],
+        store: store.kind,
+      });
+    }
+
+    return json({ error: 'not_found' }, 404);
+  } catch (err) {
+    const failed = storeFailure(err);
+    if (failed) return failed;
+    console.error(err);
+    return json({ error: 'internal' }, 500);
+  }
+}
+
+/** Self-hosted tracker: one owner, authenticated with PERSONAL_API_TOKEN. */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname;
     const store = getStore(env);
-
-    try {
-      // Public pixel
-      if (request.method === 'GET' && path.startsWith('/open/')) {
-        return handleOpen(path.slice('/open/'.length), request, env, store);
-      }
-      // Public click
-      if (request.method === 'GET' && path.startsWith('/c/')) {
-        return handleClick(path.slice('/c/'.length), request, env, store);
-      }
-
-      // Private management
-      if (path.startsWith('/api/')) {
-        const denied = requireAuth(request, env);
-        if (denied) return denied;
-
-        if (request.method === 'POST' && path === '/api/emails') {
-          return handleCreateEmail(request, env, url.origin, store);
-        }
-        if (request.method === 'GET' && path === '/api/emails') {
-          return handleListEmails(url, store);
-        }
-        if (request.method === 'PATCH' && path.startsWith('/api/emails/')) {
-          return handlePatchEmail(path.slice('/api/emails/'.length), request, store);
-        }
-        if (request.method === 'POST' && path.startsWith('/api/emails/') && path.endsWith('/self-view')) {
-          const id = path.slice('/api/emails/'.length, -'/self-view'.length);
-          return handleSelfView(id, request, env, store);
-        }
-        if (request.method === 'GET' && path.startsWith('/api/emails/') && path.endsWith('/events')) {
-          const id = path.slice('/api/emails/'.length, -'/events'.length);
-          return handleGetEvents(id, store);
-        }
-        if (request.method === 'GET' && path.startsWith('/api/emails/')) {
-          const id = path.slice('/api/emails/'.length);
-          return handleGetEmail(id, store);
-        }
-        if (request.method === 'GET' && path === '/api/events/recent') {
-          return handleRecentEvents(store);
-        }
-      }
-
-      if (path === '/health') {
-        return json({
-          ok: true,
-          protocolVersion: 3,
-          features: [
-            'self_view_claims',
-            'event_reclassification',
-            'classified_clicks',
-            'sender_fingerprint_claims',
-          ],
-          store: store.kind,
-        });
-      }
-
-      return json({ error: 'not_found' }, 404);
-    } catch (err) {
-      const failed = storeFailure(err);
-      if (failed) return failed;
-      console.error(err);
-      return json({ error: 'internal' }, 500);
-    }
+    return handleTrackerRequest(request, {
+      publicStore: store,
+      authorize: async (req) => requireAuth(req, env) ?? { store },
+      ipSalt: env.PERSONAL_API_TOKEN || 'salt',
+    });
   },
 };
 
 async function handleCreateEmail(
   request: Request,
-  _env: Env,
   origin: string,
   store: TrackerStore,
 ): Promise<Response> {
@@ -291,7 +329,7 @@ const CLAIM_TTL_MS = 25_000;
 async function handleSelfView(
   id: string,
   request: Request,
-  env: Env,
+  salt: string,
   store: TrackerStore,
 ): Promise<Response> {
   if (!id || id.length > 80 || id.includes('/') || !/^[\w-]+$/.test(id)) {
@@ -325,7 +363,7 @@ async function handleSelfView(
     request.headers.get('CF-Connecting-IP') ||
     request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
     '';
-  const senderIpHash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
+  const senderIpHash = ip ? await hashIp(ip, salt) : null;
   const senderUaFamily = normalizeUserAgentFamily(ua);
 
   // Idempotency: repeated delivery with the same selfViewEventId
@@ -530,7 +568,7 @@ async function handleSelfView(
 async function handleOpen(
   trackingId: string,
   request: Request,
-  env: Env,
+  salt: string,
   store: TrackerStore,
 ): Promise<Response> {
   // Always return the GIF. Recording is best-effort.
@@ -547,7 +585,7 @@ async function handleOpen(
         request.headers.get('CF-Connecting-IP') ||
         request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
         '';
-      const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
+      const ip_hash = ip ? await hashIp(ip, salt) : null;
       const now = Date.now();
       const ts = new Date(now).toISOString();
       const eventId = newId('evt');
@@ -632,7 +670,7 @@ async function handleOpen(
 async function handleClick(
   clickId: string,
   request: Request,
-  env: Env,
+  salt: string,
   store: TrackerStore,
 ): Promise<Response> {
   if (!clickId || clickId.length > 80 || !/^[\w-]+$/.test(clickId)) {
@@ -651,7 +689,7 @@ async function handleClick(
       request.headers.get('CF-Connecting-IP') ||
       request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
       '';
-    const ip_hash = ip ? await hashIp(ip, env.PERSONAL_API_TOKEN || 'salt') : null;
+    const ip_hash = ip ? await hashIp(ip, salt) : null;
     const now = Date.now();
     const ts = new Date(now).toISOString();
 

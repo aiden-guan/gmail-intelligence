@@ -21,7 +21,7 @@ import {
   trackerPermissionOrigin,
   transformOutgoingHtml,
   type TrackedEmailSummary,
-} from '@gi/tracking';
+} from '@pigeonbox/tracking';
 
 // Local copies of worker helpers to avoid cross-package TS project refs in tests
 function safeRedirectUrl(url: string): string | null {
@@ -283,7 +283,8 @@ describe('sent mail status', () => {
   it('treats localhost as unreachable for recipient opens', () => {
     expect(isLoopbackTracker('http://127.0.0.1:8787')).toBe(true);
     expect(isLoopbackTracker('https://track.example')).toBe(false);
-    expect(trackerPermissionOrigin('http://127.0.0.1:8787')).toBeNull();
+    expect(trackerPermissionOrigin('http://127.0.0.1:8787')).toBe('http://127.0.0.1:8787/*');
+    expect(trackerPermissionOrigin('http://track.example')).toBeNull();
     expect(trackerPermissionOrigin('https://track.example/path')).toBe('https://track.example/*');
   });
 });

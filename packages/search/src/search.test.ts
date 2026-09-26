@@ -4,7 +4,7 @@ import {
   LexicalSearchIndex,
   HybridRetriever,
   cosineSimilarity,
-} from '@gi/search';
+} from '@pigeonbox/search';
 
 describe('lexical search', () => {
   it('indexes and retrieves by subject/body', () => {

@@ -1,4 +1,4 @@
-import type { GmailCapabilities } from '@gi/shared';
+import type { GmailCapabilities } from '@pigeonbox/shared';
 
 export const EMPTY_CAPABILITIES: GmailCapabilities = {
   inboxSdkAvailable: false,

@@ -1,5 +1,5 @@
-import type { ClassificationResult, ThreadCategory, Priority } from '@gi/shared';
-import type { StructuredRule } from '@gi/mailbox';
+import type { ClassificationResult, ThreadCategory, Priority } from '@pigeonbox/shared';
+import type { StructuredRule } from '@pigeonbox/mailbox';
 
 export type HeuristicInput = {
   subject: string;

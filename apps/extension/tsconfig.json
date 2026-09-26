@@ -19,6 +19,9 @@
     { "path": "../../packages/ai" },
     { "path": "../../packages/search" },
     { "path": "../../packages/agent" },
-    { "path": "../../packages/tracking" }
+    { "path": "../../packages/tracking" },
+    { "path": "../../packages/api-contract" },
+    { "path": "../../packages/cloud-client" },
+    { "path": "../../packages/core" }
   ]
 }

@@ -5,7 +5,7 @@ import {
   sanitizeDates,
   type DraftSuggestion,
   type ThreadSummary,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
 import { z } from 'zod';
 import type {
   AIProvider,

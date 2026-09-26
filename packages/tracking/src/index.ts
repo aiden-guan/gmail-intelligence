@@ -539,12 +539,16 @@ export function isLoopbackTracker(baseUrl: string): boolean {
   }
 }
 
-/** Origin pattern for chrome.permissions.request. Loopback is already granted. */
+/**
+ * Origin pattern for chrome.permissions.request. Every tracker, including one on
+ * this computer, is an optional host permission requested when the user saves it.
+ */
 export function trackerPermissionOrigin(baseUrl: string): string | null {
   try {
     const url = new URL(baseUrl);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    if (isLoopbackTracker(baseUrl)) return null;
+    // Plain HTTP is only for a tracker on this computer.
+    if (url.protocol === 'http:' && !isLoopbackTracker(baseUrl)) return null;
     return `${url.origin}/*`;
   } catch {
     return null;

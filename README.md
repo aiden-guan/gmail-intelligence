@@ -1,203 +1,146 @@
-# Gmail Intelligence
+<p align="center">
+  <img src="apps/extension/public/icons/icon128.png" width="96" height="96" alt="PigeonBox pigeon mascot">
+</p>
 
-Personal **Gmail** Chrome extension: local AI inbox intelligence + Mailsuite-style open/click tracking.
+<h1 align="center">PigeonBox</h1>
 
-**No Gmail REST API.** Reads what Gmail already loaded in the browser. Writes (archive, draft, mark read, …) go through Gmail’s normal web UI via a carefully abstracted interaction layer.
+<p align="center"><strong>AI-powered Gmail intelligence that can run on your machine.</strong></p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/aiden-guan/pigeonbox/actions/workflows/ci.yml"><img src="https://github.com/aiden-guan/pigeonbox/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
 
-- Category chips and a side-panel Split Inbox backed by the local index (Respond / Waiting / FYI / Notifications / Promotions / News / Follow-ups / Priority)
-- Deterministic + optional AI classification, summaries, needs-reply, auto-drafts (**never auto-send**)
-- Auto-archive with confidence thresholds, always/never lists, short-lived Undo
-- Reminders via `chrome.alarms` (no Gmail API)
-- Ask Inbox side panel (local index + optional RAG)
-- Write with AI in compose
-- Optional “Index my inbox” (user-triggered, paced, resumable)
-- Open/click tracking via Cloudflare Worker + Supabase (architecturally separate from mailbox AI)
+PigeonBox is a Chrome extension that sorts your Gmail inbox, summarizes threads, drafts replies in your voice, answers questions about your mail, and tells you when a sent email is opened. By default everything runs on your computer: a downloaded model on WebGPU, Chrome's built-in Gemini Nano, Ollama, or your own API key. No account, no server, no Gmail API.
 
-## Architecture (no Gmail API)
-
-```
-Gmail web app
-  → Gmail Integration Layer (InboxSDK primary, DOM fallback)
-  → Mailbox event bus → IndexedDB cache + Action engine (Gmail UI)
-  → AI agent engine → Side panel / Ask Inbox
-
-Separately:
-Tracked email → pixel/click → Cloudflare Worker → Supabase
-```
-
-Mailbox contents are **never** sent to the tracking backend. AI keys stay in extension storage / service worker — never MAIN world.
-
-## Repo map
-
-| Path | Role |
-|------|------|
-| `apps/extension` | MV3 Chrome extension (Vite + React + Tailwind) |
-| `packages/gmail` | Gmail adapters, selectors, action queue, worker tab |
-| `packages/mailbox` | Dexie IndexedDB, ingest, index jobs, MailboxSource seam |
-| `packages/ai` | Provider abstraction (OpenAI-compatible production + interfaces) |
-| `packages/search` | MiniSearch lexical + hybrid retrieval |
-| `packages/agent` | Heuristics, rules, agent loop, safety tiers |
-| `packages/tracking` | Tracking client (pixel/link helpers) |
-| `packages/shared` | Zod schemas, settings, fingerprints |
-| `workers/tracker` | Cloudflare Worker |
-| `supabase/migrations` | Tracking tables |
+<p align="center">
+  <img src="docs/design/copper-perch-preview.png" alt="PigeonBox toolbar popup, Respond view in the side panel, and the thread companion card (fictional mail)">
+</p>
 
 ## Install
 
-You need [Node.js 20 or newer](https://nodejs.org). npm is included.
+| Path | For | Status |
+|---|---|---|
+| **Chrome Web Store** | Most people. One click, automatic updates. | Listing in preparation ([checklist](docs/chrome-web-store.md)) |
+| **GitHub Releases** | A prebuilt, checksummed ZIP to load unpacked. | [Releases](https://github.com/aiden-guan/pigeonbox/releases) |
+| **From source** | Contributors and self-hosters. | See [Quick start](#quick-start) |
 
-```bash
-git clone https://github.com/aiden-guan/gmail-intelligence.git
-cd gmail-intelligence
-npm run setup
-```
+Loading a ZIP from Releases: unzip it, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick the unzipped folder. Unpacked extensions do not update themselves; the Chrome Web Store version will.
 
-That installs dependencies, writes a gitignored `.env` and tracker token, and builds the extension to `apps/extension/dist`.
+## Local and Cloud
 
-Inbox features do not need a Gmail API key, a Cloudflare account, or a Supabase project.
+One extension, two ways to run it. You choose in **Settings → How should PigeonBox run?**
 
-### Load the extension
+| | **On this computer** (Local) | **PigeonBox Cloud** |
+|---|---|---|
+| Account | None | PigeonBox account |
+| Cost | Free, open source (MIT) | Subscription |
+| AI | Downloaded model (WebGPU), Gemini Nano, Ollama, or your API key | Hosted inference, no downloads or keys |
+| Where email content goes for AI | Stays on this device, or goes to the provider you configured | PigeonBox Cloud and its inference provider; processed, not stored |
+| Inbox index, search, Ask Inbox | This device (IndexedDB) | This device (IndexedDB) |
+| Open/click tracking | Optional, self-hosted (local, Cloudflare Worker, or Convex) | Hosted |
+| Works offline / if Cloud is down | Yes | No; switch to Local any time |
 
-```bash
-npm run setup -- --open
-```
+Local is a complete product, not a trial. Cloud sells convenience: no model downloads, no API key setup, hosted tracking, and future features that need a server (sync, memory, attachments, automations). Cloud never falls back to another provider when it is unavailable, and PigeonBox never changes your choice for you.
 
-That opens the `dist` folder and your browser’s extensions page. If you use more than one Chrome profile, add a gitignored `.local/chrome.json` so it opens the right one:
+## Features
 
-```json
-{ "profileDirectory": "Profile 1", "gmailAccount": "you@school.edu" }
-```
-
-`profileDirectory` is that profile’s folder name (`Default`, `Profile 1`, …). By hand:
-
-1. Chrome, Edge, or Brave → `chrome://extensions`
-2. Turn on **Developer mode**
-3. **Load unpacked** → select `apps/extension/dist` (the folder that contains `manifest.json`)
-4. Pin **Gmail Intelligence**, then open [Gmail](https://mail.google.com) while you are signed in
-5. Click the extension icon for status, or open Gmail directly. Category labels still work if you skip AI
-6. Open a thread. You should see a category label and a summary sidebar
-7. If Gmail looks unchanged, open the extension’s Settings and click **Run diagnostics**
-
-A short onboarding page opens on a fresh install. After you change code, run `npm run dev`, then click **Reload** on `chrome://extensions`.
-
-### Try tracking on this computer
-
-```bash
-npm run tracker
-```
-
-Leave that process running. In the extension, open **Settings → Tracking**, paste the URL and token from `.local/tracker.txt`, and click **Save settings**. The connection line should say **Tracker healthy**. Compose in Gmail until the control says **Tracking ready**, then send. The pixel is added to Gmail’s outbound request, not to the compose box. Confirm it with **Sent → Show original** and a search for `/open/trk_`. The full check is in [docs/tracking-debug.md](docs/tracking-debug.md). Opening the message elsewhere should then show “Open detected”. Image blockers and Apple Mail Privacy can hide or fake that signal.
-
-Events stay in memory until you stop `npm run tracker`. Mailbox text is never sent to the tracker.
-
-Check it:
-
-```bash
-curl -s http://127.0.0.1:8787/health
-```
-
-You want `{"ok":true,"store":"memory"}`.
-
-### Use your own Convex tracker (optional)
-
-This project does not host a shared tracker. If you want persistent open/click tracking, deploy the Convex functions to a Convex project that you own. The deployment URL, API token, and any tracking data belong to you; none are committed here.
-
-From the repository root:
-
-```bash
-npx convex dev --once
-npx convex env set PERSONAL_API_TOKEN 'replace-with-a-long-random-token'
-```
-
-`npx convex dev --once` configures your own Convex development deployment and writes the local, gitignored `.env.local` file. Copy that deployment's `CONVEX_SITE_URL` and the same token into **Settings → Tracking**. Rebuild, then reload the unpacked extension. For a production deployment, use `npx convex deploy` against your own Convex project and set the token with `npx convex env set --prod PERSONAL_API_TOKEN 'replace-with-a-long-random-token'`.
-
-### Deploy tracking on Cloudflare (optional)
-
-Use this if you want the tracker on Cloudflare instead of Convex.
-
-**Supabase**
-
-1. Create a project.
-2. Run `supabase/migrations/20260322000000_tracking.sql` and `supabase/migrations/20260923000000_tracking_status.sql` in the SQL editor.
-3. Copy the project URL and **service role** key into `.env` and `workers/tracker/.dev.vars`. The service role key stays on the worker. Never put it in the extension.
-
-**Cloudflare Worker**
-
-```bash
-cd workers/tracker
-npx wrangler login
-npx wrangler secret put PERSONAL_API_TOKEN
-npx wrangler secret put SUPABASE_URL
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler deploy
-```
-
-Put the deployed URL and the same personal token in extension Settings. For a custom domain, grant that host permission when Chrome asks.
-
-Routes: `POST /api/emails`, `GET /api/emails/:id`, `GET /api/emails/:id/events`, `GET /api/events/recent` (Bearer token). Public: `GET /open/:trackingId`, `GET /c/:clickId`.
-
-## AI configuration
-
-Settings → AI:
-
-- **On this computer** — Qwen2.5 0.5B (about 750 MB) and Qwen3 0.6B (about 880 MB) are listed for download. Nothing is stored until you download one, and Remove deletes those files. Chrome’s built-in Gemini Nano is a larger optional download for desktop Chrome 138+ with about 16 GB of memory and 22 GB of free disk.
-- **ChatGPT account** — experimental. It reads a chatgpt.com session and can stop working when that site changes. It is not required.
-- **Off** — tracking and local heuristics still work
-- **API key or Ollama** — optional. Ollama uses `http://127.0.0.1:11434/v1`
-
-Anthropic and Gemini API adapters are typed interfaces; use an OpenAI-compatible endpoint for those.
+- **Split inbox**: Respond, Waiting, FYI, Notifications, Promotions, News, Priority, Follow-ups. Rules and on-device heuristics work with AI off.
+- **Thread intelligence**: summaries, key dates, action items, open questions.
+- **Draft replies and Write with AI**: in your voice and signed with your name. Drafts are inserted into Gmail's composer; **PigeonBox never sends email for you**.
+- **Ask Inbox**: questions over your local index, with citations, and an honest note about what has not been indexed.
+- **Reminders and follow-ups** via `chrome.alarms`.
+- **Open and click tracking** (optional), with sender self-open suppression, Gmail image-proxy handling, and reload detection.
+- **Custom rules** in plain language.
 
 ## Privacy
 
-| Data | Where |
-|------|--------|
-| Mailbox text, embeddings, drafts, rules | Local IndexedDB only |
-| AI prompts (when ChatGPT or an API key is on) | That provider. A downloaded model keeps them on this computer |
-| Tracking metadata (subject, recipients, open/click events) | Your Worker + Supabase |
-| Raw IP | Never stored (hashed only) |
-| Service role / AI keys in content scripts | Never |
+| Data | Where it lives |
+|---|---|
+| Mailbox text, index, embeddings, drafts, rules | IndexedDB in your browser |
+| AI prompts, Local mode | This device (downloaded model, Gemini Nano, local Ollama) or the provider whose key you entered |
+| AI prompts, Cloud mode | Sent over TLS to PigeonBox Cloud for processing; raw content is not stored or logged |
+| Tracking metadata (subject, recipients, open/click events) | Your self-hosted tracker, or PigeonBox Cloud in Cloud mode. Never mailbox bodies |
+| API keys, tracker tokens, Cloud sessions | Extension service worker and trusted extension storage. Never Gmail's page or content scripts |
 
-## Gmail integration fragility
+Details: [docs/privacy-model.md](docs/privacy-model.md) and [docs/threat-model.md](docs/threat-model.md).
 
-Gmail’s DOM changes. Adapters use capability detection:
+## Quick start
 
-- InboxSDK (primary), loaded before observation starts
-- DOM fallback (centralized selectors in `packages/gmail/src/selectors.ts`)
+Requires [Node.js 20+](https://nodejs.org).
 
-Gmail.js is not part of the running extension. `packages/gmail/src/GmailJsCaptureAdapter.ts` remains only as unused experimental source.
+```bash
+git clone https://github.com/aiden-guan/pigeonbox.git
+cd pigeonbox
+npm run setup -- --open
+```
 
-Native Gmail label mutation is **not** claimed (`persistentNativeLabelMutationAvailable: false`). Virtual labels always work.
+`setup` checks your Node version, installs dependencies, creates a gitignored `.env` with a generated tracker token, builds the extension, verifies the manifest, and opens `chrome://extensions` plus the build folder. Load `apps/extension/dist` unpacked, open Gmail, and pick how PigeonBox runs in Settings.
 
-Live Gmail still has to be checked in a signed-in browser. Use Settings → Advanced → Run diagnostics on a real Gmail tab. The checks below are the manual pass.
+No account, Cloud backend, Supabase, Stripe, Convex, Cloudflare account, or AI key is needed. More: [docs/local-setup.md](docs/local-setup.md).
 
-## Indexing
+## Develop
 
-- Incremental from visible/loaded mail — no giant scrape on startup
-- A visible row is a `ROW_STUB` (thread id, subject, sender, snippet). It does not invent a timestamp.
-- Opening a thread upgrades it to `THREAD_COMPLETE` using real message text.
-- Unchanged fingerprint → skip re-summarize / re-classify / re-draft
-- Ask Inbox states coverage explicitly (never pretends to search unindexed mail)
+```bash
+npm run dev       # rebuild on change; click Reload on chrome://extensions
+npm test          # Vitest
+npm run verify    # everything CI runs: checks, typecheck, lint, tests, build, release ZIP validation
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Self-hosting
+
+- **Tracker on this computer**: `npm run tracker` (in-memory).
+- **Tracker on Cloudflare + Supabase**: [docs/self-hosting.md](docs/self-hosting.md).
+- **Tracker on your own Convex deployment** (optional): [docs/convex-self-hosting.md](docs/convex-self-hosting.md). Convex is never required; PigeonBox works without it.
+
+## Architecture
+
+```
+Gmail web app
+  └─ packages/gmail      InboxSDK first, DOM fallback, selectors in one file
+       └─ apps/extension content script ──typed messages──▶ background service worker
+                                                          ├─ packages/mailbox   IndexedDB index
+                                                          ├─ packages/search    lexical + hybrid retrieval
+                                                          ├─ packages/agent     rules, safety tiers, jobs
+                                                          ├─ packages/ai        AIProvider: WebGPU, Gemini Nano, Ollama, BYOK
+                                                          ├─ packages/cloud-client ──HTTPS──▶ PigeonBox Cloud (optional)
+                                                          └─ packages/tracking  ──HTTPS──▶ your tracker or Cloud tracker
+```
+
+| Path | Role |
+|---|---|
+| `apps/extension` | The one MV3 extension (Vite, React, Tailwind) |
+| `packages/gmail` | Gmail adapters, selectors, action queue, worker tab |
+| `packages/mailbox` | Dexie/IndexedDB index and ingestion |
+| `packages/ai` | `AIProvider` interface, prompts, local model catalog, BYOK/Ollama |
+| `packages/search` | MiniSearch lexical and hybrid retrieval |
+| `packages/agent` | Classification, rules, agent loop, safety tiers |
+| `packages/tracking` | Tracking client and protocol-v3 open/click classification |
+| `packages/shared` | Schemas, settings and migrations, fingerprints |
+| `packages/core` | Run mode and capabilities |
+| `packages/api-contract` | The typed PigeonBox Cloud protocol (Zod) |
+| `packages/cloud-client` | Cloud HTTP client and Cloud `AIProvider` |
+| `workers/tracker` | Self-hostable Cloudflare Worker tracker |
+| `convex/` | Optional self-hosted Convex tracker |
+| `supabase/migrations` | Schema for the self-hosted Worker tracker |
+
+Full write-up: [docs/architecture.md](docs/architecture.md). Cloud protocol: [docs/cloud-protocol.md](docs/cloud-protocol.md).
 
 ## Limitations
 
-- DOM/InboxSDK breakage when Gmail updates
-- Background automation uses one inactive worker tab. It does not take over the Gmail tab you are reading
-- Local index may be incomplete
-- Open tracking is imperfect (Apple Mail Privacy, image blocking, proxies) — UI says “Open detected”, not “Definitely read”
-- Group sends / list-id edge cases
-- AI can be wrong; rules override AI
-- **No automatic sending**; Tier 3 (send/delete/spam/unsubscribe/large destructive batches) always needs explicit user action
+- Gmail changes its page. Adapters degrade to DOM fallback and diagnostics say what broke; some updates will still need a fix.
+- PigeonBox only knows mail you have loaded or chosen to index. Ask Inbox says so when coverage is partial.
+- Open tracking is a signal, not proof. Image blocking and Apple Mail Privacy Protection hide or fake opens. PigeonBox says "Open detected", never "read".
+- Small on-device models write shorter, plainer drafts than large hosted models.
+- Native Gmail labels are not changed; categories are PigeonBox's own.
+- AI can be wrong. Your rules override it, and destructive actions always need you.
 
-## First end-to-end test (manual)
+## Security
 
-1. `npm run setup`, load `apps/extension/dist`, open Gmail.
-2. Open a thread → category label and sidebar summary (heuristics work with AI off).
-3. Extension icon → **Open Inbox Intelligence**. Respond shows locally classified threads, not a Gmail search.
-4. Open a thread that needs a reply → **Draft reply** inserts into Gmail’s composer and does not send.
-5. Optional: `npm run tracker`, paste `.local/tracker.txt` into Settings, save, send yourself a tracked message, open it → “Open detected”.
+Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT — see `LICENSE`.
+MIT. See [LICENSE](LICENSE).

@@ -1,4 +1,4 @@
-import type { GmailCapabilities } from '@gi/shared';
+import type { GmailCapabilities } from '@pigeonbox/shared';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { MailboxEventBus } from './events.js';
 import { GmailActionAdapter } from './GmailActionAdapter.js';

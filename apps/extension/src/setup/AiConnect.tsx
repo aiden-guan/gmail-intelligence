@@ -11,9 +11,9 @@ import {
   localModelDtypes,
   type LocalModel,
   type LocalModelVendor,
-} from '@gi/ai';
+} from '@pigeonbox/ai';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { getProviderRequiredOrigin, type ExtensionSettings } from '@gi/shared';
+import { getProviderRequiredOrigin, type ExtensionSettings } from '@pigeonbox/shared';
 import { deleteCachedModel, listDownloadedModelIds } from '../local-model/cache';
 import {
   getOnDeviceAvailability,
@@ -39,17 +39,21 @@ type AdvancedDraft = {
 };
 
 const inputClass = 'gi-field';
+const CHATGPT_ORIGIN = 'https://chatgpt.com/*';
 
 export function AiConnect({
   settings,
   onPatch,
   onSignedIn,
   compact = false,
+  experimental = false,
 }: {
   settings: ExtensionSettings;
   onPatch: (partial: Partial<ExtensionSettings>) => void;
   onSignedIn?: (partial: Partial<ExtensionSettings>) => void;
   compact?: boolean;
+  /** Show experimental providers (ChatGPT web sign-in). Release builds pass false. */
+  experimental?: boolean;
 }) {
   const [status, setStatus] = useState<ChatGptStatus>({
     signedIn: false,
@@ -67,6 +71,7 @@ export function AiConnect({
   const shaderF16 = useShaderF16();
   const downloadingRef = useRef<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [experimentalOpen, setExperimentalOpen] = useState(settings.aiProvider === 'chatgpt');
   const [advanced, setAdvanced] = useState<AdvancedDraft>(() => initialAdvanced(settings));
 
   const chatgptActive =
@@ -144,6 +149,21 @@ export function AiConnect({
     }
     setAuthError(null);
     setWaitingForLogin(true);
+    // chatgpt.com is an optional host permission, requested only when this experimental option is used.
+    const request = chrome.permissions?.request
+      ? chrome.permissions.request({ origins: [CHATGPT_ORIGIN] }).catch(() => false)
+      : Promise.resolve(true);
+    void request.then((granted) => {
+      if (!granted) {
+        setWaitingForLogin(false);
+        setAuthError('Allow PigeonBox to reach chatgpt.com to use this experimental option.');
+        return;
+      }
+      startChatGptSignIn();
+    });
+  }
+
+  function startChatGptSignIn() {
     chrome.runtime.sendMessage(
       { type: 'CHATGPT_LOGIN' },
       (response?: { ok?: boolean; error?: string; alreadySignedIn?: boolean }) => {
@@ -243,62 +263,8 @@ export function AiConnect({
   return (
     <div id="ai-setup" className="space-y-3">
       <p className="text-sm gi-muted">
-        Use a model on this computer, or an API key. Mail never goes to the tracker.
+        Use a model on this computer, Ollama, or your own API key. Mail never goes to the tracker.
       </p>
-
-      <div className={cardClass(chatgptActive)}>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-medium">ChatGPT account · Experimental</div>
-            <p className="mt-1 text-xs gi-muted">
-              May stop working when ChatGPT web internals change.{' '}
-              {status.signedIn
-                ? accountLabel
-                : 'Sign in with the ChatGPT account you already use. Requests use that plan’s message allowance. Inbox text is sent as a temporary chat.'}
-            </p>
-          </div>
-          {chatgptActive ? <Badge>In use</Badge> : null}
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {status.signedIn ? (
-            <button className={primaryClass} onClick={useChatGpt} disabled={chatgptActive}>
-              {chatgptActive ? 'Using ChatGPT' : 'Use ChatGPT'}
-            </button>
-          ) : (
-            <button className={primaryClass} onClick={signIn} disabled={waitingForLogin}>
-              {waitingForLogin ? <><Orb size={14} tone="on-accent" />Waiting for sign-in…</> : 'Sign in with ChatGPT'}
-            </button>
-          )}
-          {status.signedIn ? (
-            <button className={quietClass} onClick={signOut}>
-              Sign out
-            </button>
-          ) : null}
-        </div>
-        {status.signedIn && chatgptActive ? (
-          <label className="mt-3 block text-xs gi-muted">
-            Model
-            <select
-              className={`${inputClass} mt-1`}
-              value={isChatGptModel(settings.aiModel) ? settings.aiModel : CHATGPT_DEFAULT_MODEL}
-              onChange={(event) =>
-                onPatch({
-                  aiMode: 'remote',
-                  aiProvider: 'chatgpt',
-                  aiModel: event.target.value,
-                })
-              }
-            >
-              {CHATGPT_MODELS.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {showChatGptError ? <p className="mt-2 text-xs gi-danger">{showChatGptError}</p> : null}
-      </div>
 
       <div className={cardClass(Boolean(localActiveId) || onDeviceActive)}>
         <div className="text-sm font-medium">On this computer</div>
@@ -491,6 +457,74 @@ export function AiConnect({
                 The key stays in extension storage. Anthropic and Gemini API adapters are not finished; use an
                 OpenAI-compatible endpoint for those.
               </p>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {compact || !experimental ? null : (
+        <div className="gi-card">
+          <button type="button" className="gi-text-btn" onClick={() => setExperimentalOpen((open) => !open)}>
+            {experimentalOpen ? 'Hide experimental options' : 'Experimental options'}
+          </button>
+          {experimentalOpen ? (
+            <div className="mt-3">
+      <div className={cardClass(chatgptActive)}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">ChatGPT account · Experimental</div>
+                    <p className="mt-1 text-xs gi-muted">
+                      Not a supported provider. It reuses your chatgpt.com browser session through unofficial web endpoints.
+                    </p>
+                    <p className="mt-1 text-xs gi-muted">
+                      May stop working when ChatGPT web internals change.{' '}
+                      {status.signedIn
+                        ? accountLabel
+                        : 'Sign in with the ChatGPT account you already use. Requests use that plan’s message allowance. Inbox text is sent as a temporary chat.'}
+                    </p>
+                  </div>
+                  {chatgptActive ? <Badge>In use</Badge> : null}
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {status.signedIn ? (
+                    <button className={primaryClass} onClick={useChatGpt} disabled={chatgptActive}>
+                      {chatgptActive ? 'Using ChatGPT' : 'Use ChatGPT'}
+                    </button>
+                  ) : (
+                    <button className={primaryClass} onClick={signIn} disabled={waitingForLogin}>
+                      {waitingForLogin ? <><Orb size={14} tone="on-accent" />Waiting for sign-in…</> : 'Sign in with ChatGPT'}
+                    </button>
+                  )}
+                  {status.signedIn ? (
+                    <button className={quietClass} onClick={signOut}>
+                      Sign out
+                    </button>
+                  ) : null}
+                </div>
+                {status.signedIn && chatgptActive ? (
+                  <label className="mt-3 block text-xs gi-muted">
+                    Model
+                    <select
+                      className={`${inputClass} mt-1`}
+                      value={isChatGptModel(settings.aiModel) ? settings.aiModel : CHATGPT_DEFAULT_MODEL}
+                      onChange={(event) =>
+                        onPatch({
+                          aiMode: 'remote',
+                          aiProvider: 'chatgpt',
+                          aiModel: event.target.value,
+                        })
+                      }
+                    >
+                      {CHATGPT_MODELS.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {showChatGptError ? <p className="mt-2 text-xs gi-danger">{showChatGptError}</p> : null}
+              </div>
             </div>
           ) : null}
         </div>

@@ -1,18 +1,24 @@
-# Security
+# Security policy
 
-## Reporting
+## Reporting a vulnerability
 
-Please report security issues privately to the repository maintainers. Do not open public issues that include secrets or personal email data.
+Report privately through [GitHub security advisories](https://github.com/aiden-guan/pigeonbox/security/advisories/new). Do not open a public issue, and do not include real email content, API keys or tokens in reports. We aim to acknowledge reports within a few days.
 
-## Hard rules
+In scope: the extension in this repository, the self-hosted tracker (`workers/tracker`, `convex/`), and the PigeonBox Cloud API as reached from the extension.
 
-- Never commit API keys, Supabase service role keys, or personal tokens.
-- Extension content scripts and MAIN world must never receive provider keys, tracker tokens, or Supabase secrets.
-- Tracking pixel/click endpoints are public by design; management APIs require `Authorization: Bearer <PERSONAL_API_TOKEN>`.
-- Click redirects allow only `http:` / `https:` destinations.
-- Sanitize email-derived HTML before rendering in React UI.
-- Do not introduce Gmail API OAuth scopes or undocumented Gmail write endpoints.
+## Rules the code follows
 
-## Threat notes
+- No API keys, Supabase service-role keys, Stripe secrets or personal tokens in the repository or in extension builds. `npm run check:repo` and release packaging scan for them.
+- Content scripts and Gmail's MAIN world never receive provider keys, tracker tokens, Cloud tokens or full settings. Extension storage is restricted to trusted contexts.
+- Privileged runtime messages are accepted only from extension pages.
+- All executable code ships in the package; no remote code.
+- Tracking pixel and click routes are public by design; management APIs require a Bearer token (personal token, or a Cloud access token scoped to one account). Click redirects only allow `http:`/`https:`.
+- Email HTML is reduced to text before display in PigeonBox UI.
+- No Gmail API OAuth scopes and no undocumented Gmail write endpoints.
+- PigeonBox never sends email without the user.
 
-Open tracking can be spoofed or blocked. Treat events as signals (“Open detected”), not proof of human read. Self-open heuristics hide likely self events by default but do not delete them.
+The full analysis is in [docs/threat-model.md](docs/threat-model.md).
+
+## Notes on tracking
+
+Open tracking can be spoofed or blocked; events are signals ("Open detected"), not proof of reading. Suspected self-opens are hidden, not deleted.

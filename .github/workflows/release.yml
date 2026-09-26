@@ -1,0 +1,52 @@
+name: Release
+
+# Push a tag like v0.2.0 whose version matches every package.json and manifest.json.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Check tag matches package and manifest versions
+        run: node scripts/check-versions.mjs "${GITHUB_REF_NAME}"
+
+      - name: Clean install
+        run: npm ci
+
+      - name: Verify
+        run: node scripts/verify.mjs --skip-package
+
+      - name: Production build and deterministic ZIP
+        run: node scripts/package-extension.mjs --out release
+
+      - name: Rebuild and confirm the ZIP is reproducible
+        run: |
+          first=$(cut -d' ' -f1 release/PigeonBox-${GITHUB_REF_NAME}.sha256)
+          rm -rf apps/extension/dist-release
+          node scripts/package-extension.mjs --out "$RUNNER_TEMP/second"
+          second=$(cut -d' ' -f1 "$RUNNER_TEMP/second/PigeonBox-${GITHUB_REF_NAME}.sha256")
+          test "$first" = "$second" || { echo "Release ZIP is not reproducible: $first vs $second"; exit 1; }
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "release/PigeonBox-${GITHUB_REF_NAME}.zip" \
+            "release/PigeonBox-${GITHUB_REF_NAME}.sha256" \
+            --title "PigeonBox ${GITHUB_REF_NAME}" \
+            --notes "Prebuilt extension ZIP for loading unpacked or for the Chrome Web Store. Verify with: sha256sum -c PigeonBox-${GITHUB_REF_NAME}.sha256. See CHANGELOG.md for changes." \
+            --verify-tag

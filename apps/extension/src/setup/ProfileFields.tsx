@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { VoiceProfile } from '@gi/shared';
+import type { VoiceProfile } from '@pigeonbox/shared';
 
 const SIGNOFFS = ['Thanks', 'Best', 'Best regards', 'Cheers'];
 

@@ -1,4 +1,4 @@
-import type { GmailActionResult } from '@gi/shared';
+import type { GmailActionResult } from '@pigeonbox/shared';
 import type { GmailAdapter, QueuedGmailAction } from './types.js';
 
 export type ActionQueueItem = {

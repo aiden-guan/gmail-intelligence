@@ -10,33 +10,36 @@ self.addEventListener('unhandledrejection', (event) => {
   }
 });
 
-import { AgentLoop } from '@gi/agent';
+import { AgentLoop } from '@pigeonbox/agent';
 import {
   AIJobQueue,
   CHATGPT_DEFAULT_MODEL,
   ChatGptHttpError,
-  createAIProvider,
-  createPromptBackedProvider,
   isChatGptModel,
-} from '@gi/ai';
-import { selectGmailTab, WorkerTabController } from '@gi/gmail';
-import { filterSplitThreads, getMailboxDb, IndexJobRunner, MailboxIngestor, type IngestThread, type SplitView } from '@gi/mailbox';
+  type PromptOptions,
+} from '@pigeonbox/ai';
+import { selectGmailTab, WorkerTabController } from '@pigeonbox/gmail';
+import { filterSplitThreads, getMailboxDb, IndexJobRunner, MailboxIngestor, type IngestThread, type SplitView } from '@pigeonbox/mailbox';
 import {
   AskInboxEngine,
   formatCoverageWarning,
   HybridRetriever,
   LexicalSearchIndex,
-} from '@gi/search';
+} from '@pigeonbox/search';
 import {
   DEFAULT_SETTINGS,
   RuntimeMessageSchema,
   addBusinessDays,
   buildThreadSnapshot,
   getProviderRequiredOrigin,
+  migrateSettings,
   toPublicSettings,
   type ExtensionSettings,
+  type PublicExtensionSettings,
   type RawSnapshotMessage,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
+import { aiDataDestination, resolveCapabilities, type CloudState } from '@pigeonbox/core';
+import { cloudErrorMessage } from '@pigeonbox/cloud-client';
 import {
   TrackingClient,
   applyRecentOpens,
@@ -49,12 +52,13 @@ import {
   probeTracker,
   summaryFromRemote,
   trackerHealthLabel,
+  trackerPermissionOrigin,
   type TrackedEmailSummary,
   type TrackingDiagnosticsReport,
   type TrackingPixelEventDiagnostic,
   type TrackingSelfViewDiagnostic,
   type TrackingSendReport,
-} from '@gi/tracking';
+} from '@pigeonbox/tracking';
 import { refreshGmailTabsAfterRestart } from '../reload-extension';
 import { patchTrackedEmail, readTrackedEmails, upsertTrackedEmail, writeTrackedEmails } from './tracked-mail';
 import {
@@ -68,6 +72,10 @@ import {
   startChatGptLogin,
 } from './chatgpt-login';
 import { completeOnDevice, downloadOnDevice, warmOnDevice } from './on-device';
+import { effectiveSettings, resolveIntelligence } from './intelligence';
+import { clearCloudState, cloudSession, cloudTrackerTarget, getCloudClient, readCloudState, refreshCloudState } from './cloud';
+import { broadcastToGmailTabs, hardenExtensionStorage, isExtensionPageSender, senderMaySend } from './messaging';
+import { EXPERIMENTAL_FEATURES, cloudApiUrl, cloudTrackerUrl } from '../config';
 
 const db = getMailboxDb();
 const queue = new AIJobQueue();
@@ -87,16 +95,33 @@ const workerTabs = new WorkerTabController({
 
 async function loadSettings(): Promise<ExtensionSettings> {
   const stored = await chrome.storage.local.get('settings');
-  const saved = stored.settings as Partial<ExtensionSettings> | undefined;
-  settings = {
-    ...DEFAULT_SETTINGS,
-    ...saved,
-    // Profiles saved before a field existed still get its default.
-    voiceProfile: { ...DEFAULT_SETTINGS.voiceProfile, ...saved?.voiceProfile },
-  };
+  settings = migrateSettings(stored.settings);
+  if ((stored.settings as { settingsVersion?: number } | undefined)?.settingsVersion !== settings.settingsVersion) {
+    // Persist the migrated shape once so later reads are cheap. Every saved field is kept.
+    await chrome.storage.local.set({ settings });
+  }
   await applyBundledTracker();
-  await chrome.storage.local.set({ publicSettings: toPublicSettings(settings) });
+  await chrome.storage.local.set({ publicSettings: await contentSettings() });
   return settings;
+}
+
+/**
+ * Settings a Gmail content script may see: no secrets, and in Cloud mode the
+ * hosted tracker in place of the self-hosted one. `hasPersonalApiToken` only says
+ * whether the service worker can authenticate to that tracker.
+ */
+async function contentSettings(): Promise<PublicExtensionSettings> {
+  const view = toPublicSettings(effectiveSettings(settings));
+  if (settings.runMode !== 'cloud') return view;
+  const tracker = cloudTrackerUrl(settings);
+  const user = cloudApiUrl(settings) ? await cloudSession.currentUser(cloudApiUrl(settings)!) : null;
+  return { ...view, trackerBaseUrl: tracker ?? '', hasPersonalApiToken: Boolean(tracker && user) };
+}
+
+async function publishContentSettings(): Promise<void> {
+  const view = await contentSettings();
+  await chrome.storage.local.set({ publicSettings: view });
+  await broadcastToGmailTabs({ type: 'PUBLIC_SETTINGS_CHANGED', settings: view });
 }
 
 async function applyBundledTracker(): Promise<void> {
@@ -117,44 +142,25 @@ async function applyBundledTracker(): Promise<void> {
 }
 
 async function saveSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
-  settings = { ...settings, ...partial };
-  await chrome.storage.local.set({
-    settings,
-    publicSettings: toPublicSettings(settings),
-  });
+  // Run mode changes only through SET_RUN_MODE, which records consent.
+  const rest = { ...partial };
+  delete rest.runMode;
+  delete rest.cloudConsentAt;
+  delete rest.settingsVersion;
+  settings = migrateSettings({ ...settings, ...rest });
+  await chrome.storage.local.set({ settings });
+  await publishContentSettings();
   rebuildAgent();
   return settings;
 }
 
 function getAI() {
-  if (settings.aiMode === 'disabled') return null;
-  if (settings.aiProvider === 'chatgpt') {
-    const model = isChatGptModel(settings.aiModel) ? settings.aiModel : CHATGPT_DEFAULT_MODEL;
-    return createPromptBackedProvider(
-      'chatgpt',
-      (system, user) => completeChatGpt(model, system, user),
-      { maxUserChars: 48_000 },
-    );
-  }
-  if (settings.aiProvider === 'local') {
-    return createPromptBackedProvider(
-      'local',
-      (system, user, options) => completeOnDevice(settings.aiModel, system, user, options),
-      { maxUserChars: 4_000, summaryStyle: 'compact', repairInvalidJson: false, classifyWithModel: false },
-    );
-  }
-  if (settings.aiProvider === 'chrome') {
-    return createPromptBackedProvider(
-      'chrome',
-      (system, user, options) => completeOnDevice('gemini-nano', system, user, options),
-      { maxUserChars: 7_000, summaryStyle: 'compact' },
-    );
-  }
-  if (!settings.aiApiKey && settings.aiProvider !== 'ollama') return null;
-  return createAIProvider(settings.aiProvider, {
-    apiKey: settings.aiApiKey,
-    model: settings.aiModel,
-    endpoint: settings.aiEndpoint,
+  return resolveIntelligence(settings, {
+    completeChatGpt,
+    completeOnDevice: (modelId: string, system: string, user: string, options?: PromptOptions) =>
+      completeOnDevice(modelId, system, user, options),
+    cloudClient: () => getCloudClient(settings),
+    experimental: EXPERIMENTAL_FEATURES,
   });
 }
 
@@ -193,7 +199,7 @@ function rebuildAgent(): void {
     db,
     ai: getAI(),
     queue,
-    settings: () => settings,
+    settings: () => effectiveSettings(settings),
     archiveViaGmail: async (threadId) => {
       try {
         const res = (await workerTabs.runExclusive((tabId) =>
@@ -310,7 +316,7 @@ async function handleAskInbox(query: string) {
     retriever,
     async () => coverage,
     async ({ query: q, chunks, coverageNote }) => {
-      if (!ai || settings.aiMode === 'disabled') {
+      if (!ai || effectiveSettings(settings).aiMode === 'disabled') {
         const lines = chunks.map((c) => `• ${c.subject} (${c.threadId})`).join('\n');
         return {
           answer: `Lexical matches (AI disabled):\n${lines}\n\n${coverageNote}`,
@@ -361,9 +367,12 @@ async function runDiagnostics() {
   }
   let tracking: 'not_configured' | 'healthy' | 'unreachable' | 'unauthorized' | 'invalid_url' | 'outdated' | 'disabled' = 'not_configured';
   let trackingProbe: Awaited<ReturnType<typeof probeTracker>> | null = null;
+  const probeTarget = settings.runMode === 'cloud'
+    ? await trackerTarget()
+    : { baseUrl: settings.trackerBaseUrl, token: settings.personalApiToken };
   if (!settings.trackingEnabled) tracking = 'disabled';
-  else if (settings.trackerBaseUrl || settings.personalApiToken) {
-    trackingProbe = await probeTracker(settings.trackerBaseUrl, settings.personalApiToken);
+  else if (probeTarget && (probeTarget.baseUrl || probeTarget.token)) {
+    trackingProbe = await probeTrackerWithPermission(probeTarget.baseUrl, probeTarget.token);
     tracking = trackingProbe.status === 'healthy'
       ? 'healthy'
       : trackingProbe.status === 'unauthorized'
@@ -415,7 +424,12 @@ async function runDiagnostics() {
   let aiStatus: 'ready' | 'disabled' | 'not_signed_in' | 'missing_permissions' | 'missing_key' | 'error' = 'ready';
   let configStatus: string = 'provider selected';
   let aiDetail: string | null = null;
-  if (settings.aiMode === 'disabled') {
+  if (settings.runMode === 'cloud') {
+    const cloud = await readCloudState(settings);
+    aiStatus = cloud.status === 'ready' ? 'ready' : cloud.status === 'signed_out' || cloud.status === 'expired' ? 'not_signed_in' : 'error';
+    configStatus = `PigeonBox Cloud: ${cloud.status.replace(/_/g, ' ')}`;
+    aiDetail = cloud.status === 'ready' ? null : 'Cloud mode never falls back to another AI provider.';
+  } else if (settings.aiMode === 'disabled') {
     aiStatus = 'disabled';
     configStatus = 'AI disabled';
   } else if (settings.aiProvider === 'chatgpt') {
@@ -548,10 +562,12 @@ async function runDiagnostics() {
     mailboxDb,
     indexedThreads,
     currentThreadId: runtime?.currentThreadId || null,
+    runMode: settings.runMode,
+    aiDestination: aiDataDestination(settings),
     ai: {
-      provider: settings.aiProvider,
-      model: settings.aiModel,
-      mode: settings.aiMode,
+      provider: settings.runMode === 'cloud' ? 'pigeonbox-cloud' : settings.aiProvider,
+      model: settings.runMode === 'cloud' ? 'PigeonBox Cloud' : settings.aiModel,
+      mode: settings.runMode === 'cloud' ? 'cloud' : settings.aiMode,
       status: aiStatus,
       configurationStatus: configStatus,
       'configuration status': configStatus,
@@ -640,9 +656,37 @@ async function classifyIngested(thread: IngestThread, fingerprint: string, quali
   });
 }
 
+/**
+ * The tracker this install reports to, with the credential for its management
+ * API. Local: the self-hosted tracker and personal token from Settings. Cloud:
+ * the hosted tracker and the Cloud access token. Either way the credential stays
+ * in the service worker.
+ */
+/**
+ * Probe a tracker, first checking that Chrome lets PigeonBox reach it. Tracker
+ * hosts are optional permissions, so a missing grant is reported as such rather
+ * than as an unreachable server.
+ */
+async function probeTrackerWithPermission(baseUrl: string, token: string) {
+  const origin = trackerPermissionOrigin(baseUrl);
+  if (origin && baseUrl.trim() && token.trim() && chrome.permissions?.contains) {
+    const granted = await chrome.permissions.contains({ origins: [origin] }).catch(() => true);
+    if (!granted) return { status: 'no_permission' as const, label: trackerHealthLabel('no_permission') };
+  }
+  return probeTracker(baseUrl, token);
+}
+
+async function trackerTarget(): Promise<{ baseUrl: string; token: string } | null> {
+  if (settings.runMode === 'cloud') return cloudTrackerTarget(settings);
+  if (!settings.trackerBaseUrl || !settings.personalApiToken) return null;
+  return { baseUrl: settings.trackerBaseUrl, token: settings.personalApiToken };
+}
+
 async function pollTracking(): Promise<void> {
-  if (!settings.trackingEnabled || !settings.trackerBaseUrl || !settings.personalApiToken) return;
-  const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+  if (!settings.trackingEnabled) return;
+  const target = await trackerTarget();
+  if (!target) return;
+  const client = new TrackingClient(target.baseUrl, target.token);
   const local = await readTrackedEmails();
   const byId = new Map(local.map((email) => [email.trackingId, email]));
   let sawRemote = false;
@@ -795,10 +839,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     message?.type === 'ON_DEVICE_WARM' ||
     message?.type === 'ON_DEVICE_DOWNLOAD'
   ) return false;
+  if (!senderMaySend(sender, message?.type)) {
+    sendResponse({ ok: false, error: 'forbidden', reason: 'This request is only accepted from PigeonBox pages.' });
+    return false;
+  }
   void (async () => {
     try {
     await loadSettings();
     if (!agent) rebuildAgent();
+
+    const productResponse = await handleProductMessage(message);
+    if (productResponse !== undefined) {
+      sendResponse(productResponse);
+      return;
+    }
 
     const parsed = RuntimeMessageSchema.safeParse(message);
     const contentBridgeMessage = message?.type === 'REQUEST_SUMMARY' || message?.type === 'REQUEST_DRAFT' || message?.type === 'GET_AI_JOB_STATUS';
@@ -1003,12 +1057,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       if (message?.type === 'CREATE_TRACKED_EMAIL') {
         // Token stays in service worker — never sent to content/MAIN world
-        if (!settings.trackingEnabled || !settings.trackerBaseUrl || !settings.personalApiToken) {
+        const target = settings.trackingEnabled ? await trackerTarget() : null;
+        if (!target) {
           sendResponse({ error: 'tracking_not_configured' });
           return;
         }
         try {
-          const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+          const client = new TrackingClient(target.baseUrl, target.token);
           const created = await client.createEmail(message.input);
           const input = message.input as {
             subject?: string;
@@ -1055,9 +1110,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         const updated = await patchTrackedEmail(trackingId, patch);
         if (updated?.notifyIfNoReply && updated.status === 'SENT') await ensureNoReplyReminder(updated);
-        if (settings.trackerBaseUrl && settings.personalApiToken) {
+        const target = await trackerTarget();
+        if (target) {
           try {
-            const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+            const client = new TrackingClient(target.baseUrl, target.token);
             await client.linkEmail(trackingId, {
               ...(patch.gmailThreadId !== undefined ? { gmail_thread_id: patch.gmailThreadId } : {}),
               ...(patch.gmailMessageId !== undefined ? { gmail_message_id: patch.gmailMessageId } : {}),
@@ -1086,6 +1142,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ status: 'disabled', label: 'Disabled' });
           return;
         }
+        if (settings.runMode === 'cloud') {
+          const target = await trackerTarget();
+          sendResponse(target ? await probeTrackerWithPermission(target.baseUrl, target.token) : { status: 'missing', label: trackerHealthLabel('missing') });
+          return;
+        }
         let base = typeof message.trackerBaseUrl === 'string' ? message.trackerBaseUrl : settings.trackerBaseUrl;
         let token = typeof message.personalApiToken === 'string' ? message.personalApiToken : settings.personalApiToken;
         if (!base.trim() || !token.trim()) {
@@ -1095,7 +1156,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             token = settings.personalApiToken;
           }
         }
-        sendResponse(await probeTracker(base, token));
+        sendResponse(await probeTrackerWithPermission(base, token));
         return;
       }
       if (message?.type === 'LINK_TRACKED_EMAIL') {
@@ -1111,9 +1172,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (gmailMessageId) patch.gmailMessageId = gmailMessageId;
         const updated = Object.keys(patch).length ? await patchTrackedEmail(trackingId, patch) : null;
         if (updated?.notifyIfNoReply) await ensureNoReplyReminder(updated);
-        if (settings.trackerBaseUrl && settings.personalApiToken && (gmailThreadId || gmailMessageId)) {
+        const target = gmailThreadId || gmailMessageId ? await trackerTarget() : null;
+        if (target) {
           try {
-            const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+            const client = new TrackingClient(target.baseUrl, target.token);
             await client.linkEmail(trackingId, {
               ...(gmailThreadId ? { gmail_thread_id: gmailThreadId } : {}),
               ...(gmailMessageId ? { gmail_message_id: gmailMessageId } : {}),
@@ -1242,7 +1304,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       if (message?.type === 'SAVE_AGENT_RULES') {
-        const { parseNaturalLanguageRule } = await import('@gi/agent');
+        const { parseNaturalLanguageRule } = await import('@pigeonbox/agent');
         const lines = (message.lines || []) as string[];
         await db.agent_rules.clear();
         for (const line of lines) {
@@ -1269,18 +1331,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case 'GET_PUBLIC_SETTINGS':
-        sendResponse({ settings: toPublicSettings(settings) });
+        sendResponse({ settings: await contentSettings() });
         // A Gmail tab just opened: load the local model now rather than on the first summary.
-        if (sender.tab?.url?.startsWith('https://mail.google.com/') && settings.aiMode !== 'disabled' && settings.aiProvider === 'local') {
+        if (sender.tab?.url?.startsWith('https://mail.google.com/') && settings.runMode === 'local' && settings.aiMode !== 'disabled' && settings.aiProvider === 'local') {
           void warmOnDevice(settings.aiModel).catch(() => undefined);
         }
         break;
       case 'GET_SETTINGS':
-        if (sender.tab) {
-          sendResponse({ settings: toPublicSettings(settings) });
-        } else {
-          sendResponse({ settings });
-        }
+        // Extension pages are trusted and edit secrets; anything else gets the public view.
+        // (The options page opens in a tab, so `sender.tab` alone cannot tell them apart.)
+        sendResponse({ settings: isExtensionPageSender(sender) ? settings : await contentSettings() });
         break;
       case 'SAVE_SETTINGS':
         sendResponse({ settings: await saveSettings(msg.settings as Partial<ExtensionSettings>) });
@@ -1381,7 +1441,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case 'TRACKING_SELF_VIEW': {
-        if (!settings.trackerBaseUrl || !settings.personalApiToken || !msg.trackingId) {
+        const target = msg.trackingId ? await trackerTarget() : null;
+        if (!target) {
           sendResponse({
             ok: false,
             recorded: false,
@@ -1390,7 +1451,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
-        const client = new TrackingClient(settings.trackerBaseUrl, settings.personalApiToken);
+        const client = new TrackingClient(target.baseUrl, target.token);
         const normMessageId = normalizeGmailId(msg.gmailMessageId);
         const normThreadId = normalizeGmailId(msg.gmailThreadId);
         const source = msg.source || 'MESSAGE_EXPANDED';
@@ -1484,6 +1545,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'CHATGPT_LOGIN':
+        if (!EXPERIMENTAL_FEATURES) {
+          sendResponse({ ok: false, error: 'ChatGPT sign-in is an experimental feature and is not part of this build.' });
+          break;
+        }
         sendResponse(await startChatGptLogin());
         break;
       case 'CHATGPT_LOGOUT':
@@ -1513,7 +1578,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         const { result } = await ai.rewriteText({
           text: msg.text,
-          mode: msg.mode as import('@gi/ai').RewriteInput['mode'],
+          mode: msg.mode as import('@pigeonbox/ai').RewriteInput['mode'],
           voice: settings.voiceProfile,
           context: msg.context,
         });
@@ -1560,6 +1625,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
   return true;
 });
+
+/** Everything a PigeonBox page needs to render mode, capabilities and Cloud status. */
+async function productState() {
+  const cloud: CloudState = await readCloudState(settings);
+  const capabilities = resolveCapabilities({ mode: settings.runMode, settings, cloud });
+  return {
+    runMode: settings.runMode,
+    cloudAvailable: Boolean(cloudApiUrl(settings)),
+    cloudConsentAt: settings.cloudConsentAt,
+    cloud,
+    capabilities: capabilities.list(),
+    aiDestination: aiDataDestination(settings),
+    experimental: EXPERIMENTAL_FEATURES,
+    // Host permissions Cloud mode needs; the page requests them with a user gesture before sign-in.
+    cloudOrigins: [cloudApiUrl(settings), cloudTrackerUrl(settings)]
+      .filter((url): url is string => Boolean(url))
+      .map((url) => `${new URL(url).origin}/*`),
+  };
+}
+
+/**
+ * Run mode, Cloud account and billing messages. Returns undefined for any other
+ * message. Only extension pages reach here (see `senderMaySend`).
+ */
+async function handleProductMessage(message: { type?: unknown; [key: string]: unknown }): Promise<unknown> {
+  switch (message?.type) {
+    case 'GET_PRODUCT_STATE':
+      return productState();
+    case 'SET_RUN_MODE': {
+      const mode = message.mode;
+      if (mode === 'local') {
+        settings = migrateSettings({ ...settings, runMode: 'local' });
+      } else if (mode === 'cloud') {
+        if (!cloudApiUrl(settings)) return { ok: false, reason: 'PigeonBox Cloud is not available in this build.' };
+        if (message.consent !== true) return { ok: false, reason: 'Cloud mode needs your agreement to send email content to PigeonBox Cloud.' };
+        settings = migrateSettings({ ...settings, runMode: 'cloud', cloudConsentAt: new Date().toISOString() });
+      } else {
+        return { ok: false, reason: 'Unknown mode.' };
+      }
+      await chrome.storage.local.set({ settings });
+      await publishContentSettings();
+      rebuildAgent();
+      return { ok: true, state: await productState() };
+    }
+    case 'CLOUD_SIGN_IN': {
+      const base = cloudApiUrl(settings);
+      if (!base) return { ok: false, reason: 'PigeonBox Cloud is not available in this build.' };
+      try {
+        const user = await cloudSession.signIn(base);
+        await refreshCloudState(settings);
+        await publishContentSettings();
+        rebuildAgent();
+        return { ok: true, user, state: await productState() };
+      } catch (error) {
+        return { ok: false, reason: cloudErrorMessage(error).message, detail: error instanceof Error ? error.message : undefined };
+      }
+    }
+    case 'CLOUD_SIGN_OUT':
+      // Signing out never changes the run mode or any local data.
+      await cloudSession.signOut();
+      await clearCloudState();
+      await publishContentSettings();
+      rebuildAgent();
+      return { ok: true, state: await productState() };
+    case 'CLOUD_REFRESH':
+      await refreshCloudState(settings);
+      await publishContentSettings();
+      return { ok: true, state: await productState() };
+    case 'CLOUD_BILLING': {
+      const client = getCloudClient(settings);
+      if (!client) return { ok: false, reason: 'PigeonBox Cloud is not available in this build.' };
+      try {
+        const { url } = message.kind === 'portal' ? await client.billingPortal() : await client.billingCheckout();
+        await chrome.tabs.create({ url });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: cloudErrorMessage(error).message };
+      }
+    }
+    default:
+      return undefined;
+  }
+}
 
 const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
@@ -1635,9 +1783,11 @@ setChatGptSignedInHandler(async () => {
   });
 });
 
-installChatGptLoginListeners();
+// Experimental ChatGPT web sign-in is inert in release builds.
+if (EXPERIMENTAL_FEATURES) installChatGptLoginListeners();
 
-void loadSettings()
+void hardenExtensionStorage()
+  .then(() => loadSettings())
   .then(async () => {
     rebuildAgent();
     chrome.alarms.create('tracking_poll', { periodInMinutes: 1 });

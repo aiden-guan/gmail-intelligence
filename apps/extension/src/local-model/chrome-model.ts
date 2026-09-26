@@ -1,4 +1,4 @@
-import type { ChatExample, PromptOptions } from '@gi/ai';
+import type { ChatExample, PromptOptions } from '@pigeonbox/ai';
 import { createScheduler } from './scheduler';
 
 export type OnDeviceAvailability =

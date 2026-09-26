@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, expect, it, vi } from 'vitest';
-import type { TrackedEmailSummary } from '@gi/tracking';
+import type { TrackedEmailSummary } from '@pigeonbox/tracking';
 import { buildSelfViewEventId, createMessageSelfViewHandler, type InboxSdkMessageViewLike } from './message-self-view';
 
 type MockMessageViewOptions = {
