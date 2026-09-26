@@ -2,7 +2,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { DEFAULT_SETTINGS } from "@gi/shared";
+import { DEFAULT_SETTINGS } from "@pigeonbox/shared";
 import { PopupApp } from "../popup/PopupApp";
 import { SidePanelApp } from "../sidepanel/SidePanelApp";
 import { SettingsApp } from "../settings/SettingsApp";
@@ -22,11 +22,23 @@ const demoThreads = [
 let empty = false;
 const listeners = new Set<(changes: unknown, area: string) => void>();
 const demoSettings = {...DEFAULT_SETTINGS, aiMode:"disabled", trackerBaseUrl:"", personalApiToken:"", aiApiKey:"", aiEndpoint:""};
+// Product state for the run-mode UI. `#cloud` pretends this build has a Cloud URL.
+const demoProduct = { runMode:"local", cloudAvailable: location.search.includes("cloud"), cloudConsentAt:null as string|null,
+  cloud:{status: location.search.includes("cloud") ? "signed_out" : "not_configured", email:null as string|null, plan:null as string|null, capabilities:[] as string[]},
+  capabilities:["ask_inbox"], aiDestination:"none", experimental:true, cloudOrigins:[] as string[] };
+function productReply(message:{type:string;mode?:string}): unknown {
+  if (message.type==="SET_RUN_MODE") { demoProduct.runMode = message.mode ?? "local"; demoProduct.cloudConsentAt = message.mode==="cloud" ? new Date().toISOString() : demoProduct.cloudConsentAt; demoProduct.aiDestination = message.mode==="cloud" ? "pigeonbox_cloud" : "none"; }
+  if (message.type==="CLOUD_SIGN_IN") demoProduct.cloud = { status:"ready", email:"ada@example.com", plan:"cloud", capabilities:["cloud_ai","cloud_tracking"] };
+  if (message.type==="CLOUD_SIGN_OUT") demoProduct.cloud = { status:"signed_out", email:null, plan:null, capabilities:[] };
+  demoProduct.capabilities = demoProduct.runMode==="cloud" ? [...demoProduct.cloud.capabilities, "ask_inbox"] : ["ask_inbox"];
+  return message.type==="GET_PRODUCT_STATE" ? demoProduct : { ok:true, state:{...demoProduct} };
+}
+const PRODUCT_MESSAGES = new Set(["GET_PRODUCT_STATE","SET_RUN_MODE","CLOUD_SIGN_IN","CLOUD_SIGN_OUT","CLOUD_REFRESH","CLOUD_BILLING"]);
 // This shim lives only on this standalone preview URL.
 Object.defineProperty(window, "chrome", { configurable:true, value: {
-  runtime: { getURL:(p:string)=>`/${p}`, openOptionsPage:()=>{location.hash="settings";location.reload();},
+  runtime: { getURL:(p:string)=>`/${p}`, onMessage:{addListener:()=>undefined,removeListener:()=>undefined}, openOptionsPage:()=>{location.hash="settings";location.reload();},
     sendMessage:(message:{type:string;category?:string}, callback?:(r:unknown)=>void)=>{
-      const response = message.type==="GET_SETTINGS" ? {settings:demoSettings} : message.type==="LIST_SPLIT" ? {threads:empty || message.category!=="RESPOND" ? [] : demoThreads} : message.type==="RUN_DIAGNOSTICS" ? {gmailTab:"connected",ai:{status:"ready"},tracking:"healthy",coverage:"Preview uses fictional messages."} : message.type==="ASK_INBOX" ? {answer:"Maya is waiting for feedback on the new direction. Oliver’s samples arrive tomorrow. Nina and Alex suggested coffee on Tuesday.",citations:[]} : {};
+      const response = PRODUCT_MESSAGES.has(message.type) ? productReply(message) : message.type==="GET_SETTINGS" ? {settings:demoSettings} : message.type==="LIST_SPLIT" ? {threads:empty || message.category!=="RESPOND" ? [] : demoThreads} : message.type==="RUN_DIAGNOSTICS" ? {gmailTab:"connected",ai:{status:"ready"},tracking:"healthy",coverage:"Preview uses fictional messages."} : message.type==="ASK_INBOX" ? {answer:"Maya is waiting for feedback on the new direction. Oliver’s samples arrive tomorrow. Nina and Alex suggested coffee on Tuesday.",citations:[]} : {};
       setTimeout(()=>callback?.(response),message.type==="ASK_INBOX" ? 1800 : 0); return Promise.resolve(response);
     } },
   storage:{session:{get:(_k:string,cb:(v:unknown)=>void)=>cb({}),set:()=>Promise.resolve()},local:{set:()=>Promise.resolve()},onChanged:{addListener:(fn:(changes:unknown,area:string)=>void)=>listeners.add(fn),removeListener:(fn:(changes:unknown,area:string)=>void)=>listeners.delete(fn)}},
@@ -50,6 +62,10 @@ function Preview(){
  {view==="overview" ? <><section className="preview-intro"><div><div className="gi-kicker">A quieter kind of clever</div><h1>Good mail.<br/><em>Better company.</em></h1></div><p>Warm copper. Smoked glass.<br/>A familiar little face, with a life of its own.</p></section><section className="preview-grid"><article><div className="preview-caption">01 / Your perch <span>Toolbar popup</span></div><PopupApp/></article><article><div className="preview-caption">02 / Room to focus <button onClick={()=>{empty=!isEmpty;setEmpty(!isEmpty);setPanelKey(k=>k+1);}}>{isEmpty?"Show mail":"Empty state"}</button></div><div className="preview-panel"><SidePanelApp key={panelKey}/></div></article><article><div className="preview-caption">03 / The important bits <span>Thread companion</span></div><ThreadPreview state={state}/></article></section><section className="preview-states" aria-label="Pigeon animation states">{(["idle","indexing","drafting","opened","error"] as PigeonState[]).map(s=><button key={s} aria-pressed={state===s} onClick={()=>setState(s)}><Pigeon state={s} size={94}/><strong>{s==="opened"?"Open detected":s}</strong><span>4 animation frames</span></button>)}</section></> : view==="settings" ? <SettingsApp/> : <OnboardingApp/>}
  </div>;
 }
+function FloatCard() {
+ const [mode,setMode]=useState<"docked"|"open"|"expanded">("open");
+ return <ThreadIntelCard mode={mode} onMode={setMode} canDraft intel={{classification:{category:"PROMOTIONS"},summary:{source:"model",aiStatus:"success",summary:{oneLine:"A Math 52 exam review is scheduled for Monday from 4:00pm to 6:00pm.",keyPoints:["Math 52 midterm review, Monday, 4:00-6:00pm"],actionItems:["Attend the review"]}}}} onDraft={()=>{}} onRemind={()=>{}}/>;
+}
 // `#float` mounts the draggable, resizable card the way the content script does in Gmail.
 if (location.hash === "#float") {
  const host = document.createElement("aside"); host.id = "gi-thread-panel";
@@ -57,10 +73,6 @@ if (location.hash === "#float") {
  document.documentElement.append(host);
  const fallback = () => ({ right: 28, top: 72 });
  installFloatDrag(host, fallback);
- function FloatCard() {
-  const [mode,setMode]=useState<"docked"|"open"|"expanded">("open");
-  return <ThreadIntelCard mode={mode} onMode={setMode} canDraft intel={{classification:{category:"PROMOTIONS"},summary:{source:"model",aiStatus:"success",summary:{oneLine:"A Math 52 exam review is scheduled for Monday from 4:00pm to 6:00pm.",keyPoints:["Math 52 midterm review, Monday, 4:00-6:00pm"],actionItems:["Attend the review"]}}}} onDraft={()=>{}} onRemind={()=>{}}/>;
- }
  createRoot(shadowMount(host)).render(<FloatCard/>);
  placeFloat(host, fallback());
  window.addEventListener("resize", () => placeFloat(host, fallback()));

@@ -1,4 +1,4 @@
-import type { Contact, ThreadDataQuality, ThreadDataSource } from '@gi/shared';
+import type { Contact, ThreadDataQuality, ThreadDataSource } from '@pigeonbox/shared';
 import type { CurrentThreadView, ThreadMessageView, VisibleThreadRow } from './types.js';
 
 export type NormalizedMessage = Omit<ThreadMessageView, 'timestamp'> & { timestamp?: string };

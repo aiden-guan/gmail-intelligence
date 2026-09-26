@@ -4,7 +4,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_SETTINGS } from '@gi/shared';
+import { DEFAULT_SETTINGS } from '@pigeonbox/shared';
 import { SettingsApp } from './SettingsApp';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import type { TrackedEmailSummary } from '@gi/tracking';
+import type { TrackedEmailSummary } from '@pigeonbox/tracking';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { installSentStatus, paintConversation, paintRows } from './sent-status';
 

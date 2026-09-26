@@ -1,4 +1,4 @@
-import type { GmailActionResult, GmailCapabilities } from '@gi/shared';
+import type { GmailActionResult, GmailCapabilities } from '@pigeonbox/shared';
 import { EMPTY_CAPABILITIES } from './capabilities.js';
 import { DomFallbackAdapter } from './DomFallbackAdapter.js';
 import { queryFirst, SELECTORS } from './selectors.js';

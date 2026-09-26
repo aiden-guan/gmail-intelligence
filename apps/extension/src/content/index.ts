@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { ExtensionSettings, PublicExtensionSettings } from '@gi/shared';
-import { DEFAULT_SETTINGS, toPublicSettings, buildThreadSnapshot, localThreadSummary } from '@gi/shared';
+import type { PublicExtensionSettings } from '@pigeonbox/shared';
+import { DEFAULT_SETTINGS, toPublicSettings, buildThreadSnapshot, localThreadSummary } from '@pigeonbox/shared';
 import {
   CompositeGmailAdapter,
   findComposeBody,
@@ -22,14 +22,14 @@ import {
   type InboxSdkLike,
   type InboxSdkHooks,
   type QueuedGmailAction,
-} from '@gi/gmail';
+} from '@pigeonbox/gmail';
 import {
   normalizeGmailId,
   type CreateTrackedEmailInput,
   type CreateTrackedEmailResult,
   type TrackedEmailPatch,
   type TrackedEmailSummary,
-} from '@gi/tracking';
+} from '@pigeonbox/tracking';
 import { applyCategoryChip, rowsForThread } from './chips';
 import { VISIBLE_COMMANDS, isVisibleCommand, type CommandId } from './commands';
 import { attachSdkComposeTracking, type ComposeTrackingSession } from './compose-tracking';
@@ -152,7 +152,7 @@ async function tryLoadInboxSdk(): Promise<InboxSdkLike | null> {
     const mod = await import('@inboxsdk/core');
     const loader = (mod as { load?: (version: number, appId: string, opts?: { appName?: string }) => Promise<unknown> }).load;
     if (!loader) return null;
-    return (await loader(2, appId, { appName: 'Gmail Intelligence' })) as InboxSdkLike;
+    return (await loader(2, appId, { appName: 'PigeonBox' })) as InboxSdkLike;
   } catch (error) {
     console.warn('[gi] InboxSDK failed to load', error);
     return null;
@@ -196,6 +196,12 @@ function currentIslandMode(): IslandMode {
   return 'open';
 }
 
+function updateCachedEmails(emails: TrackedEmailSummary[]): void {
+  cachedTrackedEmails = emails;
+  sentStatus?.setEmails(emails);
+  void messageSelfView?.reinspectActive();
+}
+
 async function boot(): Promise<void> {
   if (booted) return;
   booted = true;
@@ -205,12 +211,6 @@ async function boot(): Promise<void> {
   pageReload = isReload && Number.isFinite(navigationStartedAt) ? { navigationStartedAt } : null;
   ensureSurface();
   await refreshSettings();
-
-  const updateCachedEmails = (emails: TrackedEmailSummary[]) => {
-    cachedTrackedEmails = emails;
-    sentStatus?.setEmails(emails);
-    void messageSelfView?.reinspectActive();
-  };
 
   sentStatus = installSentStatus({
     trackerBaseUrl: settings.trackerBaseUrl,
@@ -279,9 +279,6 @@ async function boot(): Promise<void> {
       if (area === 'local') {
         if (changes.publicSettings?.newValue && typeof changes.publicSettings.newValue === 'object') {
           settings = { ...settings, ...(changes.publicSettings.newValue as PublicExtensionSettings) };
-          sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
-        } else if (changes.settings?.newValue && typeof changes.settings.newValue === 'object') {
-          settings = { ...settings, ...toPublicSettings(changes.settings.newValue as ExtensionSettings) };
           sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
         }
       }
@@ -714,6 +711,17 @@ function linkTracked(link: { trackingId: string; gmailThreadId: string | null; g
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void (async () => {
+      if (message?.type === 'PUBLIC_SETTINGS_CHANGED' && message.settings && typeof message.settings === 'object') {
+        settings = { ...settings, ...(message.settings as PublicExtensionSettings) };
+        sentStatus?.setTrackerBaseUrl(settings.trackerBaseUrl || '');
+        sendResponse({ ok: true });
+        return;
+      }
+      if (message?.type === 'TRACKED_EMAILS_CHANGED' && Array.isArray(message.emails)) {
+        updateCachedEmails(message.emails as TrackedEmailSummary[]);
+        sendResponse({ ok: true });
+        return;
+      }
       if (message?.type === 'THREAD_INTELLIGENCE_UPDATED' || message?.type === 'THREAD_SUMMARY_READY' || message?.type === 'THREAD_DRAFT_READY') {
         const tid = String(message.threadId || '');
         const note = summaryNotes.get(tid);

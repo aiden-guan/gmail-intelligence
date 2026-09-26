@@ -6,7 +6,7 @@ import {
   type LocalDtype,
   type LocalModel,
   type PromptOptions,
-} from '@gi/ai';
+} from '@pigeonbox/ai';
 import { cachedModelDtype, deleteCachedModel } from './cache';
 import { modelFileStore } from './model-store';
 import { createScheduler } from './scheduler';

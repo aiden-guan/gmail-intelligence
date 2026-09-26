@@ -8,6 +8,9 @@
     { "path": "./packages/search" },
     { "path": "./packages/agent" },
     { "path": "./packages/tracking" },
+    { "path": "./packages/api-contract" },
+    { "path": "./packages/cloud-client" },
+    { "path": "./packages/core" },
     { "path": "./apps/extension" },
     { "path": "./workers/tracker" }
   ]

@@ -2,7 +2,7 @@ import {
   stableThreadFingerprint,
   stripHtml,
   type ThreadDataQuality,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
 import { getMailboxDb, type MailboxDatabase } from './db.js';
 import type {
   IndexCheckpoint,

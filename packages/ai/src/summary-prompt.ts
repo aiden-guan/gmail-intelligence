@@ -1,4 +1,4 @@
-import { splitSuperseded } from '@gi/shared';
+import { splitSuperseded } from '@pigeonbox/shared';
 
 /**
  * Shared instructions for every selected model (ChatGPT, API models, on-device).

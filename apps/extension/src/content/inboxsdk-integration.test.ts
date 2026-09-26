@@ -2,8 +2,8 @@
  * @vitest-environment jsdom
  */
 import { describe, expect, it, vi } from 'vitest';
-import type { InboxSdkLike } from '@gi/gmail';
-import { CompositeGmailAdapter } from '@gi/gmail';
+import type { InboxSdkLike } from '@pigeonbox/gmail';
+import { CompositeGmailAdapter } from '@pigeonbox/gmail';
 import { mountSdkUi } from './index';
 
 describe('InboxSDK UI and handler integration', () => {

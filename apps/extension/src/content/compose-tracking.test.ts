@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { DEFAULT_SETTINGS, toPublicSettings, type ExtensionSettings } from '@gi/shared';
+import { DEFAULT_SETTINGS, toPublicSettings, type ExtensionSettings } from '@pigeonbox/shared';
 import { describe, expect, it, vi } from 'vitest';
 import {
   attachSdkComposeTracking,

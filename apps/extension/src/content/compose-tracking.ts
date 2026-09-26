@@ -1,4 +1,4 @@
-import type { ExtensionSettings, PublicExtensionSettings } from '@gi/shared';
+import type { ExtensionSettings, PublicExtensionSettings } from '@pigeonbox/shared';
 import {
   clickIdFromTrackedUrl,
   normalizeGmailId,
@@ -8,8 +8,8 @@ import {
   type CreateTrackedEmailInput,
   type CreateTrackedEmailResult,
   type TrackedEmailPatch,
-} from '@gi/tracking';
-import { findSendButton } from '@gi/gmail';
+} from '@pigeonbox/tracking';
+import { findSendButton } from '@pigeonbox/gmail';
 import { ensureSurface } from './surface';
 import {
   composeTrackingLabel,

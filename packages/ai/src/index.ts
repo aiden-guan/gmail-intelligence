@@ -8,7 +8,7 @@ import {
   type NeedsReplyResult,
   type ThreadSummary,
   type VoiceProfile,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
 import { z } from 'zod';
 import { EMAIL_SUMMARY_SYSTEM_PROMPT, formatThreadForSummary, summaryUserContent } from './summary-prompt.js';
 import { coerceDraftSuggestion, coerceThreadSummary } from './prompt-provider.js';

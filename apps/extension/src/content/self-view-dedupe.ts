@@ -1,4 +1,4 @@
-import { normalizeGmailId } from '@gi/tracking';
+import { normalizeGmailId } from '@pigeonbox/tracking';
 import type { SelfViewSource } from './message-self-view';
 
 export type SelfViewReport = {

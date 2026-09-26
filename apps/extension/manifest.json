@@ -1,39 +1,34 @@
 {
   "manifest_version": 3,
-  "name": "PigeonBox — Gmail Intelligence",
-  "version": "0.1.1",
-  "description": "Local AI inbox intelligence + email open tracking for Gmail. No Gmail API.",
+  "name": "PigeonBox",
+  "short_name": "PigeonBox",
+  "version": "0.2.0",
+  "description": "AI inbox intelligence and email open tracking for Gmail. Runs on your computer by default. No Gmail API.",
+  "homepage_url": "https://github.com/aiden-guan/pigeonbox",
+  "minimum_chrome_version": "116",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "notifications",
     "alarms",
     "scripting",
     "sidePanel",
-    "tabs",
-    "activeTab",
-    "offscreen",
-    "unlimitedStorage"
+    "offscreen"
+  ],
+  "optional_permissions": [
+    "identity"
   ],
   "host_permissions": [
-    "https://mail.google.com/*",
-    "http://127.0.0.1:8787/*",
-    "http://localhost:8787/*",
-    "https://chatgpt.com/*",
-    "https://*.convex.site/*"
+    "https://mail.google.com/*"
   ],
   "optional_host_permissions": [
     "https://*/*",
-    "https://api.openai.com/*",
-    "https://*.openai.azure.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*",
     "http://127.0.0.1:11434/*",
-    "http://localhost:11434/*",
-    "https://*.workers.dev/*",
-    "https://generativelanguage.googleapis.com/*",
-    "https://api.anthropic.com/*",
-    "https://huggingface.co/*",
-    "https://cdn-lfs.huggingface.co/*",
-    "https://cas-bridge.xethub.hf.co/*",
-    "https://*.hf.co/*"
+    "http://localhost:11434/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -41,8 +36,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*"],
-      "js": ["gmail.js"],
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": [
+        "gmail.js"
+      ],
       "run_at": "document_start"
     }
   ],
@@ -78,7 +77,9 @@
         "assets/*",
         "brand/*"
       ],
-      "matches": ["https://mail.google.com/*"]
+      "matches": [
+        "https://mail.google.com/*"
+      ]
     }
   ]
 }

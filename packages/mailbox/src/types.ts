@@ -6,7 +6,7 @@ import type {
   ThreadDataQuality,
   ThreadDataSource,
   ThreadSummary,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
 
 /**
  * MailboxSource seam — V1 is GmailWebSource.

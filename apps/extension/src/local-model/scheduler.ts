@@ -1,4 +1,4 @@
-import type { PromptPriority } from '@gi/ai';
+import type { PromptPriority } from '@pigeonbox/ai';
 
 /**
  * One local model job at a time, highest priority first. A single GPU or

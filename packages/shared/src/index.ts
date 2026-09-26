@@ -321,7 +321,24 @@ export function getProviderRequiredOrigin(provider: string, endpoint?: string): 
 
 export type AiProcessingMode = 'disabled' | 'remote' | 'local';
 
+/** How PigeonBox runs. Mirrors `PigeonBoxMode` in @pigeonbox/api-contract. */
+export type RunMode = 'local' | 'cloud';
+
+/** Bumped when stored settings need a migration step. */
+export const SETTINGS_VERSION = 2;
+
 export type ExtensionSettings = {
+  settingsVersion: number;
+  /**
+   * `local`: AI runs on this device or with the user's own provider (BYOK/Ollama).
+   * `cloud`: AI runs on PigeonBox Cloud. Chosen explicitly by the user; never
+   * changed automatically, including when Cloud is unavailable.
+   */
+  runMode: RunMode;
+  /** When the user agreed that Cloud mode sends email content to PigeonBox Cloud. */
+  cloudConsentAt: string | null;
+  /** Developer override for the Cloud API URL. Blank uses the URL built into this release. */
+  cloudApiUrl: string;
   trackingEnabled: boolean;
   trackOpens: boolean;
   trackLinks: boolean;
@@ -400,6 +417,10 @@ export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
 };
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
+  settingsVersion: SETTINGS_VERSION,
+  runMode: 'local',
+  cloudConsentAt: null,
+  cloudApiUrl: '',
   trackingEnabled: true,
   trackOpens: true,
   trackLinks: true,
@@ -430,6 +451,49 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   voiceProfile: DEFAULT_VOICE_PROFILE,
   learnFromSent: false,
 };
+
+const AI_PROVIDERS: ReadonlySet<ExtensionSettings['aiProvider']> = new Set([
+  'openai',
+  'anthropic',
+  'gemini',
+  'openai-compatible',
+  'ollama',
+  'chatgpt',
+  'chrome',
+  'local',
+]);
+
+/**
+ * Upgrade settings read from `chrome.storage.local` to the current shape.
+ *
+ * Every field the user saved is kept. Fields added since are filled with
+ * defaults. Settings stored before run modes existed (version 1, no
+ * `settingsVersion`) always become Local, so an update never starts sending
+ * mail to a new destination.
+ */
+export function migrateSettings(saved: unknown): ExtensionSettings {
+  const raw = (saved && typeof saved === 'object' ? saved : {}) as Partial<ExtensionSettings> & Record<string, unknown>;
+  const merged: ExtensionSettings = {
+    ...DEFAULT_SETTINGS,
+    ...raw,
+    // Profiles saved before a field existed still get its default.
+    voiceProfile: { ...DEFAULT_VOICE_PROFILE, ...(raw.voiceProfile && typeof raw.voiceProfile === 'object' ? raw.voiceProfile : {}) },
+  };
+  const version = typeof raw.settingsVersion === 'number' ? raw.settingsVersion : 1;
+  if (version < 2) {
+    merged.runMode = 'local';
+    merged.cloudConsentAt = null;
+    merged.cloudApiUrl = '';
+  }
+  if (merged.runMode !== 'local' && merged.runMode !== 'cloud') merged.runMode = 'local';
+  // Cloud mode without recorded consent is not a valid state.
+  if (merged.runMode === 'cloud' && !merged.cloudConsentAt) merged.runMode = 'local';
+  if (typeof merged.cloudApiUrl !== 'string') merged.cloudApiUrl = '';
+  if (!['disabled', 'remote', 'local'].includes(merged.aiMode)) merged.aiMode = 'disabled';
+  if (!AI_PROVIDERS.has(merged.aiProvider)) merged.aiProvider = DEFAULT_SETTINGS.aiProvider;
+  merged.settingsVersion = SETTINGS_VERSION;
+  return merged;
+}
 
 export { datesIn, isPastedSummary, localThreadSummary, sanitizeDates, splitSuperseded, tightenSummary } from './local-summary.js';
 export type { LocalThreadSummary } from './local-summary.js';

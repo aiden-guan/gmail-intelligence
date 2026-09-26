@@ -2,8 +2,8 @@ import {
   extractTrackingIdFromMessageBody,
   normalizeGmailId,
   type TrackedEmailSummary,
-} from '@gi/tracking';
-import { resolveMessageId, resolveThreadId, type MessageIdView, type ThreadIdView } from '@gi/gmail';
+} from '@pigeonbox/tracking';
+import { resolveMessageId, resolveThreadId, type MessageIdView, type ThreadIdView } from '@pigeonbox/gmail';
 
 const THREAD_RECOVERY_WINDOW_MS = 48 * 60 * 60 * 1000;
 

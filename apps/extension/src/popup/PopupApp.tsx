@@ -2,6 +2,7 @@ import { Brand, Pigeon } from '../ui/Pigeon';
 import { useEffect, useState } from 'react';
 import { requestExtensionReload } from '../reload-extension';
 import { Orb } from '../ui/Orb';
+import { useProductState } from '../ui/product-state';
 
 type Diagnostics = {
   gmailTab?: string;
@@ -12,6 +13,9 @@ type Diagnostics = {
 export function PopupApp() {
   const [diag, setDiag] = useState<Diagnostics | null>(null);
   const [reloading, setReloading] = useState(false);
+  const product = useProductState();
+  const cloudMode = product.state.runMode === 'cloud';
+  const cloudReady = product.state.cloud.status === 'ready';
 
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
@@ -22,7 +26,9 @@ export function PopupApp() {
 
   const aiReady = diag?.ai?.status === 'ready';
   const aiOff = diag?.ai?.status === 'disabled';
-  const ai = aiReady ? 'AI ready' : aiOff ? 'AI off' : 'AI needs setup';
+  const ai = cloudMode
+    ? cloudReady ? 'PigeonBox Cloud connected' : 'PigeonBox Cloud not connected'
+    : aiReady ? 'AI on this computer ready' : aiOff ? 'AI off' : 'AI needs setup';
   const trackingReady = diag?.tracking === 'healthy';
   const tracking =
     trackingReady ? 'Tracker connected' : diag?.tracking === 'not_configured' ? 'Tracking not set up' : 'Tracker unavailable';
@@ -39,10 +45,18 @@ export function PopupApp() {
           <div className="gi-section-label">Connections</div>
           <ul className="gi-connections">
             <Status on={diag?.gmailTab === 'connected'} label={diag?.gmailTab === 'connected' ? 'Gmail connected' : 'Gmail not connected'} />
-            <Status on={aiReady || aiOff} label={ai} />
+            <Status on={cloudMode ? cloudReady : aiReady || aiOff} label={ai} />
             <Status on={trackingReady} label={tracking} />
           </ul>
+          {cloudMode && !cloudReady ? (
+            <p className="gi-hint">Nothing is sent to another provider while Cloud is unavailable.</p>
+          ) : null}
           <div className="mt-4 grid gap-2">
+            {cloudMode && !cloudReady ? (
+              <button type="button" className="gi-btn gi-btn-block" disabled={product.busy} onClick={() => void product.useLocal()}>
+                Run on this computer instead
+              </button>
+            ) : null}
             <button type="button" className="gi-btn gi-btn-block" onClick={() => chrome.tabs.create({ url: 'https://mail.google.com/' })}>
               Open Gmail
             </button>

@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-release/
+release/
 dist-types/
 *.tsbuildinfo
 build/

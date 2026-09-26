@@ -4,7 +4,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_SETTINGS, getProviderRequiredOrigin } from '@gi/shared';
+import { DEFAULT_SETTINGS, getProviderRequiredOrigin } from '@pigeonbox/shared';
 import { AiConnect } from './AiConnect';
 import { SettingsApp } from '../settings/SettingsApp';
 

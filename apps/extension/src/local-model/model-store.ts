@@ -1,4 +1,4 @@
-import { localModelCacheName } from '@gi/ai';
+import { localModelCacheName } from '@pigeonbox/ai';
 
 /**
  * Model files live in the origin private file system. The Cache API that

@@ -1,0 +1,28 @@
+{
+  "name": "@pigeonbox/core",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Product-level PigeonBox concepts: run mode and capabilities.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pigeonbox/api-contract": "*",
+    "@pigeonbox/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}

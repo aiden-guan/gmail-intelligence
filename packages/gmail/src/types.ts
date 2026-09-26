@@ -1,4 +1,4 @@
-import type { Contact, GmailActionResult, GmailCapabilities } from '@gi/shared';
+import type { Contact, GmailActionResult, GmailCapabilities } from '@pigeonbox/shared';
 
 export type ThreadRoute =
   | 'inbox'

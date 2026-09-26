@@ -1,8 +1,8 @@
 {
-  "name": "gmail-intelligence",
-  "version": "0.1.0",
+  "name": "pigeonbox",
+  "version": "0.2.0",
   "private": true,
-  "description": "Personal Gmail intelligence Chrome extension — local AI inbox + email open tracking. No Gmail API.",
+  "description": "PigeonBox: AI-powered Gmail intelligence that can run on your machine. Chrome extension, local AI, BYOK, Ollama, open tracking. No Gmail API.",
   "license": "MIT",
   "workspaces": [
     "apps/*",
@@ -11,16 +11,23 @@
   ],
   "scripts": {
     "setup": "node scripts/setup.mjs",
-    "verify:tracking": "node scripts/verify-tracking.mjs",
-    "open": "node scripts/open.mjs",
-    "build": "npm run build -w @gi/shared && npm run build -w @gi/gmail && npm run build -w @gi/mailbox && npm run build -w @gi/ai && npm run build -w @gi/search && npm run build -w @gi/agent && npm run build -w @gi/tracking && npm run build -w @gi/extension && npm run build -w @gi/tracker",
-    "dev": "npm run dev -w @gi/extension",
-    "tracker": "npm run dev -w @gi/tracker",
+    "dev": "npm run dev -w @pigeonbox/extension",
+    "build": "npm run build -w @pigeonbox/shared && npm run build -w @pigeonbox/api-contract && npm run build -w @pigeonbox/gmail && npm run build -w @pigeonbox/mailbox && npm run build -w @pigeonbox/ai && npm run build -w @pigeonbox/cloud-client && npm run build -w @pigeonbox/core && npm run build -w @pigeonbox/search && npm run build -w @pigeonbox/agent && npm run build -w @pigeonbox/tracking && npm run build -w @pigeonbox/extension && npm run build -w @pigeonbox/tracker",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false && tsc --noEmit -p convex/tsconfig.json",
-    "lint": "eslint \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\" \"workers/**/*.{ts,tsx}\" --max-warnings 50",
-    "clean": "rimraf packages/*/dist apps/*/dist workers/*/dist coverage .tsbuildinfo"
+    "lint": "eslint \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\" \"workers/**/*.{ts,tsx}\" --max-warnings 0",
+    "verify": "node scripts/verify.mjs",
+    "package": "node scripts/package-extension.mjs",
+    "check:repo": "node scripts/check-repo.mjs",
+    "check:versions": "node scripts/check-versions.mjs",
+    "version:set": "node scripts/check-versions.mjs --set",
+    "open": "node scripts/open.mjs",
+    "tracker": "npm run dev -w @pigeonbox/tracker",
+    "verify:tracking": "node scripts/verify-tracking.mjs",
+    "convex:dev": "convex dev",
+    "convex:deploy": "convex deploy",
+    "clean": "rimraf packages/*/dist apps/*/dist apps/extension/dist-release workers/*/dist release coverage .tsbuildinfo"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
@@ -40,5 +47,9 @@
   "packageManager": "npm@10.9.2",
   "dependencies": {
     "convex": "^1.46.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aiden-guan/pigeonbox.git"
   }
 }

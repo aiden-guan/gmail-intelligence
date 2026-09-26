@@ -6,7 +6,7 @@ import {
   hashBody,
   stripHtml,
   sanitizeEmailHtml,
-} from '@gi/shared';
+} from '@pigeonbox/shared';
 import {
   applyRules,
   archiveDecision,
@@ -14,7 +14,7 @@ import {
   detectNeedsReply,
   parseNaturalLanguageRule,
   computePriority,
-} from '@gi/agent';
+} from '@pigeonbox/agent';
 
 describe('classification schema', () => {
   it('accepts valid structured output', () => {

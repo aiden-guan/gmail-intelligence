@@ -1,7 +1,7 @@
 import { Brand, Pigeon } from '../ui/Pigeon';
 import { useCallback, useEffect, useState } from 'react';
-import type { ExtensionSettings } from '@gi/shared';
-import { DEFAULT_SETTINGS } from '@gi/shared';
+import type { ExtensionSettings } from '@pigeonbox/shared';
+import { DEFAULT_SETTINGS } from '@pigeonbox/shared';
 import { Orb } from '../ui/Orb';
 
 type SplitCategory =

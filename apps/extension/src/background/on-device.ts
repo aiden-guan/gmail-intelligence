@@ -1,4 +1,4 @@
-import type { PromptOptions } from '@gi/ai';
+import type { PromptOptions } from '@pigeonbox/ai';
 
 const OFFSCREEN_URL = 'offscreen.html';
 

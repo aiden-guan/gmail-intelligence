@@ -743,6 +743,7 @@ export type TrackerHealthStatus =
   | 'unauthorized'
   | 'unreachable'
   | 'outdated'
+  | 'no_permission'
   | 'healthy';
 
 export type TrackerProbe = {
@@ -766,6 +767,8 @@ export function trackerHealthLabel(status: TrackerHealthStatus): string {
       return 'Tracker unreachable';
     case 'outdated':
       return 'Tracker deployment is outdated. Redeploy tracker to enable sender self-open suppression.';
+    case 'no_permission':
+      return 'Chrome has not allowed PigeonBox to reach this tracker. Click Save to allow it.';
     case 'healthy':
       return 'Tracker healthy';
   }

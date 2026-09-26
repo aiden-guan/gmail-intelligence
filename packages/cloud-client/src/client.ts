@@ -1,0 +1,227 @@
+import {
+  AUTHORIZE_PATH,
+  CLIENT_HEADER,
+  ErrorBodySchema,
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
+  REQUEST_ID_HEADER,
+  ROUTES,
+  isKnownErrorCode,
+  type CloudErrorCode,
+  type RouteName,
+  type RouteRequest,
+  type RouteResponse,
+} from '@pigeonbox/api-contract';
+
+/**
+ * A Cloud failure. `code` is one of the contract's error codes, or a client-side
+ * code: `network` (unreachable), `timeout`, `invalid_response`, `not_configured`
+ * (no API URL in this build), `signed_out`.
+ */
+export class CloudApiError extends Error {
+  readonly code: CloudErrorCode | 'network' | 'timeout' | 'invalid_response' | 'signed_out';
+  readonly status: number;
+  readonly retryable: boolean;
+  readonly requestId?: string;
+  readonly retryAfter?: number;
+
+  constructor(opts: {
+    code: CloudApiError['code'];
+    message: string;
+    status?: number;
+    retryable?: boolean;
+    requestId?: string;
+    retryAfter?: number;
+  }) {
+    super(opts.message);
+    this.name = 'CloudApiError';
+    this.code = opts.code;
+    this.status = opts.status ?? 0;
+    this.retryable = opts.retryable ?? false;
+    this.requestId = opts.requestId;
+    this.retryAfter = opts.retryAfter;
+  }
+}
+
+export type AccessTokenProvider = {
+  /** Current access token, or null when signed out. May refresh proactively. */
+  get(): Promise<string | null>;
+  /** Called once after a 401 to force a refresh. Returns the new token or null. */
+  refresh(): Promise<string | null>;
+};
+
+export type CloudClientOptions = {
+  baseUrl: string;
+  tokens?: AccessTokenProvider;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+  /** e.g. `extension/0.2.0`. */
+  clientName?: string;
+};
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export function normalizeBaseUrl(value: string): string | null {
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
+    // Plain HTTP is only acceptable for a Cloud server on this machine (development).
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    return `${url.origin}${url.pathname === '/' ? '' : url.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+export class PigeonBoxCloudClient {
+  readonly baseUrl: string;
+  private readonly tokens?: AccessTokenProvider;
+  private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly clientName: string;
+
+  constructor(options: CloudClientOptions) {
+    const base = normalizeBaseUrl(options.baseUrl);
+    if (!base) {
+      throw new CloudApiError({ code: 'not_configured', message: 'PigeonBox Cloud is not configured in this build.' });
+    }
+    this.baseUrl = base;
+    this.tokens = options.tokens;
+    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.clientName = options.clientName ?? 'unknown';
+  }
+
+  /** URL to open in a browser auth window. Not fetched by the client. */
+  authorizeUrl(params: { redirectUri: string; codeChallenge: string; state: string }): string {
+    const url = new URL(`${this.baseUrl}${AUTHORIZE_PATH}`);
+    url.searchParams.set('redirect_uri', params.redirectUri);
+    url.searchParams.set('code_challenge', params.codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+    url.searchParams.set('state', params.state);
+    return url.toString();
+  }
+
+  health() {
+    return this.call('health');
+  }
+  version() {
+    return this.call('version');
+  }
+  exchangeCode(body: RouteRequest<'authToken'>) {
+    return this.call('authToken', body);
+  }
+  refreshSession(body: RouteRequest<'authRefresh'>) {
+    return this.call('authRefresh', body);
+  }
+  signOut(body: RouteRequest<'authSignOut'>) {
+    return this.call('authSignOut', body);
+  }
+  me() {
+    return this.call('me');
+  }
+  capabilities() {
+    return this.call('capabilities');
+  }
+  entitlements() {
+    return this.call('entitlements');
+  }
+  billingCheckout() {
+    return this.call('billingCheckout', {});
+  }
+  billingPortal() {
+    return this.call('billingPortal', {});
+  }
+
+  /** Typed call for any contract route. Request and response are validated. */
+  async call<N extends RouteName>(name: N, body?: RouteRequest<N>): Promise<RouteResponse<N>> {
+    const route = ROUTES[name];
+    let payload: unknown;
+    if ('request' in route) {
+      const parsed = route.request.safeParse(body ?? {});
+      if (!parsed.success) {
+        throw new CloudApiError({ code: 'invalid_request', status: 400, message: 'The request did not match the PigeonBox Cloud contract.' });
+      }
+      payload = parsed.data;
+    }
+
+    let token: string | null = null;
+    if (route.auth === 'user') {
+      token = (await this.tokens?.get()) ?? null;
+      if (!token) throw new CloudApiError({ code: 'signed_out', status: 401, message: 'Sign in to PigeonBox Cloud first.' });
+    }
+
+    let response = await this.send(route.method, route.path, payload, token);
+    if (response.status === 401 && route.auth === 'user' && this.tokens) {
+      const refreshed = await this.tokens.refresh();
+      if (!refreshed) throw new CloudApiError({ code: 'signed_out', status: 401, message: 'Your PigeonBox Cloud session ended. Sign in again.' });
+      response = await this.send(route.method, route.path, payload, refreshed);
+    }
+    return this.readResponse(response, route.response) as Promise<RouteResponse<N>>;
+  }
+
+  private async send(method: string, path: string, payload: unknown, token: string | null): Promise<Response> {
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      [PROTOCOL_HEADER]: String(PROTOCOL_VERSION),
+      [CLIENT_HEADER]: this.clientName,
+    };
+    if (payload !== undefined) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      return await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        body: payload === undefined ? undefined : JSON.stringify(payload),
+        signal: AbortSignal.timeout(this.timeoutMs),
+        credentials: 'omit',
+        redirect: 'error',
+      });
+    } catch (error) {
+      const name = (error as { name?: string })?.name;
+      if (name === 'TimeoutError' || name === 'AbortError') {
+        throw new CloudApiError({ code: 'timeout', retryable: true, message: 'PigeonBox Cloud did not respond in time.' });
+      }
+      throw new CloudApiError({ code: 'network', retryable: true, message: 'Could not reach PigeonBox Cloud.' });
+    }
+  }
+
+  private async readResponse(response: Response, schema: (typeof ROUTES)[RouteName]['response']): Promise<unknown> {
+    const requestId = response.headers.get(REQUEST_ID_HEADER) ?? undefined;
+    let json: unknown;
+    try {
+      json = await response.json();
+    } catch {
+      json = null;
+    }
+    if (!response.ok) {
+      const parsed = ErrorBodySchema.safeParse(json);
+      if (parsed.success) {
+        const { code, message, retryable, retryAfter } = parsed.data.error;
+        throw new CloudApiError({
+          code: isKnownErrorCode(code) ? code : 'internal',
+          status: response.status,
+          message,
+          retryable,
+          requestId: parsed.data.error.requestId ?? requestId,
+          retryAfter,
+        });
+      }
+      throw new CloudApiError({
+        code: response.status >= 500 ? 'internal' : 'invalid_response',
+        status: response.status,
+        retryable: response.status >= 500,
+        requestId,
+        message: `PigeonBox Cloud returned HTTP ${response.status}.`,
+      });
+    }
+    const parsed = schema.safeParse(json);
+    if (!parsed.success) {
+      throw new CloudApiError({ code: 'invalid_response', status: response.status, requestId, message: 'PigeonBox Cloud sent a response this version of PigeonBox does not understand.' });
+    }
+    return parsed.data;
+  }
+}

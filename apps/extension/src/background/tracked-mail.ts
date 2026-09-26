@@ -1,4 +1,5 @@
-import type { TrackedEmailSummary } from '@gi/tracking';
+import type { TrackedEmailSummary } from '@pigeonbox/tracking';
+import { broadcastToGmailTabs } from './messaging';
 
 const KEY = 'trackedEmails';
 const MAX_TRACKED = 400;
@@ -30,6 +31,8 @@ export async function writeTrackedEmails(emails: TrackedEmailSummary[]): Promise
     if (isEvictionError(error)) return;
     throw error;
   }
+  // Content scripts cannot read chrome.storage.local (trusted contexts only), so push the list.
+  await broadcastToGmailTabs({ type: 'TRACKED_EMAILS_CHANGED', emails: capped });
 }
 
 export async function upsertTrackedEmail(email: TrackedEmailSummary): Promise<TrackedEmailSummary[]> {

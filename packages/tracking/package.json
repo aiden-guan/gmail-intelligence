@@ -1,6 +1,6 @@
 {
-  "name": "@gi/tracking",
-  "version": "0.1.0",
+  "name": "@pigeonbox/tracking",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@gi/shared": "*",
+    "@pigeonbox/shared": "*",
     "zod": "^3.24.2"
   },
   "devDependencies": {
