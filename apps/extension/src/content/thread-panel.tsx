@@ -1,4 +1,5 @@
 import { Pigeon, type PigeonState } from '../ui/Pigeon';
+import { Orb } from '../ui/Orb';
 import { useState, type MouseEvent } from 'react';
 import { categoryLabel } from './chips';
 
@@ -130,7 +131,7 @@ export function ThreadIntelCard(props: {
           ) : null}
         </div>
         <div className="gi-section-heading">Summary</div>
-        <p className={waiting ? 'gi-sum is-wait' : 'gi-sum'}>{line}</p>
+        <p className={waiting ? 'gi-sum is-wait' : 'gi-sum'}>{waiting && !modelFailed ? <span className="gi-orb-line"><Orb size={14} tone="bare" />{line}</span> : line}</p>
         {modelFailed && props.onRetrySummary ? (
           <div className="gi-retry-row">
             <button
@@ -179,7 +180,7 @@ export function ThreadIntelCard(props: {
               disabled={props.drafting}
               onClick={props.onDraft}
             >
-              {props.drafting ? 'Drafting…' : 'Draft reply'}
+              {props.drafting ? <span className="gi-orb-line"><Orb size={13} tone={needsReply ? 'on-accent' : 'bare'} />Drafting…</span> : 'Draft reply'}
             </button>
           ) : null}
           <button

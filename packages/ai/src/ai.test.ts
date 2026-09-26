@@ -138,6 +138,14 @@ describe('draft suggestion coercion', () => {
 });
 
 describe('compact on-device drafting', () => {
+  it('tells the model who the user is when the email greets them by name', async () => {
+    const { compactDraftPrompt } = await import('./draft-prompt.js');
+    const prompt = (body: string) =>
+      compactDraftPrompt({ subject: 'PR', messages: [{ sender: 'Priya <p@x.io>', bodyText: body, timestamp: '' }], voice: undefined as never }, 'reply').user;
+    expect(prompt('Hi Alex,\n\nCan you review the PR?')).toMatch(/Write my reply to Priya\. I am Alex, so do not address me\.$/);
+    expect(prompt('Hello everyone,\n\nSections resume.')).toMatch(/Write my reply to Priya\.$/);
+  });
+
   const email = {
     subject: 'Lab access',
     messages: [{
@@ -160,7 +168,7 @@ describe('compact on-device drafting', () => {
     expect(result.result.body).toBe('Hi Priya,\n\nYes, I still need lab access next week. Thanks for checking.');
     expect(calls).toHaveLength(1);
     expect(calls[0]!.system).not.toMatch(/JSON/);
-    expect(calls[0]!.user).toMatch(/^From: Priya Shah\nSubject: Lab access/);
+    expect(calls[0]!.user).toMatch(/^From: Priya Shah <priya@example\.com>\nTo: me\nSubject: Lab access/);
     expect(calls[0]!.user.trim().endsWith('Write my reply to Priya Shah.')).toBe(true);
     expect(calls[0]!.options?.examples?.length).toBe(2);
   });
@@ -181,6 +189,79 @@ describe('compact on-device drafting', () => {
       text: 'Priya is informing the recipient that the sender needs to submit the list by Thursday.',
     }), { summaryStyle: 'compact' });
     await expect(stubborn.draftReply({ ...email, voice: undefined as never, kind: 'reply' })).rejects.toThrow(/summarized/);
+  });
+
+  const owner = { email: 'aiden@gmail.com', name: 'Aiden Guan' };
+
+  it('names the mailbox owner and answers the newest message someone else wrote', async () => {
+    const { compactDraftPrompt, formatDraftContext } = await import('./draft-prompt.js');
+    const input = {
+      subject: 'Review sessions',
+      owner,
+      voice: undefined as never,
+      kind: 'reply' as const,
+      messages: [
+        { sender: 'Priya Shah <priya@example.com>', bodyText: 'Can you run the Tuesday review?', timestamp: '1' },
+        { sender: 'Aiden <AIDEN@gmail.com>', bodyText: 'Let me check my calendar.', timestamp: '2' },
+      ],
+    };
+    const user = compactDraftPrompt(input, 'reply').user;
+    expect(user).toMatch(/^From: Priya Shah <priya@example\.com>\nTo: me \(Aiden Guan\)\n/);
+    expect(user).toContain('Can you run the Tuesday review?');
+    expect(user).not.toContain('Let me check my calendar.');
+    expect(user).toMatch(/I am Aiden Guan, so do not address me\.$/);
+
+    const full = formatDraftContext(input, 'reply', 'full', 24_000);
+    expect(full).toMatch(/Newest message to answer from Priya Shah <priya@example\.com> at 1/);
+    expect(full).toMatch(/Later message 1 from Aiden <AIDEN@gmail\.com> \(me\)/);
+  });
+
+  it('keeps automated senders brief', async () => {
+    const { compactDraftPrompt } = await import('./draft-prompt.js');
+    const user = compactDraftPrompt({
+      subject: 'Your response',
+      owner,
+      voice: undefined as never,
+      kind: 'reply',
+      messages: [{ sender: 'Forms Response Receipts <forms-receipts-noreply@google.com>', bodyText: 'Thanks for filling out the form.', timestamp: '' }],
+    }, 'reply').user;
+    expect(user).toMatch(/automated message, so one short sentence is enough\.$/);
+  });
+
+  it('readdresses a draft that greets the owner instead of the sender', async () => {
+    const { fixOwnerGreeting, draftQualityIssue } = await import('./draft-prompt.js');
+    const input = { ...email, owner, voice: undefined as never, kind: 'reply' as const };
+    expect(fixOwnerGreeting('Hi Aiden, thanks for the note. I still need access.', input)).toBe('Hi Priya,\n\nThanks for the note. I still need access.');
+    const receipt = { ...input, messages: [{ sender: 'forms-receipts-noreply@google.com', bodyText: 'Your response was recorded.', timestamp: '' }] };
+    expect(fixOwnerGreeting('Hi Aiden, thank you for sharing the details.', receipt)).toBe('Thank you for sharing the details.');
+    expect(fixOwnerGreeting('Hi Priya, sounds good.', input)).toBe('Hi Priya, sounds good.');
+    expect(draftQualityIssue(email.messages, 'Hi Aiden, thank you for sharing this with me today.', owner)).toMatch(/addressed the reply to you/);
+  });
+
+  it('replaces the model sign-off with the saved one and never a stranger name', async () => {
+    const { finishDraft, draftNeedsRefresh } = await import('./draft-prompt.js');
+    const voice = { name: 'Aiden', about: '', greeting: 'Hi', signoff: 'Best', concision: 'medium', capitalization: 'normal', formality: 'neutral', emoji: false, schedulingPreference: '', personalInstructions: '' } as const;
+    const input = { ...email, owner, voice, kind: 'reply' as const };
+    expect(finishDraft('Hi Priya, I would love to attend. Looking forward to it! Best regards, Alex Kim University of California Berkeley', input))
+      .toBe('Hi Priya, I would love to attend. Looking forward to it!\n\nBest,\nAiden');
+    expect(finishDraft('Hi Priya,\n\nYes, I still need access.\n\nThanks,\nDana', input)).toBe('Hi Priya,\n\nYes, I still need access.\n\nBest,\nAiden');
+    // A closing sentence is content, not a sign-off.
+    expect(finishDraft('Sounds good. Thanks for organizing', input)).toBe('Sounds good. Thanks for organizing\n\nBest,\nAiden');
+    expect(finishDraft('Yes, I still need access. Thanks!', input)).toBe('Yes, I still need access.\n\nBest,\nAiden');
+    const finished = finishDraft('Yes, I still need access.', input);
+    expect(finishDraft(finished, input)).toBe(finished);
+    expect(draftNeedsRefresh(finished, input)).toBe(false);
+    expect(draftNeedsRefresh('Yes. Best regards, Alex Kim', input)).toBe(true);
+  });
+
+  it('writes as the saved profile in the compact prompt and its examples', async () => {
+    const { compactDraftPrompt } = await import('./draft-prompt.js');
+    const voice = { name: 'Aiden', about: 'CS student at UC Berkeley', greeting: 'Hi', signoff: 'Best', concision: 'medium', capitalization: 'normal', formality: 'neutral', emoji: false, schedulingPreference: '', personalInstructions: '' } as const;
+    const prompt = compactDraftPrompt({ ...email, voice, kind: 'reply' }, 'reply');
+    expect(prompt.system).toContain('About the user: CS student at UC Berkeley');
+    expect(prompt.system).toMatch(/Do not write a sign-off/);
+    expect(prompt.user).toMatch(/To: me \(Aiden\)/);
+    expect(JSON.stringify(prompt.examples)).not.toMatch(/Alex/);
   });
 
   it('flags third-person narration but accepts ordinary replies', async () => {

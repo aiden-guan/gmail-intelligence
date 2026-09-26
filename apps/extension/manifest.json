@@ -11,7 +11,8 @@
     "sidePanel",
     "tabs",
     "activeTab",
-    "offscreen"
+    "offscreen",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://mail.google.com/*",

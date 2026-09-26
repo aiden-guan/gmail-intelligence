@@ -67,7 +67,7 @@ import {
   setChatGptSignedInHandler,
   startChatGptLogin,
 } from './chatgpt-login';
-import { completeOnDevice, downloadOnDevice } from './on-device';
+import { completeOnDevice, downloadOnDevice, warmOnDevice } from './on-device';
 
 const db = getMailboxDb();
 const queue = new AIJobQueue();
@@ -87,7 +87,13 @@ const workerTabs = new WorkerTabController({
 
 async function loadSettings(): Promise<ExtensionSettings> {
   const stored = await chrome.storage.local.get('settings');
-  settings = { ...DEFAULT_SETTINGS, ...(stored.settings as Partial<ExtensionSettings> | undefined) };
+  const saved = stored.settings as Partial<ExtensionSettings> | undefined;
+  settings = {
+    ...DEFAULT_SETTINGS,
+    ...saved,
+    // Profiles saved before a field existed still get its default.
+    voiceProfile: { ...DEFAULT_SETTINGS.voiceProfile, ...saved?.voiceProfile },
+  };
   await applyBundledTracker();
   await chrome.storage.local.set({ publicSettings: toPublicSettings(settings) });
   return settings;
@@ -134,7 +140,7 @@ function getAI() {
     return createPromptBackedProvider(
       'local',
       (system, user, options) => completeOnDevice(settings.aiModel, system, user, options),
-      { maxUserChars: 4_000, summaryStyle: 'compact', repairInvalidJson: false },
+      { maxUserChars: 4_000, summaryStyle: 'compact', repairInvalidJson: false, classifyWithModel: false },
     );
   }
   if (settings.aiProvider === 'chrome') {
@@ -786,6 +792,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     message?.type === 'LOCAL_MODEL_RELEASE' ||
     message?.type === 'ON_DEVICE_PING' ||
     message?.type === 'ON_DEVICE_PROMPT' ||
+    message?.type === 'ON_DEVICE_WARM' ||
     message?.type === 'ON_DEVICE_DOWNLOAD'
   ) return false;
   void (async () => {
@@ -885,6 +892,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const thread = threadId ? await db.threads.get(threadId) : null;
         const stored = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
         const pageMessages = pageMessagesFrom(message.messages);
+        const senderNames = senderNamesFrom(message.messages, stored);
         const storedMessages: RawSnapshotMessage[] = stored.map((row) => ({
           messageId: row.messageId,
           sender: row.sender.email,
@@ -908,10 +916,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           fingerprint: snapshot.fingerprint || thread?.contentFingerprint || `page:${threadId}`,
           subject: snapshot.subject,
           messages: snapshot.messages.map((m) => ({
-            sender: m.sender,
+            sender: message.type === 'REQUEST_DRAFT' ? withSenderName(m.sender, senderNames) : m.sender,
             bodyText: m.bodyText,
             timestamp: m.timestamp,
           })),
+          owner: mailboxOwnerFrom(message.owner),
           force: Boolean(message.force),
         };
         const result = message.type === 'REQUEST_SUMMARY'
@@ -946,6 +955,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const thread = threadId ? await db.threads.get(threadId) : null;
         const stored = threadId ? await db.messages.where('threadId').equals(threadId).toArray() : [];
         const pageMessages = pageMessagesFrom(message.messages);
+        const senderNames = senderNamesFrom(message.messages, stored);
         const storedMessages: RawSnapshotMessage[] = stored.map((row) => ({
           messageId: row.messageId,
           sender: row.sender.email,
@@ -969,10 +979,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           fingerprint: snapshot.fingerprint || thread?.contentFingerprint || `page:${threadId}`,
           subject: snapshot.subject,
           messages: snapshot.messages.map((m) => ({
-            sender: m.sender,
+            sender: message.type === 'DRAFT_REPLY' ? withSenderName(m.sender, senderNames) : m.sender,
             bodyText: m.bodyText,
             timestamp: m.timestamp,
           })),
+          owner: mailboxOwnerFrom(message.owner),
           force: Boolean(message.force),
         };
         const result = message.type === 'SUMMARIZE_THREAD' ? await agent.requestSummary(input) : await agent.requestDraft(input);
@@ -1259,6 +1270,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       case 'GET_PUBLIC_SETTINGS':
         sendResponse({ settings: toPublicSettings(settings) });
+        // A Gmail tab just opened: load the local model now rather than on the first summary.
+        if (sender.tab?.url?.startsWith('https://mail.google.com/') && settings.aiMode !== 'disabled' && settings.aiProvider === 'local') {
+          void warmOnDevice(settings.aiModel).catch(() => undefined);
+        }
         break;
       case 'GET_SETTINGS':
         if (sender.tab) {
@@ -1545,6 +1560,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
   return true;
 });
+
+const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+
+/** The Gmail account the content script read from the page, if any. */
+function mailboxOwnerFrom(value: unknown): { email: string; name?: string } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { email, name } = value as { email?: unknown; name?: unknown };
+  if (typeof email !== 'string' || !EMAIL_PATTERN.test(email)) return undefined;
+  const cleanName = typeof name === 'string' ? name.trim().slice(0, 80) : '';
+  return { email: email.trim().toLowerCase(), name: cleanName || undefined };
+}
+
+/** Display names by lowercased address, from the page first and then stored rows. */
+function senderNamesFrom(pageValue: unknown, stored: Array<{ sender: { email: string; name?: string } }>): Map<string, string> {
+  const names = new Map<string, string>();
+  const add = (email: unknown, name: unknown) => {
+    if (typeof email !== 'string' || typeof name !== 'string') return;
+    const key = email.trim().toLowerCase();
+    const value = name.trim().slice(0, 80);
+    if (key && value && !value.includes('@') && !names.has(key)) names.set(key, value);
+  };
+  if (Array.isArray(pageValue)) {
+    for (const item of pageValue.slice(0, 50)) {
+      if (item && typeof item === 'object') add((item as { sender?: unknown }).sender, (item as { senderName?: unknown }).senderName);
+    }
+  }
+  for (const row of stored) add(row.sender?.email, row.sender?.name);
+  return names;
+}
+
+function withSenderName(sender: string, names: Map<string, string>): string {
+  const name = names.get(sender.trim().toLowerCase());
+  return name ? `${name} <${sender}>` : sender;
+}
 
 function pageMessagesFrom(value: unknown): RawSnapshotMessage[] {
   if (!Array.isArray(value)) return [];

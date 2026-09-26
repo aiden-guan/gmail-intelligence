@@ -43,7 +43,7 @@ import {
 import { installSentStatus, type SentStatusController } from './sent-status';
 import { SURFACE_CSS, ensureSurface, floatPanelRightPx, shadowMount } from './surface';
 import { ThreadIntelCard, type IslandMode, type ThreadIntelData } from './thread-panel';
-import { showToast } from './toasts';
+import { showBusyToast, showToast } from './toasts';
 import { SelfViewDeduplicator } from './self-view-dedupe';
 
 export const adapter = new CompositeGmailAdapter();
@@ -533,7 +533,7 @@ async function refreshPanel(el: HTMLElement, threadId: string): Promise<void> {
       onDraft: () => void draftReply(threadId),
       onRemind: () => void remind(threadId),
       onRetrySummary: () => {
-        showToast('Retrying summary…');
+        showBusyToast('Retrying summary…');
         const opened = currentNormalizedThread?.threadId === threadId ? currentNormalizedThread : null;
         if (opened) {
           void summarizeOpenThread(opened, true);
@@ -1087,7 +1087,7 @@ async function runCommand(id: string): Promise<void> {
     return;
   }
   if (command === 'summarize') {
-    showToast('Summarizing…');
+    showBusyToast('Summarizing…');
     const current = await adapter.getCurrentThread();
     if (current.thread) {
       const normalized = normalizeOpenedThread(current.thread, adapter.getActiveIntegration() === 'inboxsdk' ? 'inboxsdk' : 'dom');
@@ -1131,9 +1131,24 @@ async function draftReply(threadId: string): Promise<void> {
   }
 }
 
+const ADDRESS = /[\w.+%-]+@[\w-]+(?:\.[\w-]+)+/;
+
+/**
+ * The signed-in Gmail account, so drafts know who "me" is. The account button's
+ * label holds "Name (address)"; the tab title holds the address in every locale.
+ */
+function mailboxOwner(): { email: string; name?: string } | undefined {
+  const label = document.querySelector('a[href*="accounts.google.com"][aria-label*="@"]')?.getAttribute('aria-label') || '';
+  const email = (label.match(ADDRESS) || document.title.match(ADDRESS))?.[0];
+  if (!email) return undefined;
+  // "Google Account: Aiden Guan\n(aidenguan@gmail.com)"
+  const name = label.split('(')[0]?.replace(/^[^:]*:\s*/, '').trim();
+  return { email: email.toLowerCase(), name: name && !name.includes('@') ? name : undefined };
+}
+
 async function generateDraftReply(threadId: string): Promise<void> {
   const modelName = settings.aiModel;
-  showToast(modelName ? `Drafting reply with ${modelName}…` : 'Drafting reply…');
+  showBusyToast(modelName ? `Drafting reply with ${modelName}…` : 'Drafting reply…');
   const current = await adapter.getCurrentThread();
   let thread = currentNormalizedThread?.threadId === threadId ? currentNormalizedThread : null;
   if (!thread && current.thread?.threadId === threadId) {
@@ -1149,6 +1164,7 @@ async function generateDraftReply(threadId: string): Promise<void> {
   const messages = thread?.messages.map((m) => ({
     messageId: m.messageId,
     sender: m.sender.email,
+    senderName: m.sender.name,
     recipients: m.recipients.map((r) => r.email),
     bodyText: m.bodyText,
     timestamp: m.timestamp || '',
@@ -1167,6 +1183,7 @@ async function generateDraftReply(threadId: string): Promise<void> {
     threadId,
     subject: thread?.subject,
     messages,
+    owner: mailboxOwner(),
   });
 
   let draftBody: string | undefined = res?.body;

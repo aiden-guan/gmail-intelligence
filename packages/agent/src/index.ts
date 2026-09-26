@@ -1,5 +1,5 @@
-import type { AIProvider, AIJobQueue } from '@gi/ai';
-import { draftQualityIssue } from '@gi/ai';
+import type { AIProvider, AIJobQueue, MailboxOwner } from '@gi/ai';
+import { draftNeedsRefresh, draftQualityIssue } from '@gi/ai';
 import type { MailboxDatabase } from '@gi/mailbox';
 import {
   AgentSafetyTier,
@@ -414,6 +414,7 @@ export class AgentLoop {
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
+    owner?: MailboxOwner;
     force?: boolean;
     insertIntoGmail?: boolean;
   }): Promise<{
@@ -433,8 +434,10 @@ export class AgentLoop {
 
     const drafts = await this.deps.db.draft_suggestions.where('threadId').equals(input.threadId).toArray();
     const existing = drafts.find((d) => d.fingerprint === input.fingerprint);
+    const voice = this.deps.settings().voiceProfile;
     const existingQualityIssue = existing?.suggestion?.body
-      ? draftQualityIssue(input.messages, existing.suggestion.body)
+      ? draftQualityIssue(input.messages, existing.suggestion.body, input.owner, voice) ||
+        (draftNeedsRefresh(existing.suggestion.body, { ...input, voice, kind: 'reply' }) ? 'Saved draft predates the current sign-off.' : null)
       : null;
     if (!input.force && existing?.suggestion?.body && !existingQualityIssue) {
       return { ok: true, jobId: 'completed', status: 'succeeded', body: existing.suggestion.body };
@@ -472,13 +475,14 @@ export class AgentLoop {
             this.deps.ai!.draftReply({
               subject: input.subject,
               messages: input.messages,
+              owner: input.owner,
               voice: this.deps.settings().voiceProfile,
               mode: 'direct',
               kind: 'reply',
             }),
           { bypassCache: Boolean(input.force || existingQualityIssue), timeoutMs: this.deps.settings().aiProvider === 'local' ? 300_000 : 25_000 },
         );
-        const qualityIssue = draftQualityIssue(input.messages, result.body);
+        const qualityIssue = draftQualityIssue(input.messages, result.body, input.owner, voice);
         if (qualityIssue) throw new Error(qualityIssue);
         const placeholders = detectPlaceholders(result.body);
         const suggestion = { ...result, placeholders };
@@ -587,6 +591,7 @@ export class AgentLoop {
     fingerprint: string;
     subject: string;
     messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
+    owner?: MailboxOwner;
     force?: boolean;
   }): Promise<{ ok: boolean; body?: string; reason?: string; error?: string }> {
     const launched = await this.startDraftJob(input);

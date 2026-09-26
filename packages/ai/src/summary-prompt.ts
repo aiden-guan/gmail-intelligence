@@ -37,22 +37,6 @@ Example output:
   "actionItems": []
 }`;
 
-/**
- * Short instructions for small on-device models. A long prompt crowds out the email
- * and these models copy the message instead of deciding what is current.
- */
-export const LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT = `You summarize an email for the person reading it. Return a short JSON object. Do not include reasoning or analysis.
-
-Rules:
-- The latest update is the truth. Ignore greetings and sign-offs. Text below a dashed line, "Previous announcement", "Earlier announcement", or a quoted reply is old. Do not summarize the old part as if it is still happening.
-- oneLine: 1 or 2 plain sentences in your own words about the current status. Say what the email means, not the subject again. No copied paragraph.
-- keyPoints: up to 2 extra facts that are still true. [] if oneLine is enough.
-- dates: only a date the reader should put on a calendar. Write "Due Sep 26" or "Week 6 starts Sep 28", never a bare "9/28". [] if the dates are history or already happened.
-- actionItems: up to 2 things the reader should actually do. [] if none.
-- Do not invent dates, requests, or facts.
-
-Return one JSON object with keys oneLine, keyPoints, dates, actionItems. Example: {"oneLine":"The instructor shared an optional quiz to help students check their understanding of the assignment.","keyPoints":["Scores are not recorded."],"dates":[],"actionItems":[]}`;
-
 export function formatThreadForSummary(input: {
   subject: string;
   messages: Array<{ sender: string; bodyText: string; timestamp?: string }>;
@@ -93,9 +77,6 @@ function currentSubject(subject: string, current: string): string {
     .trim();
 }
 
-export function summaryUserContent(formattedThreadOrJson: string, style: 'compact' | 'full' = 'full'): string {
-  if (style === 'compact') {
-    return `Summarize the latest status for the reader as JSON.\n\n${formattedThreadOrJson}`;
-  }
+export function summaryUserContent(formattedThreadOrJson: string): string {
   return `Analyze and synthesize this email thread. Reason first, then provide the brief in JSON.\n\n${formattedThreadOrJson}`;
 }

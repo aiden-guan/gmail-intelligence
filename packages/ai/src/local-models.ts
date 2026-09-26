@@ -3,7 +3,7 @@
  * A model is on disk only after the user downloads it into the browser cache.
  */
 
-export type LocalDtype = 'q4';
+export type LocalDtype = 'q4' | 'q4f16';
 
 export type LocalModelVendor = 'qwen' | 'liquid' | 'google' | 'huggingface';
 
@@ -13,9 +13,15 @@ export type LocalModel = {
   vendor: LocalModelVendor;
   repo: string;
   blurb: string;
+  /** Portable weight build. Runs on any WebGPU adapter. */
   dtype: LocalDtype;
   /** Size of the weight files, the bulk of the download. */
   bytes: number;
+  /**
+   * Smaller, faster q4f16 build for GPUs with shader-f16. Only set where it
+   * was verified to match q4 output: Gemma and LFM2 model cards recommend q4.
+   */
+  f16Bytes?: number;
   /** Weights are split into model_<dtype>.onnx plus a model_<dtype>.onnx_data file. */
   externalData?: boolean;
   /** Short tag shown beside the name. */
@@ -89,6 +95,7 @@ export const LOCAL_MODELS: readonly LocalModel[] = [
     blurb: 'A newer Qwen with a bit more skill, still under 1 GB.',
     dtype: 'q4',
     bytes: 919_096_585,
+    f16Bytes: 569_789_750,
     quality: 3,
     speed: 4,
     languages: 'Multilingual',
@@ -102,6 +109,7 @@ export const LOCAL_MODELS: readonly LocalModel[] = [
     repo: 'onnx-community/Qwen2.5-0.5B-Instruct',
     blurb: 'Lightest Qwen. Fast enough for sorting mail and short drafts.',
     dtype: 'q4',
+    // Its q4f16 build loops and emits nonsense on WebGPU, so it stays on q4.
     bytes: 786_156_820,
     quality: 2.5,
     speed: 4.5,
@@ -117,6 +125,7 @@ export const LOCAL_MODELS: readonly LocalModel[] = [
     blurb: 'Tiny and instant. Best for older laptops or sorting mail only.',
     dtype: 'q4',
     bytes: 387_943_246,
+    f16Bytes: 272_737_275,
     badge: 'Fastest',
     quality: 2,
     speed: 5,
@@ -139,15 +148,32 @@ export function getLocalModel(id: string): LocalModel | null {
   return LOCAL_MODELS.find((model) => model.id === id) ?? null;
 }
 
-export function localModelWeightMarker(model: LocalModel): string {
-  return `${model.repo}/resolve/main/onnx/model_${model.dtype}.onnx`;
+/** Weight builds to use, best first. */
+export function localModelDtypes(model: LocalModel, shaderF16: boolean): LocalDtype[] {
+  return shaderF16 && model.f16Bytes ? ['q4f16', model.dtype] : [model.dtype];
+}
+
+export function localModelBytes(model: LocalModel, dtype: LocalDtype): number {
+  return dtype === 'q4f16' && model.f16Bytes ? model.f16Bytes : model.bytes;
+}
+
+export function localModelWeightMarker(model: LocalModel, dtype: LocalDtype = model.dtype): string {
+  return `${model.repo}/resolve/main/onnx/model_${dtype}.onnx`;
+}
+
+/** The weight build already in the cache, preferring q4f16. */
+export function downloadedLocalDtype(cachedUrls: readonly string[], model: LocalModel): LocalDtype | null {
+  for (const dtype of localModelDtypes(model, true)) {
+    const marker = localModelWeightMarker(model, dtype);
+    const hasFile = (suffix: string) => cachedUrls.some((url) => url.endsWith(`${marker}${suffix}`) || url.includes(`${marker}${suffix}?`));
+    // The small .onnx header is useless without its data file.
+    if (hasFile('') && (!model.externalData || hasFile('_data'))) return dtype;
+  }
+  return null;
 }
 
 export function localModelIsDownloaded(cachedUrls: readonly string[], model: LocalModel): boolean {
-  const marker = localModelWeightMarker(model);
-  const hasFile = (suffix: string) => cachedUrls.some((url) => url.endsWith(`${marker}${suffix}`) || url.includes(`${marker}${suffix}?`));
-  // The small .onnx header is useless without its data file.
-  return hasFile('') && (!model.externalData || hasFile('_data'));
+  return downloadedLocalDtype(cachedUrls, model) !== null;
 }
 
 export function formatDownloadSize(bytes: number): string {

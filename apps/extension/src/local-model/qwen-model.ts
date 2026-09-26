@@ -1,5 +1,15 @@
-import { getLocalModel, type ChatExample, type LocalModel, type PromptOptions } from '@gi/ai';
-import { listDownloadedModelIds } from './cache';
+import {
+  getLocalModel,
+  localModelBytes,
+  localModelDtypes,
+  type ChatExample,
+  type LocalDtype,
+  type LocalModel,
+  type PromptOptions,
+} from '@gi/ai';
+import { cachedModelDtype, deleteCachedModel } from './cache';
+import { modelFileStore } from './model-store';
+import { createScheduler } from './scheduler';
 
 type ProgressInfo = {
   status?: string;
@@ -23,99 +33,155 @@ type Generator = {
   dispose: () => Promise<void>;
 };
 
+type GpuAdapter = { features?: { has(name: string): boolean } };
+
+const DEFAULT_MAX_TOKENS = 256;
+
 let configured = false;
-let promptChain: Promise<void> = Promise.resolve();
+const schedule = createScheduler();
 let activeGenerator: Generator | null = null;
 let activeModelId: string | null = null;
 
 export function downloadQwenModel(modelId: string, onProgress: (fraction: number) => void): Promise<void> {
-  return runExclusive(() => downloadModel(modelId, onProgress));
+  return schedule('system', () => downloadModel(modelId, onProgress));
 }
 
 export function promptWithQwen(modelId: string, system: string, user: string, options?: PromptOptions): Promise<string> {
-  return runExclusive(() => generate(modelId, system, user, options));
+  return schedule(options?.priority ?? 'interactive', () => generate(modelId, system, user, options));
+}
+
+/** Load the model and compile its GPU shaders ahead of the first real prompt. */
+export function warmQwen(modelId: string): Promise<void> {
+  return schedule('background', async () => {
+    const model = requireModel(modelId);
+    if (activeGenerator && activeModelId === model.id) return;
+    const dtype = await cachedModelDtype(model);
+    if (!dtype) return;
+    const generator = await loadedGenerator(model, dtype);
+    await generator(chatMessages(model, 'Answer briefly.', 'Hi'), generationOptions(model, 1));
+  });
 }
 
 export function releaseQwen(): Promise<void> {
-  return runExclusive(async () => {
-    await activeGenerator?.dispose();
-    activeGenerator = null;
-    activeModelId = null;
-  });
+  return schedule('system', releaseActive);
+}
+
+async function releaseActive(): Promise<void> {
+  const generator = activeGenerator;
+  activeGenerator = null;
+  activeModelId = null;
+  await generator?.dispose().catch(() => undefined);
 }
 
 async function downloadModel(modelId: string, onProgress: (fraction: number) => void): Promise<void> {
   const model = requireModel(modelId);
-  // Some models split weights into model_q4.onnx and model_q4.onnx_data; track both against the catalog size.
+  const adapter = await requireAdapter();
+  const cached = await cachedModelDtype(model);
+  // Reuse whatever build is already on disk; otherwise take the faster q4f16 build when the GPU supports it.
+  const candidates = cached ? [cached] : localModelDtypes(model, Boolean(adapter.features?.has('shader-f16')));
+  let lastError: unknown = null;
+  for (const dtype of candidates) {
+    try {
+      await downloadBuild(model, dtype, onProgress);
+      onProgress(1);
+      return;
+    } catch (error) {
+      lastError = error;
+      await releaseActive();
+      // A q4f16 build that cannot run here must not be picked up again on the next load.
+      if (dtype !== model.dtype) await deleteCachedModel(model, dtype).catch(() => undefined);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Could not download the model.');
+}
+
+async function downloadBuild(model: LocalModel, dtype: LocalDtype, onProgress: (fraction: number) => void): Promise<void> {
+  // Some models split weights into model_<dtype>.onnx and model_<dtype>.onnx_data; track both against the catalog size.
   const loadedByFile = new Map<string, number>();
-  const generator = await loadedGenerator(model, (info: ProgressInfo) => {
-      if (!info.file?.includes(`model_${model.dtype}.onnx`)) return;
-      if (info.status === 'progress' && info.total) {
-        loadedByFile.set(info.file, info.loaded ?? 0);
-        const loaded = [...loadedByFile.values()].reduce((sum, value) => sum + value, 0);
-        onProgress(clamp(loaded / model.bytes) * 0.95);
-      }
-    });
+  const total = localModelBytes(model, dtype);
+  const generator = await loadedGenerator(model, dtype, (info: ProgressInfo) => {
+    if (!info.file?.includes(`model_${dtype}.onnx`)) return;
+    if (info.status === 'progress' && info.total) {
+      loadedByFile.set(info.file, info.loaded ?? 0);
+      const loaded = [...loadedByFile.values()].reduce((sum, value) => sum + value, 0);
+      onProgress(clamp(loaded / total) * 0.95);
+    }
+  });
   onProgress(0.95);
   // A cached weight file alone does not establish that ONNX can load and run it.
-  try {
-    const check = await generator(chatMessages(model, 'Answer briefly.', 'Say ready.'), {
-      max_new_tokens: 12,
-      do_sample: false,
-      tokenizer_encode_kwargs: model.id === 'qwen3-0.6b' ? { enable_thinking: false } : undefined,
-    });
-    if (!stripThinking(textFromGeneration(check))) {
-      throw new Error('The downloaded model could not generate text. Try removing and downloading it again.');
-    }
-  } catch (error) {
-    await generator.dispose();
-    activeGenerator = null;
-    activeModelId = null;
-    throw error;
+  const check = await generator(chatMessages(model, 'Answer briefly.', 'Say ready.'), generationOptions(model, 12));
+  if (!stripThinking(textFromGeneration(check))) {
+    throw new Error('The downloaded model could not generate text. Try removing and downloading it again.');
   }
-  onProgress(1);
+  // transformers.js ignores failed cache writes. Without the files on disk the model would download again on every load.
+  if ((await cachedModelDtype(model)) !== dtype) {
+    throw new Error('Chrome could not save the model files. Free up disk space and try again.');
+  }
 }
 
 async function generate(modelId: string, system: string, user: string, options?: PromptOptions): Promise<string> {
   const model = requireModel(modelId);
-  const downloaded = await listDownloadedModelIds();
-  if (!downloaded.includes(model.id)) throw new Error('Download this model in Settings.');
-  const generator = await loadedGenerator(model);
-  const output = await generator(chatMessages(model, system, user, options?.examples), {
-    max_new_tokens: system.startsWith('You summarize') ? 128 : system.startsWith('You classify') ? 96 : 192,
-    do_sample: false,
-    ...(options?.repetitionPenalty ? { repetition_penalty: options.repetitionPenalty } : {}),
-    tokenizer_encode_kwargs: model.id === 'qwen3-0.6b' ? { enable_thinking: false } : undefined,
-  });
+  let generator = activeModelId === model.id ? activeGenerator : null;
+  if (!generator) {
+    const dtype = await cachedModelDtype(model);
+    if (!dtype) throw new Error('Download this model in Settings.');
+    generator = await loadedGenerator(model, dtype);
+  }
+  let output: Awaited<ReturnType<Generator>>;
+  try {
+    output = await generator(chatMessages(model, system, user, options?.examples), {
+      ...generationOptions(model, options?.maxTokens ?? DEFAULT_MAX_TOKENS),
+      ...(options?.repetitionPenalty ? { repetition_penalty: options.repetitionPenalty } : {}),
+    });
+  } catch (error) {
+    // A failed run can leave the WebGPU session unusable (device lost, out of memory). Reload on the next prompt.
+    await releaseActive();
+    throw error;
+  }
   const text = stripThinking(textFromGeneration(output));
   if (!text) throw new Error('On-device model returned an empty response.');
   return text;
 }
 
-async function loadedGenerator(model: LocalModel, onProgress?: (info: ProgressInfo) => void): Promise<Generator> {
+function generationOptions(model: LocalModel, maxTokens: number) {
+  return {
+    max_new_tokens: maxTokens,
+    do_sample: false,
+    tokenizer_encode_kwargs: model.id === 'qwen3-0.6b' ? { enable_thinking: false } : undefined,
+  };
+}
+
+async function loadedGenerator(
+  model: LocalModel,
+  dtype: LocalDtype,
+  onProgress?: (info: ProgressInfo) => void,
+): Promise<Generator> {
   if (activeGenerator && activeModelId === model.id) return activeGenerator;
-  await activeGenerator?.dispose();
-  activeGenerator = null;
-  activeModelId = null;
-  const gpu = typeof navigator !== 'undefined'
-    ? (navigator as Navigator & {
-        gpu?: { requestAdapter(options?: { powerPreference?: 'low-power' }): Promise<unknown | null> };
-      }).gpu
-    : undefined;
-  const adapter = await gpu?.requestAdapter({ powerPreference: 'low-power' });
-  if (!adapter) {
-    throw new Error('This local model needs WebGPU. Enable WebGPU in Chrome or choose another AI provider.');
-  }
+  await releaseActive();
+  await requireAdapter();
   await configureRuntime();
   const { pipeline } = await import('@huggingface/transformers');
   const generator = (await pipeline('text-generation', model.repo, {
-    dtype: model.dtype,
+    dtype,
     device: 'webgpu',
     progress_callback: onProgress,
-  })) as Generator;
+  })) as unknown as Generator;
   activeGenerator = generator;
   activeModelId = model.id;
   return generator;
+}
+
+async function requireAdapter(): Promise<GpuAdapter> {
+  const gpu = typeof navigator !== 'undefined'
+    ? (navigator as Navigator & {
+        gpu?: { requestAdapter(options?: { powerPreference?: 'high-performance' }): Promise<GpuAdapter | null> };
+      }).gpu
+    : undefined;
+  const adapter = await gpu?.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) {
+    throw new Error('This local model needs WebGPU. Enable WebGPU in Chrome or choose another AI provider.');
+  }
+  return adapter;
 }
 
 function chatMessages(model: LocalModel, system: string, user: string, examples: ChatExample[] = []): ChatTurn[] {
@@ -131,13 +197,16 @@ function chatMessages(model: LocalModel, system: string, user: string, examples:
 }
 
 async function configureRuntime(): Promise<void> {
+  if (configured) return;
   const { env } = await import('@huggingface/transformers');
   env.allowLocalModels = false;
   env.allowRemoteModels = true;
   env.useBrowserCache = true;
+  env.useCustomCache = true;
+  env.customCache = modelFileStore;
   env.useWasmCache = false;
-  if (env.backends.onnx.webgpu) env.backends.onnx.webgpu.powerPreference = 'low-power';
-  if (configured) return;
+  // Speed matters more than battery here: on laptops with two GPUs this picks the faster one.
+  if (env.backends.onnx.webgpu) env.backends.onnx.webgpu.powerPreference = 'high-performance';
   const wasm = wasmConfig(env.backends.onnx);
   if (wasm) {
     wasm.numThreads = 1;
@@ -172,15 +241,6 @@ function requireModel(modelId: string): LocalModel {
   const model = getLocalModel(modelId);
   if (!model) throw new Error('That model is not available.');
   return model;
-}
-
-function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-  const run = promptChain.then(fn);
-  promptChain = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
 }
 
 function clamp(value: number): number {

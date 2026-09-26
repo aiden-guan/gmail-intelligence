@@ -1,6 +1,12 @@
+import { createOrb } from '../ui/orb-markup';
 import { ensureSurface, SURFACE_CSS } from './surface';
 
-export function showToast(message: string, retry?: () => void): void {
+/** A toast for work in progress; the next toast replaces it. */
+export function showBusyToast(message: string): void {
+  showToast(message, undefined, true);
+}
+
+export function showToast(message: string, retry?: () => void, busy = false): void {
   document.querySelector('[data-gi-ui="toast"]')?.remove();
   ensureSurface();
   const host = document.createElement('div');
@@ -15,6 +21,7 @@ export function showToast(message: string, retry?: () => void): void {
   toast.className = 'gi-toast';
   const text = document.createElement('span');
   text.textContent = message;
+  if (busy) toast.append(createOrb(16, 'bare'));
   toast.append(text);
   if (retry) {
     const button = document.createElement('button');

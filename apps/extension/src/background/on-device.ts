@@ -17,8 +17,16 @@ export async function completeOnDevice(
       user,
       examples: options?.examples,
       repetitionPenalty: options?.repetitionPenalty,
+      maxTokens: options?.maxTokens,
+      priority: options?.priority,
     }),
   );
+}
+
+/** Load a downloaded model before the first prompt so the first summary does not pay for it. */
+export async function warmOnDevice(modelId: string): Promise<void> {
+  await ensureOnDeviceDocument();
+  await chrome.runtime.sendMessage({ type: 'ON_DEVICE_WARM', modelId });
 }
 
 export async function downloadOnDevice(modelId: string): Promise<void> {
@@ -38,7 +46,17 @@ async function readText(response: unknown): Promise<{ text: string }> {
   return { text: body.text };
 }
 
-async function ensureOnDeviceDocument(): Promise<void> {
+let starting: Promise<void> | null = null;
+
+/** Concurrent jobs share one startup: Chrome allows a single offscreen document and throws on a second create. */
+function ensureOnDeviceDocument(): Promise<void> {
+  starting ??= startOnDeviceDocument().finally(() => {
+    starting = null;
+  });
+  return starting;
+}
+
+async function startOnDeviceDocument(): Promise<void> {
   const existing = await chrome.runtime.getContexts({
     contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],
   });

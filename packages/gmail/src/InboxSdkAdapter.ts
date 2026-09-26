@@ -498,12 +498,18 @@ export class InboxSdkAdapter implements GmailAdapter {
     }
 
     const view = targetHandle?.view as {
+      setBodyHTML?: (html: string) => void;
       setBodyText?: (text: string) => void;
       insertTextIntoBodyAtCursor?: (text: string) => void;
     } | null;
 
     if (view) {
       try {
+        // setBodyText assigns textContent, which collapses every line break.
+        if (typeof view.setBodyHTML === 'function') {
+          view.setBodyHTML(textToComposeHtml(text));
+          return { ...ok('insertComposeBody'), verified: true, reason: 'Inserted via InboxSDK' };
+        }
         if (typeof view.setBodyText === 'function') {
           view.setBodyText(text);
           return { ...ok('insertComposeBody'), verified: true, reason: 'Inserted via InboxSDK' };
@@ -756,3 +762,14 @@ export type ComposeViewLike = ThreadIdView & {
   on?: (event: string, cb: () => void) => void;
   insertTextIntoBodyAtCursor?: (text: string) => void;
 };
+
+/** Plain text as Gmail compose markup: one div per line, an empty line as <div><br></div>. */
+export function textToComposeHtml(text: string): string {
+  const escape = (line: string) =>
+    line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => (line.trim() ? `<div>${escape(line)}</div>` : '<div><br></div>'))
+    .join('');
+}

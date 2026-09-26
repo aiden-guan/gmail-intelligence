@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { DEFAULT_SETTINGS, getProviderRequiredOrigin, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
 import { trackerHealthLabel, trackerPermissionOrigin, type TrackerHealthStatus } from '@gi/tracking';
 import { AiConnect } from '../setup/AiConnect';
+import { ProfileFields } from '../setup/ProfileFields';
+import { Orb } from '../ui/Orb';
 
 const CATEGORIES: ThreadCategory[] = ['RESPOND', 'WAITING', 'FYI', 'NOTIFICATIONS', 'PROMOTIONS', 'NEWS'];
 
@@ -155,7 +157,7 @@ export function SettingsApp() {
           />
         </Field>
         <p className="gi-muted text-xs">
-          Connection: {trackerHealth ? trackerHealthLabel(trackerHealth) : 'Checking…'}
+          Connection: {trackerHealth ? trackerHealthLabel(trackerHealth) : <span className="gi-orb-line"><Orb size={12} />Checking…</span>}
         </p>
         <p className="gi-muted text-xs">
           Tracking ready means a tracker record exists and Gmail’s send request can be rewritten. The compose window itself does not load the tracking image.
@@ -163,25 +165,9 @@ export function SettingsApp() {
       </Section>
 
       <Section title="Personalization">
+        <ProfileFields voice={settings.voiceProfile} onChange={(voiceProfile) => update('voiceProfile', voiceProfile)} />
         <Field label="Greeting">
           <input className="gi-field" value={settings.voiceProfile.greeting} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, greeting: event.target.value })} />
-        </Field>
-        <Field label="Signoff">
-          <input className="gi-field" value={settings.voiceProfile.signoff} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, signoff: event.target.value })} />
-        </Field>
-        <Field label="Concision">
-          <select className="gi-field" value={settings.voiceProfile.concision} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, concision: event.target.value as ExtensionSettings['voiceProfile']['concision'] })}>
-            <option value="short">Short</option>
-            <option value="medium">Medium</option>
-            <option value="long">Long</option>
-          </select>
-        </Field>
-        <Field label="Formality">
-          <select className="gi-field" value={settings.voiceProfile.formality} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, formality: event.target.value as ExtensionSettings['voiceProfile']['formality'] })}>
-            <option value="casual">Casual</option>
-            <option value="neutral">Neutral</option>
-            <option value="formal">Formal</option>
-          </select>
         </Field>
         <Field label="Custom instructions">
           <textarea className="gi-field min-h-[5rem]" value={settings.voiceProfile.personalInstructions} onChange={(event) => update('voiceProfile', { ...settings.voiceProfile, personalInstructions: event.target.value })} />

@@ -2,6 +2,7 @@ import { Brand, Pigeon } from '../ui/Pigeon';
 import { useCallback, useEffect, useState } from 'react';
 import type { ExtensionSettings } from '@gi/shared';
 import { DEFAULT_SETTINGS } from '@gi/shared';
+import { Orb } from '../ui/Orb';
 
 type SplitCategory =
   | 'PRIORITY'
@@ -178,7 +179,7 @@ export function SidePanelApp() {
             {result?.error ? <p className="gi-danger">{result.error}</p> : null}
             {result?.answer ? <p className="whitespace-pre-wrap text-[14px] leading-relaxed tracking-[-0.011em]">{result.answer}</p> : null}
             {!result && !loading ? <div className="gi-ask-start"><h2>What’s on your mind?</h2><p>Find a detail, catch up on a conversation, or remember what you promised.</p><div className="gi-suggestions">{['What needs a reply?', 'What did I promise this week?', 'Find upcoming deadlines'].map((prompt) => <button type="button" key={prompt} onClick={() => setQuery(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div></div> : null}
-            {loading ? <p className="gi-muted" role="status">Looking through your mail…</p> : null}
+            {loading ? <p className="gi-muted gi-orb-line" role="status"><Orb size={20} />Looking through your mail…</p> : null}
             {result?.citations?.length ? (
               <ul className="mt-4 space-y-2">
                 {result.citations.map((citation) => (
@@ -206,7 +207,7 @@ export function SidePanelApp() {
               onChange={(event) => setQuery(event.target.value)}
             />
             <button type="submit" className="gi-btn shrink-0" disabled={loading || !query.trim()}>
-              {loading ? 'Asking' : 'Ask'}
+              {loading ? <><Orb size={14} tone="on-accent" />Asking</> : 'Ask'}
             </button>
           </form>
         </div>

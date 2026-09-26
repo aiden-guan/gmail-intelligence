@@ -12,7 +12,7 @@ import {
 import { z } from 'zod';
 import { EMAIL_SUMMARY_SYSTEM_PROMPT, formatThreadForSummary, summaryUserContent } from './summary-prompt.js';
 import { coerceDraftSuggestion, coerceThreadSummary } from './prompt-provider.js';
-import { draftQualityIssue, draftSystemPrompt, formatDraftContext } from './draft-prompt.js';
+import { draftQualityIssue, draftSystemPrompt, finishDraft, formatDraftContext } from './draft-prompt.js';
 
 export type ClassifyInput = {
   subject: string;
@@ -29,9 +29,14 @@ export type SummarizeInput = {
   messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
 };
 
+/** The Gmail account the draft is written from. */
+export type MailboxOwner = { email: string; name?: string };
+
 export type DraftInput = {
   subject: string;
+  /** `sender` is an address or `Name <address>`. */
   messages: Array<{ sender: string; bodyText: string; timestamp: string }>;
+  owner?: MailboxOwner;
   voice: VoiceProfile;
   mode?: 'direct' | 'warm' | 'short';
   kind: 'reply' | 'follow_up';
@@ -186,12 +191,13 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
       formatDraftContext(input, 'reply', 'full', 24_000),
       z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
     );
-    const qualityIssue = draftQualityIssue(input.messages, data.body);
+    const body = finishDraft(data.body, input);
+    const qualityIssue = draftQualityIssue(input.messages, body, input.owner, input.voice);
     if (qualityIssue) throw new Error(qualityIssue);
     return {
       result: {
         mode: data.mode ?? 'direct',
-        body: data.body,
+        body,
         placeholders: data.placeholders ?? [],
         subject: data.subject,
         confidence: data.confidence,
@@ -206,12 +212,13 @@ export abstract class OpenAICompatibleProvider implements AIProvider {
       formatDraftContext(input, 'follow_up', 'full', 24_000),
       z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
     );
-    const qualityIssue = draftQualityIssue(input.messages, data.body);
+    const body = finishDraft(data.body, input, 'follow_up');
+    const qualityIssue = draftQualityIssue(input.messages, body, input.owner, input.voice);
     if (qualityIssue) throw new Error(qualityIssue);
     return {
       result: {
         mode: data.mode ?? 'direct',
-        body: data.body,
+        body,
         placeholders: data.placeholders ?? [],
         subject: data.subject,
         confidence: data.confidence,
@@ -570,14 +577,17 @@ export type { ChatGptIdentity, ChatGptSession } from './chatgpt.js';
 export {
   LOCAL_MODEL_ORIGINS,
   LOCAL_MODELS,
+  downloadedLocalDtype,
   formatDownloadSize,
   getLocalModel,
+  localModelBytes,
   localModelCacheName,
+  localModelDtypes,
   localModelIsDownloaded,
   localModelWeightMarker,
 } from './local-models.js';
-export type { LocalModel, LocalModelVendor } from './local-models.js';
+export type { LocalDtype, LocalModel, LocalModelVendor } from './local-models.js';
 export { createPromptBackedProvider, extractJsonObject } from './prompt-provider.js';
-export type { PromptComplete, PromptOptions } from './prompt-provider.js';
+export type { PromptComplete, PromptOptions, PromptPriority } from './prompt-provider.js';
 export type { ChatExample } from './draft-prompt.js';
-export { draftQualityIssue } from './draft-prompt.js';
+export { draftNeedsRefresh, draftQualityIssue } from './draft-prompt.js';

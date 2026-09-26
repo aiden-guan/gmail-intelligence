@@ -1,3 +1,4 @@
+import { Orb } from '../ui/Orb';
 import {
   CHATGPT_DEFAULT_MODEL,
   CHATGPT_MODELS,
@@ -6,6 +7,8 @@ import {
   formatDownloadSize,
   getLocalModel,
   isChatGptModel,
+  localModelBytes,
+  localModelDtypes,
   type LocalModel,
   type LocalModelVendor,
 } from '@gi/ai';
@@ -61,6 +64,7 @@ export function AiConnect({
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const shaderF16 = useShaderF16();
   const downloadingRef = useRef<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advanced, setAdvanced] = useState<AdvancedDraft>(() => initialAdvanced(settings));
@@ -262,7 +266,7 @@ export function AiConnect({
             </button>
           ) : (
             <button className={primaryClass} onClick={signIn} disabled={waitingForLogin}>
-              {waitingForLogin ? 'Waiting for sign-in…' : 'Sign in with ChatGPT'}
+              {waitingForLogin ? <><Orb size={14} tone="on-accent" />Waiting for sign-in…</> : 'Sign in with ChatGPT'}
             </button>
           )}
           {status.signedIn ? (
@@ -307,7 +311,12 @@ export function AiConnect({
             const active = localActiveId === model.id;
             const downloading = downloadingId === model.id;
             return (
-              <ModelRow key={model.id} model={model} active={active}>
+              <ModelRow
+                key={model.id}
+                model={model}
+                active={active}
+                sizeLabel={formatDownloadSize(localModelBytes(model, localModelDtypes(model, shaderF16)[0]!))}
+              >
                 {ready ? (
                   <>
                     <button
@@ -315,7 +324,7 @@ export function AiConnect({
                       disabled={active || Boolean(downloadingId)}
                       onClick={() => void downloadLocal(model.id)}
                     >
-                      {active ? 'Using this model' : downloading ? 'Checking model…' : 'Use this model'}
+                      {active ? 'Using this model' : downloading ? <><Orb size={14} tone="on-accent" />Checking model…</> : 'Use this model'}
                     </button>
                     <button className={quietClass} onClick={() => void removeLocal(model.id)} disabled={Boolean(downloadingId)}>
                       Remove
@@ -327,7 +336,7 @@ export function AiConnect({
                     onClick={() => void downloadLocal(model.id)}
                     disabled={Boolean(downloadingId)}
                   >
-                    {downloading ? 'Downloading…' : 'Download'}
+                    {downloading ? <><Orb size={14} tone="on-accent" />Downloading…</> : 'Download'}
                   </button>
                 )}
                 {downloading ? <ProgressBar progress={progress} /> : null}
@@ -537,6 +546,21 @@ function ProgressBar({ progress }: { progress: number }) {
       </p>
     </div>
   );
+}
+
+/** GPUs with shader-f16 get the smaller q4f16 build of some models. */
+function useShaderF16(): boolean {
+  const [supported, setSupported] = useState(false);
+  useEffect(() => {
+    const gpu = (navigator as Navigator & {
+      gpu?: { requestAdapter(): Promise<{ features?: { has(name: string): boolean } } | null> };
+    }).gpu;
+    void gpu
+      ?.requestAdapter()
+      .then((adapter) => setSupported(Boolean(adapter?.features?.has('shader-f16'))))
+      .catch(() => undefined);
+  }, []);
+  return supported;
 }
 
 type ModelInfo = Pick<LocalModel, 'label' | 'vendor' | 'blurb' | 'badge' | 'quality' | 'speed' | 'languages' | 'pros' | 'cons'> & {

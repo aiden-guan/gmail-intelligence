@@ -1,4 +1,4 @@
-import { downloadQwenModel, promptWithQwen, releaseQwen } from '../local-model/qwen-model';
+import { downloadQwenModel, promptWithQwen, releaseQwen, warmQwen } from '../local-model/qwen-model';
 import { promptWithChromeModel } from '../local-model/chrome-model';
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -8,6 +8,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === 'LOCAL_MODEL_RELEASE') {
     void releaseQwen();
+    return false;
+  }
+  if (message?.type === 'ON_DEVICE_WARM') {
+    void warmQwen(String(message.modelId || '')).catch(() => undefined);
     return false;
   }
   if (message?.type === 'ON_DEVICE_DOWNLOAD') {
@@ -27,6 +31,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const options = {
     examples: Array.isArray(message.examples) ? message.examples : undefined,
     repetitionPenalty: typeof message.repetitionPenalty === 'number' ? message.repetitionPenalty : undefined,
+    maxTokens: typeof message.maxTokens === 'number' ? message.maxTokens : undefined,
+    priority: message.priority === 'background' ? ('background' as const) : ('interactive' as const),
   };
   const pending =
     modelId === 'gemini-nano'

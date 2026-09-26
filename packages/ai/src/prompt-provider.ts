@@ -18,7 +18,6 @@ import type {
 } from './index.js';
 import {
   EMAIL_SUMMARY_SYSTEM_PROMPT,
-  LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT,
   formatThreadForSummary,
   summaryUserContent,
 } from './summary-prompt.js';
@@ -26,10 +25,19 @@ import {
   cleanCompactDraft,
   compactDraftPrompt,
   draftQualityIssue,
+  finishDraft,
   draftSystemPrompt,
   formatDraftContext,
   type ChatExample,
 } from './draft-prompt.js';
+import {
+  COMPACT_SUMMARY_EXAMPLES,
+  COMPACT_SUMMARY_SYSTEM_PROMPT,
+  cleanCompactText,
+  compactRewritePrompt,
+  compactSummaryUser,
+  parseCompactSummary,
+} from './compact-prompts.js';
 
 const AskSchema = z.object({
   answer: z.string(),
@@ -42,10 +50,16 @@ export type PromptCompletion = {
   usage?: UsageStats;
 };
 
+/** Background jobs (inbox sorting) yield to anything the user is waiting on. */
+export type PromptPriority = 'interactive' | 'background';
+
 export type PromptOptions = {
   /** Worked examples sent as prior user/assistant turns. */
   examples?: ChatExample[];
   repetitionPenalty?: number;
+  /** Cap on generated tokens. On-device models produce a few dozen a second. */
+  maxTokens?: number;
+  priority?: PromptPriority;
 };
 
 export type PromptComplete = (system: string, user: string, options?: PromptOptions) => Promise<PromptCompletion>;
@@ -65,17 +79,28 @@ export function extractJsonObject(text: string): unknown {
 export function createPromptBackedProvider(
   name: string,
   complete: PromptComplete,
-  options?: { maxUserChars?: number; summaryStyle?: 'compact' | 'full'; repairInvalidJson?: boolean },
+  options?: {
+    maxUserChars?: number;
+    summaryStyle?: 'compact' | 'full';
+    repairInvalidJson?: boolean;
+    /**
+     * Sub-1.5B models sorted mail no better than chance in testing (each settled on
+     * one answer for every email), and a wrong label can trigger drafts or archiving.
+     * With this off, the heuristic sorter keeps its answer and the GPU stays free.
+     */
+    classifyWithModel?: boolean;
+  },
 ): AIProvider {
   const maxUserChars = options?.maxUserChars ?? 12_000;
   const summaryStyle = options?.summaryStyle ?? 'full';
   const repairInvalidJson = options?.repairInvalidJson ?? true;
+  const classifyWithModel = options?.classifyWithModel ?? true;
 
-  async function chatJson<T>(system: string, user: string, schema: z.ZodType<T>): Promise<{
+  async function chatJson<T>(system: string, user: string, schema: z.ZodType<T>, promptOptions?: PromptOptions): Promise<{
     data: T;
     usage?: UsageStats;
   }> {
-    const first = await complete(`${system} ${JSON_RULE}`, clip(user, maxUserChars));
+    const first = await complete(`${system} ${JSON_RULE}`, clip(user, maxUserChars), promptOptions);
     try {
       return { data: schema.parse(extractJsonObject(first.text)), usage: first.usage };
     } catch (error) {
@@ -89,6 +114,7 @@ export function createPromptBackedProvider(
       const repair = await complete(
         `Fix the JSON so it matches the requested object. Include every required key. Use empty arrays or empty strings when a value is missing. ${JSON_RULE}`,
         clip(`Problem: ${reason}\n\nPrevious output:\n${first.text}`, maxUserChars),
+        promptOptions,
       );
       try {
         return { data: schema.parse(extractJsonObject(repair.text)), usage: repair.usage ?? first.usage };
@@ -101,6 +127,7 @@ export function createPromptBackedProvider(
   return {
     name,
     async classifyEmail(input: ClassifyInput) {
+      if (!classifyWithModel) throw new Error('This model does not sort mail. The built-in rules sort it.');
       const { data, usage } = await chatJson(
         'You classify emails. Use category RESPOND, WAITING, FYI, NOTIFICATIONS, PROMOTIONS, or NEWS. priority is HIGH, NORMAL, or LOW. confidence is 0 to 1. deadline is a string or null.',
         JSON.stringify({
@@ -109,6 +136,7 @@ export function createPromptBackedProvider(
           bodyText: clip(input.bodyText, Math.max(1000, maxUserChars - 1500)),
         }),
         ClassificationResultSchema,
+        { priority: 'background' },
       );
       return { result: data, usage };
     },
@@ -124,9 +152,10 @@ export function createPromptBackedProvider(
           bodyText: clip(message.bodyText, Math.max(800, Math.floor(maxUserChars / 8))),
         })),
       });
+      if (summaryStyle === 'compact') return compactSummary(complete, formatted, maxUserChars);
       const { data, usage } = await chatJson(
-        summaryStyle === 'compact' ? LOCAL_EMAIL_SUMMARY_SYSTEM_PROMPT : EMAIL_SUMMARY_SYSTEM_PROMPT,
-        summaryUserContent(formatted, summaryStyle),
+        EMAIL_SUMMARY_SYSTEM_PROMPT,
+        summaryUserContent(formatted),
         z.preprocess(coerceThreadSummary, ThreadSummarySchema) as z.ZodType<ThreadSummary>,
       );
       return { result: data, usage };
@@ -142,6 +171,16 @@ export function createPromptBackedProvider(
         : draft(chatJson, input, 'follow_up', summaryStyle, maxUserChars);
     },
     async rewriteText(input: RewriteInput) {
+      if (summaryStyle === 'compact') {
+        const prompt = compactRewritePrompt(input, Math.max(800, maxUserChars - 800));
+        const completion = await complete(prompt.system, prompt.user, {
+          maxTokens: Math.min(512, Math.ceil(input.text.length / 3) + 64),
+          repetitionPenalty: 1.05,
+        });
+        const text = cleanCompactText(completion.text);
+        if (!text) throw new Error('On-device model returned an empty response.');
+        return { result: text, usage: completion.usage };
+      }
       const schema = z.object({ text: z.string() });
       const { data, usage } = await chatJson(
         `Rewrite email text. Mode=${input.mode}. Preserve meaning. JSON shape {"text":""}.`,
@@ -154,6 +193,7 @@ export function createPromptBackedProvider(
       return { result: data.text, usage };
     },
     async answerMailboxQuery(input: AskInput) {
+      if (summaryStyle === 'compact') return compactAnswer(complete, input);
       const { data, usage } = await chatJson(
         `Answer ONLY from the mailbox context. Every factual claim needs citations. If the context is incomplete, set incompleteIndex true and say the local index may be incomplete. Coverage: ${input.coverageNote}`,
         JSON.stringify({
@@ -185,12 +225,13 @@ async function draft(
     formatDraftContext(input, kind, contextStyle, maxUserChars),
     z.preprocess(coerceDraftSuggestion, DraftSuggestionSchema) as z.ZodType<DraftSuggestion>,
   );
-  const qualityIssue = draftQualityIssue(input.messages, data.body);
+  const body = finishDraft(data.body, input, kind);
+  const qualityIssue = draftQualityIssue(input.messages, body, input.owner, input.voice);
   if (qualityIssue) throw new Error(qualityIssue);
   return {
     result: {
       mode: data.mode ?? 'direct',
-      body: data.body,
+      body,
       placeholders: data.placeholders ?? [],
       subject: data.subject,
       confidence: data.confidence,
@@ -212,10 +253,11 @@ async function compactDraft(
     const completion = await complete(prompt.system, prompt.user, {
       examples: prompt.examples,
       repetitionPenalty: retry ? 1.2 : 1.1,
+      maxTokens: input.voice?.concision === 'long' ? 256 : input.voice?.concision === 'short' ? 96 : 160,
     });
     const coerced = coerceDraftSuggestion(completion.text) as { body?: string };
-    const body = cleanCompactDraft(coerced.body || completion.text);
-    const issue = body ? draftQualityIssue(input.messages, body) : 'On-device model returned an empty response.';
+    const body = finishDraft(cleanCompactDraft(coerced.body || completion.text), input, kind);
+    const issue = body ? draftQualityIssue(input.messages, body, input.owner, input.voice) : 'On-device model returned an empty response.';
     if (!issue) {
       return {
         result: { mode: input.mode ?? 'direct', body, placeholders: [] },
@@ -225,6 +267,54 @@ async function compactDraft(
     lastIssue = issue;
   }
   throw new Error(lastIssue);
+}
+
+/** Labeled plain-text summary for small models. JSON is still accepted if a model sends it. */
+async function compactSummary(
+  complete: PromptComplete,
+  formatted: string,
+  maxUserChars: number,
+): Promise<{ result: ThreadSummary; usage?: UsageStats }> {
+  const completion = await complete(COMPACT_SUMMARY_SYSTEM_PROMPT, clip(compactSummaryUser(formatted), maxUserChars), {
+    examples: COMPACT_SUMMARY_EXAMPLES,
+    maxTokens: 160,
+  });
+  const parsed = ThreadSummarySchema.safeParse(coerceThreadSummary(jsonOrNull(completion.text) ?? parseCompactSummary(completion.text)));
+  if (!parsed.success) throw new Error('On-device model did not return a summary. Try again or choose a larger model.');
+  return { result: parsed.data, usage: completion.usage };
+}
+
+/** Small models cannot cite reliably in JSON, so answer in text and cite the retrieved threads. */
+async function compactAnswer(
+  complete: PromptComplete,
+  input: AskInput,
+): Promise<{ result: z.infer<typeof AskSchema>; usage?: UsageStats }> {
+  const chunks = input.contextChunks.slice(0, 4);
+  const context = chunks.map((chunk, index) => `[${index + 1}] ${chunk.subject}\n${clip(chunk.text, 700)}`).join('\n\n');
+  const completion = await complete(
+    'Answer the question using only these emails. If they do not contain the answer, say so. Answer in 1 to 3 sentences.',
+    `${context}\n\nQuestion: ${input.query}`,
+    { maxTokens: 160 },
+  );
+  const answer = cleanCompactText(completion.text);
+  if (!answer) throw new Error('On-device model returned an empty response.');
+  return {
+    result: {
+      answer,
+      citations: chunks.map((chunk) => ({ threadId: chunk.threadId, subject: chunk.subject })),
+      incompleteIndex: false,
+    },
+    usage: completion.usage,
+  };
+}
+
+function jsonOrNull(text: string): unknown {
+  if (!/^\s*(?:```(?:json)?\s*)?\{/i.test(text)) return null;
+  try {
+    return extractJsonObject(text);
+  } catch {
+    return null;
+  }
 }
 
 export function coerceDraftSuggestion(value: unknown): unknown {

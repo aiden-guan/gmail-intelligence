@@ -1,6 +1,7 @@
 import { Brand, Pigeon } from '../ui/Pigeon';
 import { useEffect, useState } from 'react';
 import { requestExtensionReload } from '../reload-extension';
+import { Orb } from '../ui/Orb';
 
 type Diagnostics = {
   gmailTab?: string;
@@ -60,7 +61,7 @@ export function PopupApp() {
                 void requestExtensionReload(chrome).catch(() => setReloading(false));
               }}
             >
-              {reloading ? 'Reloading…' : 'Reload extension'}
+              {reloading ? <><Orb size={14} tone="bare" />Reloading…</> : 'Reload extension'}
             </button>
           </div>
           <p className="gi-hint"><kbd>⌘ K</kbd> Quick commands in Gmail</p>

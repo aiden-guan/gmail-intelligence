@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   LOCAL_MODELS,
+  downloadedLocalDtype,
   formatDownloadSize,
+  localModelBytes,
+  localModelDtypes,
   getLocalModel,
   localModelIsDownloaded,
   localModelWeightMarker,
@@ -43,6 +46,19 @@ describe('local model catalog', () => {
     const cached = [`https://huggingface.co/${localModelWeightMarker(light!)}`];
     expect(localModelIsDownloaded(cached, light!)).toBe(true);
     expect(localModelIsDownloaded(cached, stronger!)).toBe(false);
+  });
+
+  it('prefers a cached q4f16 build and falls back to q4', () => {
+    const model = getLocalModel('qwen3-0.6b')!;
+    const q4 = `https://huggingface.co/${localModelWeightMarker(model, 'q4')}`;
+    const f16 = `https://huggingface.co/${localModelWeightMarker(model, 'q4f16')}`;
+    expect(downloadedLocalDtype([q4], model)).toBe('q4');
+    expect(downloadedLocalDtype([q4, f16], model)).toBe('q4f16');
+    expect(localModelDtypes(model, true)).toEqual(['q4f16', 'q4']);
+    expect(localModelDtypes(model, false)).toEqual(['q4']);
+    expect(localModelDtypes(getLocalModel('gemma-3-1b')!, true)).toEqual(['q4']);
+    expect(localModelDtypes(getLocalModel('qwen2.5-0.5b')!, true)).toEqual(['q4']);
+    expect(localModelBytes(model, 'q4f16')).toBeLessThan(localModelBytes(model, 'q4'));
   });
 
   it('formats the download size in megabytes', () => {

@@ -369,6 +369,10 @@ export function toPublicSettings(settings: ExtensionSettings): PublicExtensionSe
 }
 
 export type VoiceProfile = {
+  /** How the user signs emails, e.g. "Aiden". Drafts end with the sign-off and this name. */
+  name: string;
+  /** A line of context for drafts, e.g. "CS student at UC Berkeley". */
+  about: string;
   greeting: string;
   signoff: string;
   concision: 'short' | 'medium' | 'long';
@@ -383,6 +387,8 @@ export type VoiceProfile = {
 export const INBOX_SDK_APP_ID = 'sdk_Intelligence_c698f940a0';
 
 export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
+  name: '',
+  about: '',
   greeting: 'Hi',
   signoff: 'Thanks',
   concision: 'medium',

@@ -1,4 +1,5 @@
 import type { ChatExample, PromptOptions } from '@gi/ai';
+import { createScheduler } from './scheduler';
 
 export type OnDeviceAvailability =
   | 'unsupported'
@@ -12,6 +13,8 @@ type DownloadEvent = Event & { loaded?: number; total?: number };
 type ModelSession = {
   prompt: (input: string) => Promise<string>;
   destroy: () => void;
+  /** Copies the session with its processed initial prompts. Missing on older Chrome builds. */
+  clone?: () => Promise<ModelSession>;
 };
 
 type ChromeModelOptions = {
@@ -38,7 +41,10 @@ type ModelFactory = {
 const HARDWARE_HINT =
   'On-device AI needs desktop Chrome 138 or newer, about 16 GB of memory, and 22 GB of free disk.';
 
-let promptChain: Promise<void> = Promise.resolve();
+const schedule = createScheduler();
+/** Sessions already primed with a system prompt and examples, keyed by those prompts. */
+const primed = new Map<string, ModelSession>();
+const MAX_PRIMED = 3;
 
 export function getLanguageModel(): ModelFactory | null {
   const host = globalThis as typeof globalThis & {
@@ -96,12 +102,7 @@ export function startOnDeviceDownload(onProgress: (fraction: number) => void): P
 }
 
 export function promptWithChromeModel(system: string, user: string, options?: PromptOptions): Promise<string> {
-  const run = promptChain.then(() => runPrompt(system, user, options?.examples));
-  promptChain = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
+  return schedule(options?.priority ?? 'interactive', () => runPrompt(system, user, options?.examples));
 }
 
 export function onDeviceUnavailableMessage(status: OnDeviceAvailability): string {
@@ -112,10 +113,6 @@ export function onDeviceUnavailableMessage(status: OnDeviceAvailability): string
 async function runPrompt(system: string, user: string, examples: ChatExample[] = []): Promise<string> {
   const model = getLanguageModel();
   if (!model) throw new Error(HARDWARE_HINT);
-  const availability = await model.availability(chromeModelOptions);
-  if (availability !== 'available') {
-    throw new Error('Download the on-device model in Settings.');
-  }
   const initialPrompts: NonNullable<ChromeModelOptions['initialPrompts']> = [
     ...(system ? [{ role: 'system' as const, content: system }] : []),
     ...examples.flatMap((example) => [
@@ -123,19 +120,59 @@ async function runPrompt(system: string, user: string, examples: ChatExample[] =
       { role: 'assistant' as const, content: example.assistant },
     ]),
   ];
-  const session = await model.create({
-    ...chromeModelOptions,
-    initialPrompts: initialPrompts.length ? initialPrompts : undefined,
-  });
+  const key = JSON.stringify(initialPrompts);
+  let session: ModelSession;
+  try {
+    session = await freshSession(model, key, initialPrompts);
+  } catch (error) {
+    throw normalizeModelError(error);
+  }
   try {
     const text = await session.prompt(user.slice(0, 8000));
     if (!text.trim()) throw new Error('On-device model returned an empty response.');
     return text;
   } catch (error) {
+    dropPrimed(key);
     throw normalizeModelError(error);
   } finally {
     session.destroy();
   }
+}
+
+/**
+ * Cloning a primed session skips re-reading the system prompt and examples,
+ * which is most of the input for a short email.
+ */
+async function freshSession(
+  model: ModelFactory,
+  key: string,
+  initialPrompts: NonNullable<ChromeModelOptions['initialPrompts']>,
+): Promise<ModelSession> {
+  const base = primed.get(key);
+  if (base?.clone) {
+    try {
+      return await base.clone();
+    } catch {
+      dropPrimed(key);
+    }
+  }
+  const availability = await model.availability(chromeModelOptions);
+  if (availability !== 'available') {
+    throw new Error('Download the on-device model in Settings.');
+  }
+  const created = await model.create({
+    ...chromeModelOptions,
+    initialPrompts: initialPrompts.length ? initialPrompts : undefined,
+  });
+  if (!created.clone) return created;
+  if (primed.size >= MAX_PRIMED) dropPrimed(primed.keys().next().value!);
+  primed.set(key, created);
+  return created.clone();
+}
+
+function dropPrimed(key: string): void {
+  primed.get(key)?.destroy();
+  primed.delete(key);
 }
 
 function progressFraction(event: DownloadEvent): number {

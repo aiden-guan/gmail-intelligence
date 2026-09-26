@@ -1,6 +1,7 @@
 import { Brand, Pigeon } from '../ui/Pigeon';
 import { useState } from 'react';
 import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
+import { ProfileFields } from '../setup/ProfileFields';
 
 export function OnboardingApp() {
   const [step, setStep] = useState(0);
@@ -17,9 +18,9 @@ export function OnboardingApp() {
     <div className="gi-app flex min-h-full items-center justify-center px-6 py-16">
       <div className="gi-onboarding w-full max-w-[460px]">
         <Brand />
-        <div className="gi-welcome-pigeon"><Pigeon state={step === 2 ? 'opened' : 'idle'} size={176} /></div>
+        <div className="gi-welcome-pigeon"><Pigeon state={step === 3 ? 'opened' : 'idle'} size={176} /></div>
         <div className="gi-steps mb-6" aria-hidden="true">
-          {[0, 1, 2, 3].map((item) => (
+          {[0, 1, 2, 3, 4].map((item) => (
             <span key={item} data-on={item <= step ? 'true' : 'false'} />
           ))}
         </div>
@@ -41,6 +42,18 @@ export function OnboardingApp() {
           ) : null}
           {step === 1 ? (
             <>
+              <h1 className="gi-display">About you</h1>
+              <p className="gi-muted mt-3 text-[14px] leading-relaxed">Drafts are written as you and signed with your name. This stays on this computer.</p>
+              <div className="mt-6">
+                <ProfileFields voice={settings.voiceProfile} onChange={(voiceProfile) => setSettings({ ...settings, voiceProfile })} />
+              </div>
+              <button type="button" className="gi-btn mt-8" disabled={!settings.voiceProfile.name.trim()} onClick={() => setStep(2)}>
+                Continue
+              </button>
+            </>
+          ) : null}
+          {step === 2 ? (
+            <>
               <h1 className="gi-display">Choose AI</h1>
               <p className="gi-muted mt-3 text-[14px] leading-relaxed">Pick where summaries and drafts run. You can change this later.</p>
               <div className="mt-6 flex flex-col gap-2">
@@ -49,7 +62,7 @@ export function OnboardingApp() {
                   detail="Chrome’s built-in model, or a download you choose in Settings."
                   onClick={() => {
                     setSettings({ ...settings, aiMode: 'local', aiProvider: 'chrome', aiModel: 'gemini-nano' });
-                    setStep(2);
+                    setStep(3);
                   }}
                 />
                 <Choice
@@ -57,7 +70,7 @@ export function OnboardingApp() {
                   detail="Use a key from OpenAI or a compatible endpoint."
                   onClick={() => {
                     setSettings({ ...settings, aiMode: 'remote', aiProvider: 'openai' });
-                    setStep(2);
+                    setStep(3);
                   }}
                 />
                 <Choice
@@ -65,23 +78,23 @@ export function OnboardingApp() {
                   detail="Categories still work with local rules."
                   onClick={() => {
                     setSettings({ ...settings, aiMode: 'disabled' });
-                    setStep(2);
+                    setStep(3);
                   }}
                 />
               </div>
             </>
           ) : null}
-          {step === 2 ? (
+          {step === 3 ? (
             <>
               <h1 className="gi-display">Email tracking</h1>
               <p className="gi-muted mt-3 text-[14px] leading-relaxed">Tracking requires a public tracking endpoint.</p>
               <div className="mt-6 flex flex-col gap-2">
                 <Choice title="Configure now" detail="Open Settings and paste your tracker URL." onClick={() => chrome.runtime.openOptionsPage()} />
-                <Choice title="Skip for now" detail="You can turn tracking on after setup." onClick={() => setStep(3)} />
+                <Choice title="Skip for now" detail="You can turn tracking on after setup." onClick={() => setStep(4)} />
               </div>
             </>
           ) : null}
-          {step === 3 ? (
+          {step === 4 ? (
             <>
               <h1 className="gi-display">Ready</h1>
               <p className="gi-muted mt-3 text-[14px] leading-relaxed">Open Gmail. Categories and summaries show up as you read. Hide the card any time from its corner.</p>
