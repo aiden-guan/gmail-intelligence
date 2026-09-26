@@ -27,3 +27,4 @@ tmp/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.claude/

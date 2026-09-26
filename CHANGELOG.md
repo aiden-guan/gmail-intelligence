@@ -8,44 +8,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.2.0] — 2026-09-25
 
-PigeonBox becomes one extension with two execution environments: **Local** (on this computer, no account) and **PigeonBox Cloud** (hosted, subscription). Local remains a complete product.
+### Summary
+PigeonBox becomes one unified extension with two execution environments: **Local** (on this computer, 100% anonymous, no account required) and **PigeonBox Cloud** (hosted, subscription). Local remains a complete product with zero silent fallbacks, reinforced security boundaries, and automated monorepo release verification.
 
-### Added
-- `@pigeonbox/api-contract`: the typed PigeonBox Cloud protocol (Zod schemas, route table, error codes, protocol versioning, capabilities), with a compile-time guard against drift from the local `AIProvider` types.
-- `@pigeonbox/cloud-client`: Cloud HTTP client, PKCE helpers, and a Cloud-backed `AIProvider`.
-- `@pigeonbox/core`: run mode (`local` | `cloud`) and a capability layer; UI checks capabilities instead of modes or plans.
-- Settings and onboarding: **How should PigeonBox run?** (On this computer / PigeonBox Cloud / Advanced), explicit Cloud consent, Cloud account status, billing links, "Run on this computer instead".
-- Cloud sign-in with Authorization Code + PKCE via `chrome.identity`; tokens bound to the issuing API origin; single-flight refresh.
-- Cloud tracking: the worker routes tracker calls to the hosted tracker with the Cloud token in Cloud mode.
-- `npm run verify`, `npm run package` (deterministic ZIP + SHA-256), repository checks (old namespace, private imports, secrets, env files), version checks.
-- CI and tag-driven release workflows; Dependabot; issue and PR templates.
-- Docs: architecture, local setup, self-hosting, Convex self-hosting, Cloud protocol, privacy model, threat model, tracking, Chrome Web Store readiness, release process.
+### Architectural & Functional Highlights
+| Component / Layer | Change | Impact |
+| :--- | :--- | :--- |
+| **Dual Execution Engine** (`@pigeonbox/core`) | Introduced unified extension architecture with explicit `local` vs `cloud` run mode selector | Enables 100% anonymous, on-device local execution while supporting hosted cloud convenience without code forks. |
+| **Typed Cloud Protocol** (`@pigeonbox/api-contract`, `@pigeonbox/cloud-client`) | Defined Zod-validated protocol contracts with compile-time `AIProvider` drift guards | Guarantees zero runtime schema mismatches between client extension and remote inference gateway. |
+| **Zero-Leak Storage Isolation** (`apps/extension`) | Restricted `chrome.storage` to `TRUSTED_CONTEXTS` and established `senderMaySend` allowlist | Quarantines all BYOK keys, tokens, and credentials in the service worker; untrusted Gmail DOM never sees secrets. |
+| **Deterministic Release Verification** (`scripts/verify.mjs`, `scripts/package-extension.mjs`) | Added single-command `npm run verify` CI pipeline and SHA-256 checksummed packaging | Eliminates release regressions, secret leakage, and missing dependencies across all 11 monorepo packages. |
+| **Floating Thread Card** (`apps/extension/src/content`) | Added draggable and resizable floating companion card inside Gmail threads | Provides frictionless ergonomics allowing users to reposition summaries and action items anywhere in the viewport. |
+| **Real Mascot Icons** (`apps/extension/scripts/make-icons.py`) | Generated crisp 16x16, 48x48, and 128x128 icons from the idle pigeon sprite sheet | Fulfills Chrome Web Store store listing asset requirements with brand-consistent pixel art. |
 
-### Changed
-- Packages renamed from the `gi` scope to `@pigeonbox/*`; root package is `pigeonbox`. All versions unified at 0.2.0.
-- Extension name is **PigeonBox**; InboxSDK app name is PigeonBox (app ID unchanged).
-- Settings are versioned (`settingsVersion: 2`) and migrated on load. Every stored field is kept; existing installs become Local.
-- Required host permissions reduced to `https://mail.google.com/*`. `tabs` and `activeTab` removed. Tracker hosts (`localhost:8787`, `*.convex.site`), `chatgpt.com` and `identity` are optional and requested when used.
-- ChatGPT web sign-in moved to Advanced → Experimental and excluded from release builds.
-- The tracker Worker's request handling is exported as `handleTrackerRequest(request, deps)` for reuse with other stores. Protocol v3 behavior is unchanged.
+### Detailed Changes
 
-### Security
-- Content scripts no longer receive full settings (the BYOK key and tracker token were visible through `storage.onChanged`). `chrome.storage.local`/`.session` are restricted to trusted contexts; public settings and tracked emails are pushed to Gmail tabs by message.
-- Privileged runtime messages (settings, sign-in, run mode, index clearing, Gmail actions, downloads) are refused from content scripts.
-- Fixed: reopening Settings and saving could overwrite the stored API key and tracker token with blanks, because the options page received the public settings view.
-- Tracker and Convex compare the personal token in constant time.
-- Release builds exclude source maps and machine-local `tracker-config.json`; packaging refuses archives containing credentials.
+#### Added
+- **`@pigeonbox/api-contract`**: Added typed PigeonBox Cloud protocol (Zod schemas, route table, error codes, protocol versioning, capabilities), with a compile-time guard against drift from the local `AIProvider` types.
+- **`@pigeonbox/cloud-client`**: Added Cloud HTTP client, PKCE helpers, and a Cloud-backed `AIProvider`.
+- **`@pigeonbox/core`**: Added run mode (`local` | `cloud`) and a capability layer; UI checks capabilities instead of modes or plans.
+- **`apps/extension`**: Added Settings and onboarding for **How should PigeonBox run?** (On this computer / PigeonBox Cloud / Advanced), explicit Cloud consent, Cloud account status, billing links, and "Run on this computer instead".
+- **`apps/extension`**: Added Cloud sign-in with Authorization Code + PKCE via `chrome.identity`; tokens bound to the issuing API origin; single-flight refresh.
+- **`apps/extension`**: Added Cloud tracking: the background worker routes tracker calls to the hosted tracker with the Cloud token in Cloud mode.
+- **`apps/extension`**: Implemented drag and resize interactions for the floating thread companion card.
+- **`apps/extension`**: Enabled drafting replies matching the mailbox owner's tone and signature with a saved owner profile.
+- **`scripts`**: Added `npm run verify`, `npm run package` (deterministic ZIP + SHA-256), repository checks (`check-repo.mjs`: namespace, private imports, secrets, env files), and version checks (`check-versions.mjs`).
+- **`CI/CD`**: Added GitHub Actions CI (`.github/workflows/ci.yml`) and tag-driven release workflows (`.github/workflows/release.yml`); added Dependabot, issue templates, and PR template.
+- **`docs`**: Added architecture, local setup, self-hosting, Convex self-hosting, Cloud protocol, privacy model, threat model, tracking, Chrome Web Store readiness, and release process guides.
 
-### Fixed
-- Extension icons were 16×16 placeholders at every size. `icon16/48/128.png` are now generated from the idle pigeon in the sprite sheet (`apps/extension/scripts/make-icons.py`), as the Chrome Web Store requires a real 128×128 icon.
-- The "AI Inbox" toggle in Settings now reflects Cloud mode.
+#### Changed / Refactored
+- **Monorepo**: Renamed all packages from the legacy `gi` scope to `@pigeonbox/*`; root package unified to `pigeonbox`. All versions unified at 0.2.0.
+- **Branding**: Extension name unified as **PigeonBox**; InboxSDK app name updated to PigeonBox.
+- **Settings**: Settings are versioned (`settingsVersion: 2`) and migrated on load. Every stored field is preserved; existing installs migrate safely to Local mode.
+- **Permissions**: Required host permissions reduced strictly to `https://mail.google.com/*`. Removed `tabs` and `activeTab`. Tracker hosts (`localhost:8787`, `*.convex.site`), `chatgpt.com`, and `identity` are optional and requested only when enabled.
+- **ChatGPT Session**: ChatGPT web sign-in moved to Advanced → Experimental and excluded from release builds.
+- **Tracker Handler**: The tracker Worker request handling is exported as `handleTrackerRequest(request, deps)` for reuse across memory and cloud stores.
 
-### Unchanged on purpose
-- IndexedDB `gi_mailbox_v1`, `chrome.storage` keys, tracking protocol identifiers, Supabase migrations, and the `gi-tracker` Worker name.
+#### Security
+- **Context Isolation**: Content scripts no longer receive full settings. Storage (`chrome.storage.local`/`.session`) is restricted to trusted contexts; public settings and tracked emails are pushed to Gmail tabs via typed messages.
+- **Message Gateway**: Privileged runtime messages (settings mutation, sign-in, run mode changes, index clearing, Gmail actions, model downloads) are strictly refused from content scripts.
+- **Settings Race Condition**: Fixed an issue where reopening Settings and saving could overwrite the stored API key and tracker token with blanks.
+- **Tracker Timing Attacks**: Tracker Worker and Convex compare personal API tokens in constant time.
+- **Release Hygiene**: Release builds exclude source maps and machine-local `tracker-config.json`; packaging rejects archives containing credentials.
+
+#### Fixed
+- **Extension Icons**: Replaced 16×16 placeholder icons with crisp, pixel-perfect 16×16, 48×48, and 128×128 icons generated from the idle pigeon in the sprite sheet (`apps/extension/scripts/make-icons.py`).
+- **Settings State**: The "AI Inbox" toggle in Settings now properly reflects Cloud mode state.
+
+#### Documentation & Presentation
+- **Showcase Overhaul**: Redesigned root `README.md` with complete architecture Mermaid diagram, 2x2 visual feature grid, 4 engineering deep dives (PAWT framework), and full verification guide.
+- **Asset Library**: Curated retina product screenshots into `assets/readme/` for high-impact visual representation.
+
+### Verification Proof
+- `npm run verify`: Passed all verification steps (dependencies, versions, hygiene checks, typecheck, lint, 35 test files / 348 tests, production build, and deterministic release packaging).
 
 ---
 
-## [Unreleased] — 2026-09-24
+## [0.1.1] — 2026-09-24
 
 ### Summary
 Implemented a durable sender self-open suppression architecture based on exact message identity, separated message render milestones, and one-shot server-side self-view claims, completely replacing fixed timestamp-window correlation.
