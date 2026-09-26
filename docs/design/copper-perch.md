@@ -30,7 +30,7 @@ The standalone development fixture is `/src/preview/index.html` on the extension
 
 ## Mascot asset and motion
 
-Built-in Image Gen was used with the supplied Pixel Perch image as the identity reference. Output: `apps/extension/public/brand/pigeon-states.png` (1254 × 1254, alpha preserved). No raster edits were performed. CSS samples the four columns and optically aligned rows, preserving all 20 generated poses.
+Built-in Image Gen was used with the supplied Pixel Perch image as the identity reference. Source: `apps/extension/brand-src/pigeon-states.png` (1254 × 1254, alpha preserved). The sheet is not a regular grid, so `apps/extension/scripts/pack-pigeon.py` isolates each pose and repacks all 20 into `apps/extension/public/brand/pigeon-sprites.png`, a 4 × 5 grid of 320 × 256 cells sharing a body center and foot baseline.
 
 Four distinct frames each for idle, indexing, drafting, open detected and error. Status follows component data. Motion uses stepped frame changes rather than a CSS bounce of a still illustration. Reduced-motion preference freezes the first frame. Reduced transparency uses opaque backing surfaces.
 

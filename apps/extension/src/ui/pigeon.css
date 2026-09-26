@@ -1,4 +1,4 @@
-/* Each frame uses its measured source window; the outer box never changes. */
+/* Each frame is one 320x256 cell of the sprite grid; the outer box never changes. */
 .gi-pigeon {
   display: inline-block;
   position: relative;
@@ -9,11 +9,12 @@
 }
 .gi-pigeon-frame {
   position: absolute;
-  left: .03125em;
-  bottom: .025em;
-  width: .9375em;
+  left: 0;
+  bottom: .0125em;
+  width: 1em;
+  height: .8em;
   background-repeat: no-repeat;
-  background-size: 3.91875em 3.91875em;
+  background-size: 4em 4em;
   image-rendering: pixelated;
   visibility: hidden;
   animation: gi-pigeon-frame var(--pigeon-duration) steps(1, end) infinite;
