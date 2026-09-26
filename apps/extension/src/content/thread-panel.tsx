@@ -1,3 +1,4 @@
+import { Pigeon, type PigeonState } from '../ui/Pigeon';
 import { useState, type MouseEvent } from 'react';
 import { categoryLabel } from './chips';
 
@@ -67,6 +68,8 @@ export function ThreadIntelCard(props: {
   const modelFailed = !analyzing && (props.intel?.summary?.aiStatus === 'failed' || /failed|could not|too long/i.test(props.pending || ''));
   const line = presentSummary(summary || props.pending || 'No summary yet.');
   const waiting = !summary && Boolean(props.pending);
+  const pigeonState: PigeonState = props.drafting ? 'drafting' : modelFailed ? 'error' : waiting ? 'indexing' : props.tracking?.opened ? 'opened' : 'idle';
+  const pigeonLabel = props.drafting ? 'Finding the right words' : modelFailed ? 'Let’s try that again' : waiting ? 'Reading between the lines' : props.tracking?.opened ? 'An open was detected' : summaryReady ? 'The thread, untangled' : 'Ready when you are';
 
   function setMode(next: IslandMode) {
     if (props.mode == null) setUncontrolled(next);
@@ -90,7 +93,7 @@ export function ThreadIntelCard(props: {
           setMode('open');
         }}
       >
-        <span className="gi-mark" aria-hidden="true" />
+        <Pigeon state={pigeonState} size={30} />
         <span className="gi-pill-label">{category || 'Inbox'}</span>
         <span className={waiting ? 'gi-dot is-live' : needsReply ? 'gi-dot' : 'gi-dot is-quiet'} />
       </button>
@@ -109,13 +112,14 @@ export function ThreadIntelCard(props: {
       <div className="gi-core">
         <div className="gi-bar">
           <div className="gi-brand">
-            <span className="gi-mark" aria-hidden="true" />
-            <span className="gi-kicker">Intelligence</span>
+            <Pigeon state={pigeonState} size={30} />
+            <span className="gi-kicker">PigeonBox</span>
           </div>
           <button type="button" className="gi-hide" aria-label="Hide intelligence" onClick={() => setMode('docked')}>
             Hide
           </button>
         </div>
+        <div className="gi-thread-mascot"><Pigeon state={pigeonState} size={80} /><div><strong>{pigeonLabel}</strong><small>Your thread companion</small></div></div>
         <div className="gi-catrow">
           <div className="gi-cat">{category || 'Inbox'}</div>
           {props.intel?.manual ? <span className="gi-you">Set by you</span> : null}

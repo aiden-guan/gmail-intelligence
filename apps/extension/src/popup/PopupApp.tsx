@@ -1,3 +1,4 @@
+import { Brand, Pigeon } from '../ui/Pigeon';
 import { useEffect, useState } from 'react';
 import { requestExtensionReload } from '../reload-extension';
 
@@ -29,14 +30,13 @@ export function PopupApp() {
     <div className="gi-app w-[320px] p-3">
       <div className="gi-shell">
         <div className="gi-core">
-          <div className="flex items-center gap-2.5">
-            <span className="gi-mark" aria-hidden="true" />
-            <div>
-              <div className="gi-kicker">Gmail</div>
-              <div className="text-[15px] font-semibold tracking-[-0.03em]">Intelligence</div>
-            </div>
+          <Brand />
+          <div className="gi-perch">
+            <div><div className="gi-kicker">A little breathing room</div><h1>Less inbox.<br />More life.</h1><p>Your mail, in good wings.</p></div>
+            <Pigeon state={reloading ? 'indexing' : 'idle'} size={104} />
           </div>
-          <ul className="mt-3">
+          <div className="gi-section-label">Connections</div>
+          <ul className="gi-connections">
             <Status on={diag?.gmailTab === 'connected'} label={diag?.gmailTab === 'connected' ? 'Gmail connected' : 'Gmail not connected'} />
             <Status on={aiReady || aiOff} label={ai} />
             <Status on={trackingReady} label={tracking} />
@@ -46,7 +46,7 @@ export function PopupApp() {
               Open Gmail
             </button>
             <button type="button" className="gi-btn gi-btn-ghost gi-btn-block" onClick={() => void openInbox()}>
-              Open Inbox Intelligence
+              Inbox insights
             </button>
             <button type="button" className="gi-btn gi-btn-ghost gi-btn-block" onClick={() => chrome.runtime.openOptionsPage()}>
               Settings
@@ -63,7 +63,7 @@ export function PopupApp() {
               {reloading ? 'Reloading…' : 'Reload extension'}
             </button>
           </div>
-          <p className="gi-hint">Reload restarts the extension and refreshes Gmail. ⌘K opens commands.</p>
+          <p className="gi-hint"><kbd>⌘ K</kbd> Quick commands in Gmail</p>
         </div>
       </div>
     </div>

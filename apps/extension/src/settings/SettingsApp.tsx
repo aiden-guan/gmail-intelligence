@@ -1,3 +1,4 @@
+import { Brand, Pigeon } from '../ui/Pigeon';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { DEFAULT_SETTINGS, getProviderRequiredOrigin, type ExtensionSettings, type ThreadCategory } from '@gi/shared';
 import { trackerHealthLabel, trackerPermissionOrigin, type TrackerHealthStatus } from '@gi/tracking';
@@ -102,14 +103,11 @@ export function SettingsApp() {
           : settings.aiProvider;
 
   return (
-    <div className="gi-app min-h-full">
-      <div className="mx-auto flex max-w-[640px] flex-col gap-3 px-6 py-12">
-      <header className="mb-4 flex items-center gap-3">
-        <span className="gi-mark" aria-hidden="true" />
-        <div>
-          <div className="gi-kicker">Gmail Intelligence</div>
-          <h1 className="gi-display-sm">Settings</h1>
-        </div>
+    <div className="gi-app gi-settings min-h-full">
+      <div className="mx-auto flex max-w-[760px] flex-col gap-3 px-6 py-12">
+      <header className="gi-settings-header">
+        <Brand />
+        <div className="gi-settings-title"><div><div className="gi-kicker">Make yourself at home</div><h1 className="gi-display">Your perch.</h1><p className="gi-muted mt-3 text-sm">A few thoughtful defaults. The rest is up to you.</p></div><Pigeon size={116} /></div>
       </header>
 
       <Section title="General">
@@ -286,7 +284,7 @@ function Toggle(props: { label: string; checked: boolean; onChange: (on: boolean
 
 function Field(props: { label: string; children: ReactNode }) {
   return (
-    <label className="block text-xs text-[#9aa3b8]">
+    <label className="block text-xs text-[#aba99e]">
       {props.label}
       <div className="mt-1.5">{props.children}</div>
     </label>

@@ -1,3 +1,4 @@
+import { Brand, Pigeon } from '../ui/Pigeon';
 import { useState } from 'react';
 import { DEFAULT_SETTINGS, type ExtensionSettings } from '@gi/shared';
 
@@ -14,28 +15,25 @@ export function OnboardingApp() {
 
   return (
     <div className="gi-app flex min-h-full items-center justify-center px-6 py-16">
-      <div className="w-full max-w-[460px]">
+      <div className="gi-onboarding w-full max-w-[460px]">
+        <Brand />
+        <div className="gi-welcome-pigeon"><Pigeon state={step === 2 ? 'opened' : 'idle'} size={176} /></div>
         <div className="gi-steps mb-6" aria-hidden="true">
           {[0, 1, 2, 3].map((item) => (
             <span key={item} data-on={item <= step ? 'true' : 'false'} />
           ))}
         </div>
+        {step > 0 ? <button type="button" className="gi-text-btn mb-5" onClick={() => setStep(step - 1)}>← Back</button> : null}
         <div className="gi-step" key={step}>
           {step === 0 ? (
             <>
               <div className="mb-4 flex items-center gap-2">
-                <span className="gi-mark" aria-hidden="true" />
+
                 <span className="gi-kicker">Welcome</span>
               </div>
-              <h1 className="gi-display">Gmail Intelligence</h1>
-              <p className="gi-muted mt-4 text-[15px] leading-relaxed">Your inbox can now:</p>
-              <ul className="mt-3 list-disc space-y-2 pl-5 text-[15px]">
-                <li>organize mail</li>
-                <li>summarize threads</li>
-                <li>draft replies</li>
-                <li>remind you to follow up</li>
-                <li>track sent email</li>
-              </ul>
+              <h1 className="gi-display">A lighter inbox.<br />A little more you.</h1>
+              <p className="gi-muted mt-4 text-[15px] leading-relaxed">Meet PigeonBox, your companion for Gmail.</p>
+<p className="gi-muted mt-3 text-[14px] leading-relaxed">Catch the important bits, find the right words, and keep an eye on what happens next.</p>
               <button type="button" className="gi-btn mt-8" onClick={() => setStep(1)}>
                 Continue
               </button>

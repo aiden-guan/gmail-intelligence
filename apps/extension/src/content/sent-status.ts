@@ -373,7 +373,7 @@ function placeRowSlot(row: HTMLElement, existing: HTMLElement | null): HTMLEleme
 }
 
 function statusColor(row: Element, opened: boolean): string {
-  return opened ? (isDarkRow(row) ? '#c9c2ff' : '#5c4ed0') : isDarkRow(row) ? '#9aa0a6' : '#80868b';
+  return opened ? (isDarkRow(row) ? '#edbb93' : '#935023') : isDarkRow(row) ? '#9aa0a6' : '#80868b';
 }
 
 function isDarkRow(row: Element): boolean {
@@ -414,7 +414,7 @@ function renderSlot(
   color?: string,
 ): void {
   const copy = describeTrackingStatus(match, { trackerBaseUrl });
-  const ink = color || (copy.opened ? '#5c4ed0' : '#80868b');
+  const ink = color || (copy.opened ? '#935023' : '#80868b');
   const signature = `${match.trackingId}:${copy.opened}:${copy.countLabel}:${copy.markLabel}:${labeled}:${match.notifyIfNoReply}:${trackerBaseUrl}:${ink}`;
   if (slot.dataset.signature === signature && slot.querySelector('.gi-track-btn')) return;
   slot.dataset.signature = signature;

@@ -1,3 +1,4 @@
+import { Brand, Pigeon } from '../ui/Pigeon';
 import { useCallback, useEffect, useState } from 'react';
 import type { ExtensionSettings } from '@gi/shared';
 import { DEFAULT_SETTINGS } from '@gi/shared';
@@ -110,10 +111,7 @@ export function SidePanelApp() {
     <div className="gi-app flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden">
       <header className="px-4 pb-3 pt-4">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="gi-mark" aria-hidden="true" />
-            <span className="gi-kicker">Intelligence</span>
-          </div>
+          <Brand />
           <div className="gi-segbar shrink-0">
             <Tab active={mode === 'inbox'} onClick={() => setMode('inbox')}>
               Inbox
@@ -129,7 +127,7 @@ export function SidePanelApp() {
             </Tab>
           </div>
         </div>
-        <h1 className="mt-3 truncate text-[22px] font-medium tracking-[-0.04em]">{mode === 'ask' ? 'Ask' : label}</h1>
+        <div className="gi-panel-heading"><div><div className="gi-kicker">{mode === 'ask' ? 'A second pair of eyes' : 'A little focus goes a long way'}</div><h1>{mode === 'ask' ? 'Ask your inbox' : label}</h1></div><Pigeon state={loading ? 'indexing' : result?.error ? 'error' : 'idle'} size={78} /></div>
         {mode === 'inbox' ? (
           <p className="gi-muted mt-1 text-[12px]">{threads.length === 1 ? '1 thread' : `${threads.length} threads`}</p>
         ) : (
@@ -140,14 +138,14 @@ export function SidePanelApp() {
         <div className="flex min-h-0 flex-1 flex-col">
           <nav className="gi-rail" aria-label="Splits">
             {CATEGORIES.map(([id, name]) => (
-              <button key={id} type="button" className="gi-chip-btn" data-active={id === category} onClick={() => choose(id)}>
+              <button key={id} type="button" className="gi-chip-btn" aria-pressed={id === category} data-active={id === category} onClick={() => choose(id)}>
                 {name}
               </button>
             ))}
           </nav>
           <main className="min-h-0 flex-1 overflow-auto">
             {threads.length === 0 ? (
-              <p className="gi-muted px-4 text-[13px] leading-relaxed">Nothing here yet. Threads show up after Gmail loads them.</p>
+              <div className="gi-empty"><Pigeon size={138} /><h2>A quiet little corner.</h2><p>No threads in this view yet.<br />Open Gmail to bring your mail into view.</p></div>
             ) : (
               <ul className="gi-list">
                 {threads.map((thread) => (
@@ -157,7 +155,7 @@ export function SidePanelApp() {
                         <span className="truncate text-[13px] font-semibold tracking-[-0.02em]">{thread.sender}</span>
                         <span className="gi-time shrink-0">{when(thread.timestamp)}</span>
                       </div>
-                      <div className="mt-0.5 truncate text-[13px] text-[#dfe2ea]">{thread.subject || '(no subject)'}</div>
+                      <div className="mt-0.5 truncate text-[13px] text-[#e7e2d7]">{thread.subject || '(no subject)'}</div>
                       {thread.snippet ? <div className="gi-muted mt-0.5 truncate text-[12px]">{thread.snippet}</div> : null}
                       {thread.manual || thread.priority === 'HIGH' ? (
                         <div className="mt-1.5 flex gap-1.5">
@@ -179,7 +177,8 @@ export function SidePanelApp() {
             {settings.aiMode === 'disabled' ? <p className="gi-muted mb-3 text-[12px]">AI is off. Results are local matches.</p> : null}
             {result?.error ? <p className="gi-danger">{result.error}</p> : null}
             {result?.answer ? <p className="whitespace-pre-wrap text-[14px] leading-relaxed tracking-[-0.011em]">{result.answer}</p> : null}
-            {!result && !loading ? <p className="gi-muted text-[13px] leading-relaxed">Ask about a person, a promise, or a thread you already opened.</p> : null}
+            {!result && !loading ? <div className="gi-ask-start"><h2>What’s on your mind?</h2><p>Find a detail, catch up on a conversation, or remember what you promised.</p><div className="gi-suggestions">{['What needs a reply?', 'What did I promise this week?', 'Find upcoming deadlines'].map((prompt) => <button type="button" key={prompt} onClick={() => setQuery(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div></div> : null}
+            {loading ? <p className="gi-muted" role="status">Looking through your mail…</p> : null}
             {result?.citations?.length ? (
               <ul className="mt-4 space-y-2">
                 {result.citations.map((citation) => (
@@ -201,7 +200,8 @@ export function SidePanelApp() {
           >
             <input
               className="gi-field min-w-0 flex-1"
-              placeholder="Ask about mail on this computer"
+              aria-label="Ask about mail on this computer"
+              placeholder="Ask about your mail…"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
@@ -217,7 +217,7 @@ export function SidePanelApp() {
 
 function Tab(props: { active: boolean; onClick: () => void; children: string }) {
   return (
-    <button type="button" className="gi-seg" data-active={props.active} onClick={props.onClick}>
+    <button type="button" className="gi-seg" aria-pressed={props.active} data-active={props.active} onClick={props.onClick}>
       {props.children}
     </button>
   );

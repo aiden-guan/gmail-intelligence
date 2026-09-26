@@ -1,0 +1,26 @@
+/* Atlas coordinates preserve each generated pose without image processing.
+   Source: 1254 x 1254, four equal columns, five optically aligned rows. */
+.gi-pigeon {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 1em;
+  height: .82em;
+  background-repeat: no-repeat;
+  background-size: 4em 4em;
+  background-position: 0 -.12em;
+  image-rendering: pixelated;
+  animation: gi-pigeon-frames 3.8s steps(1, end) infinite;
+}
+.gi-pigeon[data-state='indexing'] { background-position-y: -.93em; animation-duration: 1.6s; }
+.gi-pigeon[data-state='drafting'] { background-position-y: -1.68em; animation-duration: 1.9s; }
+.gi-pigeon[data-state='opened'] { background-position-y: -2.48em; height: .76em; margin-block: .03em; animation-duration: 2.4s; }
+.gi-pigeon[data-state='error'] { background-position-y: -3.23em; height: .76em; margin-block: .03em; animation-duration: 2.8s; }
+@keyframes gi-pigeon-frames {
+  0%, 100% { background-position-x: 0; }
+  35% { background-position-x: -1em; }
+  55% { background-position-x: -2em; }
+  70% { background-position-x: -3em; }
+}
+.gi-brand-lockup { display:flex; align-items:center; gap:9px; color:#f4f0e8; font:600 16px/1.2 'Instrument Sans',system-ui,sans-serif; letter-spacing:-.035em; }
+.gi-brand-sub { display:block; margin-top:5px; color:#aba99e; font-size:10px; font-weight:400; letter-spacing:0; }
+@media (prefers-reduced-motion: reduce) { .gi-pigeon { animation: none; } }
